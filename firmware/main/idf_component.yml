@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.0'
+  ## mDNS responder: gives the panel a name instead of a DHCP address, so the
+  ## operator never has to hunt for the IP after provisioning.
+  ## espressif/mdns: '^1.2.0'   # re-enable once the component
+  ## manager can write C:\Users\<user>\AppData\Local\Espressif\ComponentManager\Cache
+  ## on this machine -- it currently fails with 'Permission denied'.
+  ## Opus codec for the audio link (see docs/HANDOVER 13.23).
+  esphome/micro-opus: '^0.3.6'

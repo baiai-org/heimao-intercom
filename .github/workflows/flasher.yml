@@ -1,0 +1,31 @@
+name: flasher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flasher/**"
+      - ".github/workflows/flasher.yml"
+  pull_request:
+    paths:
+      - "flasher/**"
+      - ".github/workflows/flasher.yml"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build/test dependencies
+        run: python -m pip install -r flasher/requirements-build.txt
+      - name: Offline parser and plan tests
+        run: python flasher/test_flasher.py
+      - name: Build the public EXE (no embedded firmware)
+        run: powershell -ExecutionPolicy Bypass -File flasher/build.ps1 -Python python -OutputDirectory dist/flasher -SkipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flasher-exe
+          path: dist/flasher/*.exe

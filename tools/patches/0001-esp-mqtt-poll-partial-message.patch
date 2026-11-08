@@ -1,0 +1,15 @@
+--- a/components/mqtt/esp-mqtt/mqtt_client.c
++++ b/components/mqtt/esp-mqtt/mqtt_client.c
+@@ -1,2 +1,10 @@
+-    /* non-blocking receive in order not to block other tasks */
+-    int recv = mqtt_message_receive(client, 0);
++    /*
++     * LOCAL PATCH (OpenRadioLink): poll 0 ms only when no message is in flight.
++     * Over a high-RTT link the broker's write is routinely split across two TCP
++     * segments; the original 0 ms poll read the first fragment, polled again
++     * immediately, saw no new bytes and aborted the connection with
++     * "Network timeout while reading MQTT message" -- seen as a reconnect every
++     * ~10 s while a subscriber received a live audio stream.
++     */
++    int recv = mqtt_message_receive(client,
++                                    client->mqtt_state.in_buffer_read_len ? 1000 : 0);

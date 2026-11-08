@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title data-hm-title="扬声器诊断">黑猫控制面板 · 扬声器诊断</title><link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/brand-icon.png"><script src="/brand.js"></script>
+<style>
+:root{color-scheme:dark}body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui,sans-serif}
+main{max-width:850px;margin:auto;padding:24px}h1{font-size:25px}p{line-height:1.7;color:#bfced8}
+.actions{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}button,a{font:inherit;border:1px solid #526573;border-radius:8px;padding:12px;background:#20313d;color:#e5edf3;text-decoration:none;cursor:pointer}
+button:disabled{opacity:.45;cursor:wait}#notice{color:#88d4c5;min-height:28px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#17232c;padding:16px;border-radius:8px;font-size:13px}
+</style><main><h1><img src="/brand-icon.png" alt="" style="width:36px;height:36px;border-radius:10px;vertical-align:middle;margin-right:10px">手台扬声器诊断</h1>
+<p>先点“记录下一次收听”，再按你现有的电台设置说话约 5 秒。记录完成后松开手台，点“重放录音”，比较本机重放与刚才收听的破音、沙沙声。</p>
+<p>测试仅从本机喇叭播放，最长 5 秒，随后自动恢复收听。播放测试期间 PTT 暂不可用。诊断不改动音量和电台设置；录音保存在内存，重启清除。</p>
+<p>比较持续“噗噗声”：依次播放“数字静音”和“DAC 内部静音”，每项 3 秒。两项都保持时钟运行、功放开启，第二项只增加 DAC 芯片内部静音；留意整段中的声音，分别反馈。结束后会读回确认 DAC 恢复。</p>
+<div class="actions">
+<button data-op="arm">记录下一次收听（5 秒）</button>
+<button data-op="replay">重放录音（最多 5 秒）</button>
+<button data-op="silence">播放数字静音（3 秒）</button>
+<button data-op="dacmute">播放 DAC 内部静音（3 秒）</button>
+<button data-op="tone">播放低电平 1 kHz 音（3 秒）</button>
+<button data-op="stop">停止测试</button>
+</div><div id="notice" role="status"></div>
+<div class="actions"><a href="/api/speaker_pcm?path=common">下载公共收听录音</a><a href="/api/speaker_pcm?path=local">下载本机待播录音</a><a href="/">返回控制面板</a></div>
+<pre id="state">正在读取诊断状态…</pre>
+<div class="actions"><button id="read-hardware">读取芯片配置（停止测试后）</button></div>
+<pre id="hardware">按上方按钮读取芯片配置；播放过程中不会读取。</pre></main>
+<script src="/app-control.js"></script>
+<script>
+const notice=document.getElementById('notice'),state=document.getElementById('state');
+const buttons=[...document.querySelectorAll('button[data-op]')];
+const readHardware=document.getElementById('read-hardware'),hardware=document.getElementById('hardware');
+let commandBusy=false;
+async function refresh(){
+  try{const r=await fetch('/api/speaker_diag',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);state.textContent=JSON.stringify(await r.json(),null,2)}
+  catch(e){state.textContent='诊断连接失败：'+e.message}
+}
+buttons.forEach(button=>button.addEventListener('click',async()=>{
+  if(commandBusy)return;commandBusy=true;buttons.forEach(b=>b.disabled=true);
+  try{
+    const ms=['arm','replay'].includes(button.dataset.op)?5000:3000;
+    const r=await fetch('/api/speaker_diag?op='+button.dataset.op+'&ms='+ms,{method:'POST',cache:'no-store'});
+    const result=await r.json();if(!r.ok||!result.ok)throw Error(result.err||'HTTP '+r.status);
+    notice.textContent='已执行：'+button.textContent;await refresh();
+  }catch(e){notice.textContent='未执行：'+e.message+'；请确认守听已开启、PTT 空闲、没有其他预览。'}
+  finally{commandBusy=false;buttons.forEach(b=>b.disabled=false)}
+}));
+readHardware.addEventListener('click',async()=>{
+  readHardware.disabled=true;
+  try{
+    const r=await fetch('/api/speaker_hw',{cache:'no-store'}),d=await r.json();
+    if(!r.ok||!d.ok)throw Error(d.err||'芯片读取失败（'+d.error+'）');
+    hardware.textContent='时钟与格式寄存器'+(d.clock_format_match?'符合':'不符合')+'本版配置（不代表已测量引脚波形）\n'+
+      Object.entries(d.registers).map(([k,v])=>'REG '+k+' = 0x'+v.toString(16).padStart(2,'0')).join('\n');
+  }catch(e){hardware.textContent=e.message}
+  finally{readHardware.disabled=false}
+});
+(async function poll(){await refresh();setTimeout(poll,1500)})();
+</script></html>

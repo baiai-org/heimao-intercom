@@ -1,0 +1,36 @@
+diff --git a/mqtt_client.c b/mqtt_client.c
+index bcd1a74..0d48e90 100644
+--- a/mqtt_client.c
++++ b/mqtt_client.c
+@@ -1,4 +1,5 @@
+ #include <stdint.h>
++#include "freertos/idf_additions.h"   /* xTaskCreateWithCaps (local patch) */
+ #include <stdlib.h>
+ #include "esp_err.h"
+ #include "esp_log.h"
+@@ -1769,9 +1783,22 @@ esp_err_t esp_mqtt_client_start(esp_mqtt_client_handle_t client)
+     }
+ #else
+     ESP_LOGD(TAG, "Core selection disabled");
+-    if (xTaskCreate(esp_mqtt_task, "mqtt_task", client->config->task_stack, client, client->config->task_prio, &client->task_handle) != pdTRUE) {
+-        ESP_LOGE(TAG, "Error create mqtt task");
+-        err = ESP_FAIL;
++    /*
++     * LOCAL PATCH (OpenRadioLink): the 12 KB MQTT stack is the single biggest
++     * allocation the relay engine takes from internal RAM, and internal RAM is
++     * the scarce resource on this board (16 kHz/20 ms Opus leaves ~20 KB free
++     * while relaying, against ~30 KB in NET-P2P).  Put the stack in PSRAM.
++     *
++     * Known cost: the task exits with vTaskDelete(NULL) when the client is
++     * destroyed (every mode switch), which does not release a PSRAM stack
++     * created this way -- 12 KB per switch, cleared by the next reboot.
++     */
++    if (xTaskCreateWithCaps(esp_mqtt_task, "mqtt_task", client->config->task_stack, client, client->config->task_prio, &client->task_handle, MALLOC_CAP_SPIRAM) != pdTRUE) {
++        ESP_LOGW(TAG, "PSRAM stack failed, falling back to internal RAM");
++        if (xTaskCreate(esp_mqtt_task, "mqtt_task", client->config->task_stack, client, client->config->task_prio, &client->task_handle) != pdTRUE) {
++            ESP_LOGE(TAG, "Error create mqtt task");
++            err = ESP_FAIL;
++        }
+     }
+ #endif
+     MQTT_API_UNLOCK(client);

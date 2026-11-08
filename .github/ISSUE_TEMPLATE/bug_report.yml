@@ -1,0 +1,45 @@
+name: Bug report
+description: 报告可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有 Issue。安全漏洞请发邮件 mail@baiai.org，不要公开。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 固件版本串（如 r11-83）、APP versionCode、刷机工具版本
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: 硬件
+      description: 板卡/模组、频段、供电、天线、USB 线
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 附日志/截图；请先删除 IP、device_id、密码、序列号
+    validations:
+      required: true

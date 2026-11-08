@@ -1,0 +1,4074 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title data-hm-title="">黑猫控制面板</title><link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/brand-icon.png"><script src="/brand.js"></script>
+<style>
+:root {
+  --bg-0: #06090f;
+  --bg-1: #0b111e;
+  --bg-2: #111a2e;
+  --bg-3: #17233d;
+  --line: #1e2d4a;
+  --line-hi: #314b7a;
+  --fg: #f1f5f9;
+  --fg-2: #cbd5e1;
+  --dim: #7c90b0;
+  --muted: #4e6180;
+  --cyan: #00e5ff;
+  --cyan-dim: rgba(0, 229, 255, 0.13);
+  --cyan-glow: rgba(0, 229, 255, 0.35);
+  --emerald: #10b981;
+  --emerald-dim: rgba(16, 185, 129, 0.14);
+  --amber: #f59e0b;
+  --amber-dim: rgba(245, 158, 11, 0.15);
+  --rose: #f43f5e;
+  --rose-dim: rgba(244, 63, 94, 0.18);
+  --mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-0);
+  background-image:
+    radial-gradient(ellipse 900px 420px at 18% -8%, rgba(0, 229, 255, 0.10), transparent 65%),
+    radial-gradient(ellipse 800px 380px at 85% -5%, rgba(16, 185, 129, 0.08), transparent 60%),
+    linear-gradient(180deg, #080d17 0%, #06090f 100%);
+  background-attachment: fixed;
+  color: var(--fg);
+  font: 13.5px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.014) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.014) 1px, transparent 1px);
+  background-size: 32px 32px;
+  z-index: 0;
+}
+
+/* ==================== TOP COMMAND HEADER ==================== */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  background: rgba(8, 13, 23, 0.88);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+}
+.topbar-inner {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 10px 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(0,229,255,0.22), rgba(59,130,246,0.12));
+  border: 1px solid rgba(0,229,255,0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 16px rgba(0,229,255,0.16);
+  flex-shrink: 0;
+}
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--emerald);
+  box-shadow: 0 0 10px var(--emerald);
+  transition: all 0.25s;
+}
+.brand-text h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-ver {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--cyan);
+  background: var(--cyan-dim);
+  border: 1px solid rgba(0,229,255,0.32);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.brand-sub {
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.telemetry-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.pill.up {
+  background: rgba(16, 185, 129, 0.11);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+.pill.down {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.45);
+  color: #fb7185;
+}
+.pill.cyan {
+  background: var(--cyan-dim);
+  border-color: rgba(0, 229, 255, 0.35);
+  color: var(--cyan);
+}
+
+/* ==================== MAIN WORKSPACE ==================== */
+.workspace {
+  position: relative;
+  z-index: 1;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 18px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ==================== HERO TRANSCEIVER DECK ==================== */
+.hero-deck {
+  display: grid;
+  grid-template-columns: 1.22fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.lcd-cockpit {
+  background: linear-gradient(165deg, #0b1426 0%, #070b14 100%);
+  border: 1px solid #24385c;
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 0 40px rgba(0, 229, 255, 0.03),
+    0 12px 32px -8px rgba(0,0,0,0.65);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 13px;
+  position: relative;
+  overflow: hidden;
+}
+.lcd-cockpit::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 20px; right: 20px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0.45;
+}
+
+.lcd-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lcd-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: var(--cyan);
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.lcd-tag::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+}
+.lcd-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tag-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(30, 45, 74, 0.55);
+  border: 1px solid var(--line);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.tag-chip.live {
+  background: var(--emerald-dim);
+  border-color: rgba(16, 185, 129, 0.42);
+  color: #34d399;
+}
+.tag-chip.tx {
+  background: var(--rose-dim);
+  border-color: rgba(244, 63, 94, 0.55);
+  color: #fb7185;
+  font-weight: 700;
+}
+
+/* Dual VFO Readouts */
+.vfo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.vfo-cell {
+  background: rgba(4, 7, 13, 0.76);
+  border: 1px solid #1b2b46;
+  border-radius: var(--radius-md);
+  padding: 11px 14px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.vfo-cell.active-rx {
+  border-color: rgba(16, 185, 129, 0.55);
+  box-shadow: inset 0 0 20px rgba(16, 185, 129, 0.08);
+}
+.vfo-cell.active-tx {
+  border-color: rgba(244, 63, 94, 0.65);
+  box-shadow: inset 0 0 24px rgba(244, 63, 94, 0.12);
+}
+.vfo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.vfo-role {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.vfo-role.rx {
+  background: var(--emerald-dim);
+  color: #34d399;
+  border: 1px solid rgba(16,185,129,0.3);
+}
+.vfo-role.tx {
+  background: var(--rose-dim);
+  color: #fb7185;
+  border: 1px solid rgba(244,63,94,0.3);
+}
+.vfo-subtone {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+.vfo-digits {
+  font-family: var(--mono);
+  font-size: clamp(22px, 2.5vw, 30px);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #fff;
+  line-height: 1.15;
+  text-shadow: 0 0 18px rgba(0, 229, 255, 0.22);
+  font-variant-numeric: tabular-nums;
+}
+.vfo-digits small {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--cyan);
+  margin-left: 4px;
+}
+
+.vfo-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 11px;
+  background: rgba(17, 26, 46, 0.55);
+  border: 1px solid #1a2944;
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-2);
+}
+
+/* Segmented S-Meter & Audio VU Meter */
+.meters-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(4, 7, 13, 0.68);
+  border: 1px solid #18253d;
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+.meter-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 56px;
+  align-items: center;
+  gap: 10px;
+}
+.meter-lbl {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dim);
+}
+.seg-meter {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 2.5px;
+  height: 11px;
+  padding: 2px;
+  background: #05080e;
+  border: 1px solid #19263e;
+  border-radius: 4px;
+}
+.seg-meter b {
+  display: block;
+  border-radius: 1.5px;
+  background: #131d30;
+  transition: background-color 0.12s, box-shadow 0.12s;
+}
+.seg-meter b.on.g { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.55); }
+.seg-meter b.on.y { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.55); }
+.seg-meter b.on.r { background: #f43f5e; box-shadow: 0 0 7px rgba(244,63,94,0.65); }
+.bar-compat { display: none; }
+.meter-val {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  text-align: right;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Telemetry 8-Cell Matrix */
+.kv-matrix {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+.kv-item {
+  background: rgba(14, 22, 38, 0.78);
+  border: 1px solid #1a2842;
+  border-radius: 7px;
+  padding: 6px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kv-item span {
+  font-size: 10.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kv-item b {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Right: Mode Switcher, PTT Dispatch & Network/Bridge Hub */
+.dispatch-cockpit {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  box-shadow: 0 12px 32px -8px rgba(0,0,0,0.55);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+#ixSeg {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+#ixSeg button {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+  color: var(--fg-2);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  transition: all 0.16s ease;
+  text-align: left;
+  min-height: 52px;
+}
+#ixSeg button:hover {
+  border-color: var(--line-hi);
+  background: var(--bg-3);
+}
+#ixSeg button .m-code {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+#ixSeg button .m-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg);
+}
+#ixSeg button.on[data-m="0"] {
+  background: linear-gradient(145deg, rgba(16,185,129,0.20), rgba(16,185,129,0.06));
+  border-color: #10b981;
+  box-shadow: 0 0 18px rgba(16,185,129,0.18);
+}
+#ixSeg button.on[data-m="0"] .m-code,
+#ixSeg button.on[data-m="0"] .m-title { color: #34d399; }
+
+#ixSeg button.on[data-m="1"] {
+  background: linear-gradient(145deg, rgba(167,139,250,0.22), rgba(167,139,250,0.06));
+  border-color: #a78bfa;
+  box-shadow: 0 0 18px rgba(167,139,250,0.18);
+}
+#ixSeg button.on[data-m="1"] .m-code,
+#ixSeg button.on[data-m="1"] .m-title { color: #a78bfa; }
+
+#ixSeg button.on[data-m="2"] {
+  background: linear-gradient(145deg, rgba(245,158,11,0.22), rgba(245,158,11,0.06));
+  border-color: var(--amber);
+  box-shadow: 0 0 18px rgba(245,158,11,0.18);
+}
+#ixSeg button.on[data-m="2"] .m-code,
+#ixSeg button.on[data-m="2"] .m-title { color: #fbbf24; }
+
+.np2p-pub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border: 1px solid #2c2350;
+  border-radius: 7px;
+}
+/* one plain-text run per box ("addr:port"), so it selects and copies normally */
+.np2p-pub .np2p-ip {
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #a78bfa;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+.np2p-nat { font-size: 11.5px; color: var(--dim); }
+/* IPv6 row: identical box, sits right under the IPv4 row */
+.np2p-pub.np2p-pub6 {
+  margin-top: 4px;
+  padding: 5px 10px;
+}
+.np2p-pub.np2p-pub6 .np2p-ip {
+  font-size: 19px;
+  letter-spacing: 0.01em;
+}
+.np2p-pub.np2p-pub6 .np2p-port {
+  font-size: 19px;
+}
+.np2p-pub.np2p-pub6 .np2p-ip.np2p-empty {
+  color: var(--dim);
+  font-weight: 600;
+}
+.np2p-nat.warn { color: var(--amber); }
+.np2p-nat.bad { color: var(--rose); }
+.np2p-huboff {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--rose);
+  padding: 3px 8px;
+  border: 1px solid rgba(244,63,94,0.4);
+  border-radius: 6px;
+  background: rgba(244,63,94,0.08);
+}
+.np2p-peerrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  flex-wrap: wrap;
+}
+.np2p-peerrow .np-name { color: var(--fg); font-weight: 700; min-width: 64px; }
+.np2p-peerrow .np-addr { color: var(--fg-2); }
+.np2p-peerrow .np-st { min-width: 46px; }
+.np2p-peerrow .np-st.linked { color: var(--emerald); font-weight: 700; }
+.np2p-peerrow .np-st.knocking { color: var(--amber); }
+.np2p-peerrow .np-meta { color: var(--dim); flex: 1; }
+
+.ptt-console {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ptt-main-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+button.tx {
+  flex: 1;
+  background: linear-gradient(135deg, #881337 0%, #be123c 100%);
+  border: 1px solid #f43f5e;
+  border-radius: 9px;
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 12px 16px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(244, 63, 94, 0.28), inset 0 1px 0 rgba(255,255,255,0.2);
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+button.tx:hover {
+  background: linear-gradient(135deg, #9f1239 0%, #e11d48 100%);
+}
+button.tx.live {
+  background: linear-gradient(135deg, #e11d48 0%, #f43f5e 100%);
+  border-color: #fda4af;
+  box-shadow: 0 0 24px rgba(244, 63, 94, 0.65);
+  animation: pttPulse 0.9s infinite alternate;
+}
+@keyframes pttPulse {
+  from { opacity: 1; box-shadow: 0 0 16px rgba(244,63,94,0.5); }
+  to { opacity: 0.78; box-shadow: 0 0 28px rgba(244,63,94,0.9); }
+}
+.ptt-sub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.secs-Quick {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.secs-Quick button {
+  padding: 4px 9px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+}
+/* "仅网络" / "网络 + 本机射频" toggle under the PTT button */
+#rfSeg button.on {
+  border-color: #a78bfa;
+  color: #c4b5fd;
+  background: linear-gradient(145deg, rgba(167,139,250,0.22), rgba(167,139,250,0.06));
+  box-shadow: 0 0 12px rgba(167,139,250,0.18);
+}
+
+.mode-stage {
+  background: rgba(8, 12, 21, 0.78);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.stage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid rgba(30,45,74,0.75);
+  padding-bottom: 6px;
+  flex-wrap: wrap;
+}
+.stage-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--cyan);
+}
+.topo-flow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid #1d2c46;
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  flex-wrap: wrap;
+}
+.topo-node {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+}
+.topo-arrow { color: var(--cyan); font-weight: 700; }
+
+/* ==================== MOBILE MODULE NAVIGATION TABS ==================== */
+.mobile-nav {
+  display: none;
+}
+
+/* ==================== 3-COLUMN INSTRUMENT RACK ==================== */
+.rack-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  /* stretch, not start: the three instrument cards must end on the same line
+   * even though their contents differ in height (verified: bottoms went from
+   * 1485/1420/1457 to a common 1591). */
+  align-items: stretch;
+}
+/* Cards are columns so the last block can be pushed to the bottom edge. */
+.rack-grid > .card {
+  display: flex;
+  flex-direction: column;
+}
+/* The last block is a footer (list/table), but a form row is not: with the DCS
+ * rows last, the auto margin pushed "└ 数码 RX" to the bottom of a tall card. */
+.rack-grid > .card > :last-child:not(.row):not(.sec-label) { margin-top: auto; }
+.rack-grid > .card > .row:last-child { margin-top: 9px; }
+/* The memory list is the card's body, not a footer: it fills whatever height is
+ * left and scrolls at the card's bottom edge.  Without this, the `margin-top:
+ * auto` above pushed it down and left a 142 px hole above the rows while the
+ * list still scrolled (measured on the real page). */
+.rack-grid > .card > .ch-list {
+  /* basis 0, not auto: with `auto` the list's content sets the intrinsic
+   * height of the whole grid row, so 99 channels stretched the three-card row
+   * to thousands of pixels.  With 0 the row is sized by its tallest sibling
+   * (the audio card) and the list scrolls inside that fixed window. */
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  margin-top: 10px;
+}
+.bottom-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  box-shadow: 0 10px 28px -6px rgba(0,0,0,0.5);
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: var(--line-hi); }
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--line);
+}
+.card h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card h2 i {
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+}
+
+/* DCS rows carry two controls; with the 92px label they used to wrap and the
+   code select dropped under its own label. */
+#dtxRow, #drxRow { flex-wrap: nowrap; }
+#atxRow > label, #arxRow > label, #dtxRow > label, #drxRow > label { flex: 0 0 72px; }
+#dtxRow > select, #drxRow > select { min-width: 0; }
+#dtxRow > select:last-child, #drxRow > select:last-child { flex: 0 0 76px; }
+@media (max-width: 420px) {
+  #atxRow, #arxRow, #dtxRow, #drxRow { flex-wrap: wrap; }
+  #atxRow > label, #arxRow > label, #dtxRow > label, #drxRow > label { flex: 1 0 100%; }
+  #dtxRow > select, #drxRow > select,
+  #atxRow > select, #arxRow > select { flex: 1 0 100%; }
+}
+
+/* Form Rows & Inputs */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 9px 0;
+}
+.row label {
+  flex: 0 0 92px;
+  color: var(--dim);
+  font-size: 12.5px;
+  font-weight: 500;
+  user-select: none;
+}
+.row .val {
+  flex: 0 0 58px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+input[type=number],
+input[type=text],
+input[type=search],
+input[type=password],
+select {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-0);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input[type=number]:focus,
+input[type=text]:focus,
+input[type=search]:focus,
+input[type=password]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(0,229,255,0.15);
+}
+
+/* Shared handset name: compact strip inside the LCD deck. The input keeps
+ * the global input[type=text] skin; the hint lives in its tooltip and the
+ * result line only takes space once there is a message. */
+.name-plate {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  background: rgba(8, 12, 21, 0.78);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+.name-plate .stage-head { margin: 0; padding-bottom: 6px; }
+.name-plate-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.name-plate input[type=text] {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.name-plate button {
+  padding: 5px 11px;
+  font-size: 11.5px;
+}
+.name-plate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.name-plate-meta #handsetUse { color: var(--cyan); }
+.name-plate #handsetNameResult {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.name-plate #handsetNameResult:empty { display: none; }
+/* Chrome draws its own magnifier/clear glyphs on type=search; they are light
+ * grey on white and ignore the theme entirely. */
+input[type=search]::-webkit-search-decoration,
+input[type=search]::-webkit-search-cancel-button,
+input[type=search]::-webkit-search-results-button {
+  -webkit-appearance: none;
+  display: none;
+}
+
+/* ---------------------------------------------------------------- files */
+/* A native <input type=file> renders the browser's own "choose file" button,
+ * which ignores the panel theme (that is the two grey 选择文件 buttons that
+ * looked out of place).  The input is hidden and this label is the control. */
+.file-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px;
+  min-height: 38px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+/* .row label is `flex: 0 0 92px`, which is right for "发射频率 TX" but clipped
+ * the picker to 92 px.  Higher specificity, so the picker takes the row. */
+.row > .file-pick { flex: 1 1 auto; min-width: 150px; }
+.file-pick:hover { border-color: var(--line-hi); }
+.file-pick:focus-within {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(0,229,255,0.15);
+}
+.file-pick input[type=file] { display: none; }
+.file-pick .pick-chip {
+  flex: none;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  white-space: nowrap;
+  transition: all 0.14s ease;
+}
+.file-pick:hover .pick-chip {
+  background: var(--bg-3);
+  color: #fff;
+  border-color: var(--line-hi);
+}
+.file-pick .pick-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-pick.has-file .pick-name { color: var(--cyan); }
+
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 7px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--cyan);
+  border: 2px solid #06090f;
+  box-shadow: 0 0 8px var(--cyan-glow);
+  cursor: pointer;
+}
+
+button {
+  background: var(--bg-2);
+  color: var(--fg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.14s ease;
+}
+button:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: #fff;
+  border-color: var(--line-hi);
+}
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.pri {
+  background: var(--cyan-dim);
+  border-color: rgba(0, 229, 255, 0.42);
+  color: var(--cyan);
+}
+button.pri:hover:not(:disabled) {
+  background: rgba(0, 229, 255, 0.22);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+}
+button.ok-btn {
+  background: var(--emerald-dim);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.step-strip {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
+  margin: 6px 0 10px;
+}
+.step-strip button {
+  padding: 5px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.sec-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+  margin: 13px 0 7px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.subcard {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.subcard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+/* ==================== MEMORY BANK CHANNELS ==================== */
+.ch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+  max-height: 390px;
+  overflow-y: auto;
+  padding-right: 2px;
+  /* Always-visible scrollbar: with 99 slots the list is often longer than the
+   * window, and a scrollbar that fades out makes the card look truncated. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-hi) transparent;
+  scrollbar-gutter: stable;
+}
+.ch-list::-webkit-scrollbar { width: 8px; }
+.ch-list::-webkit-scrollbar-track { background: transparent; }
+.ch-list::-webkit-scrollbar-thumb {
+  background: var(--line-hi);
+  border-radius: 4px;
+}
+.ch-list::-webkit-scrollbar-thumb:hover { background: var(--cyan); }
+.chrow {
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.chhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chidx {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cyan);
+  background: var(--cyan-dim);
+  border: 1px solid rgba(0,229,255,0.28);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.chname {
+  flex: 1;
+  font-weight: 700;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chdata {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+/* RX first, and it is the frequency the operator listens to, so it leads. */
+.chdata .chrx {
+  font-size: 14.5px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: 0.2px;
+}
+.chdata .chtx {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dim);
+}
+.chdata .chunit {
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.chdata2 {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+.chrow button {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+
+/* ==================== 6-BAND PARAMETRIC EQ MIXER ==================== */
+.eq-Curve-box {
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 8px 10px 6px;
+  margin-bottom: 12px;
+}
+.eq-svg {
+  width: 100%;
+  height: 78px;
+  display: block;
+}
+.eq-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.eq-dir-seg {
+  display: inline-flex;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+.eq-dir-seg button {
+  border: none;
+  background: transparent;
+  padding: 5px 11px;
+  font-size: 12px;
+  border-radius: 5px;
+}
+.eq-dir-seg button.on {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+}
+.eq-presets {
+  display: inline-flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.eq-presets button {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+
+.eq-fader-bank {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 12px 10px;
+}
+.eq-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.eq-col .val {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--cyan);
+}
+.eq-fader-wrap {
+  height: 116px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.eq-fader-wrap input[type=range] {
+  width: 104px;
+  height: 7px;
+  transform: rotate(-90deg);
+  flex: none;
+}
+.eq-freq-lbl {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-2);
+}
+.eq-band-name {
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+/* ==================== EVENT TERMINAL ==================== */
+#log {
+  font: 11.5px/1.55 var(--mono);
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  height: 235px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--fg-2);
+}
+.err { color: #fb7185; }
+.good { color: #34d399; }
+.hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 6px 0 0;
+  line-height: 1.45;
+}
+
+/* ==================== STICKY MOBILE BOTTOM PTT DOCK ==================== */
+.mobile-dock {
+  display: none;
+}
+
+/* ==================== TABLET & MOBILE ADAPTATION ==================== */
+@media (max-width: 1180px) {
+  .hero-deck { grid-template-columns: 1fr; }
+  .rack-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bottom-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .topbar-inner { padding: 8px 12px; gap: 8px; }
+  .brand-sub { display: none; }
+  /*
+   * These grid items were `min-width: auto`, so one wide child (the VFO row,
+   * the S-meter, the kv grid) pushed the whole page to ~554 px on a 390 px
+   * phone and the right-hand side was cut off by the viewport.  Nothing
+   * overflows horizontally now; panels that genuinely need more room (the EQ
+   * strip, wide tables) scroll inside their own card instead.
+   */
+  .hero-deck > *, .lcd-cockpit, .dispatch-cockpit,
+  .rack-grid > .card, .bottom-grid > .card,
+  .card, .mode-stage, .subcard { min-width: 0; }
+  .rack-grid, .bottom-grid { grid-template-columns: 1fr; }
+  /*
+   * The memory list is a fixed window on the desktop because the grid row is
+   * stretched to the tallest card and `flex: 1 1 0` fills it.  Stacked on a
+   * phone there is no taller sibling to stretch to, so the same rule collapsed
+   * it to zero height: the card showed the name row and the search box and
+   * nothing else.  Give it a height the phone can use, and let it scroll.
+   */
+  .rack-grid > .card > .ch-list {
+    flex: 0 0 auto;
+    height: 46vh;
+    min-height: 260px;
+    max-height: 420px;
+  }
+  .card, .mode-stage { overflow-x: auto; }
+  /* Long monospace status/diagnostic lines wrap instead of stretching.  Not
+   * #upPill: "16m5s · 7799KB" wrapped per character and read as a vertical
+   * column; the telemetry strip scrolls horizontally anyway. */
+  #ixDiag2, #ixState2, .np2p-ip { white-space: normal; word-break: break-word; }
+  /* IPv6 is 39 monospace characters: at 19 px it cannot fit a phone.  The base
+   * rule is `.np2p-pub .np2p-ip` (specificity 0,2,0), so this needs at least
+   * the same weight -- the earlier `.np2p-ip` override simply lost. */
+  .np2p-pub .np2p-ip,
+  .np2p-pub.np2p-pub6 .np2p-ip {
+    font-size: 13px;
+    letter-spacing: 0;
+    line-height: 1.4;
+    white-space: normal;
+    word-break: break-all;
+  }
+  /* 360 px phones: the PTT row (talk + monitor + mute) must be allowed to wrap
+   * instead of pushing the page 6 px wider than the viewport. */
+  .ptt-main-row { flex-wrap: wrap; }
+  .ptt-main-row > button { min-width: 0; }
+  .telemetry-strip {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+  .telemetry-strip::-webkit-scrollbar { display: none; }
+
+  .workspace {
+    padding: 10px 10px calc(86px + env(safe-area-inset-bottom, 0px));
+    gap: 12px;
+  }
+
+  .lcd-cockpit, .dispatch-cockpit, .card {
+    padding: 13px 13px;
+    border-radius: 12px;
+  }
+
+  /* Compact side-by-side VFO on mobile */
+  .vfo-grid { gap: 8px; }
+  .vfo-cell { padding: 9px 10px; }
+  .vfo-digits { font-size: 20px; }
+  .vfo-digits small { font-size: 11px; }
+
+  .meter-row { grid-template-columns: 66px 1fr 48px; gap: 7px; }
+  .seg-meter { grid-template-columns: repeat(16, 1fr); }
+  .seg-meter b:nth-child(n+17) { display: none; }
+
+  .kv-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+
+  /* Keep 3-mode buttons side-by-side on mobile */
+  #ixSeg { gap: 6px; }
+  #ixSeg button {
+    padding: 8px 6px;
+    align-items: center;
+    text-align: center;
+    min-height: 48px;
+  }
+  #ixSeg button .m-code { font-size: 9px; }
+  #ixSeg button .m-title { font-size: 12px; }
+
+  /* Mobile Module Quick Tabs */
+  .mobile-nav {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 4px;
+    position: sticky;
+    top: 84px;
+    z-index: 45;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  }
+  .mobile-nav button {
+    padding: 7px 2px;
+    font-size: 11.5px;
+    border: none;
+    background: transparent;
+    color: var(--dim);
+    border-radius: 7px;
+    text-align: center;
+  }
+  .mobile-nav button.on {
+    background: var(--cyan-dim);
+    color: var(--cyan);
+    font-weight: 700;
+  }
+
+  .rack-grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* Touch-friendly horizontal EQ sliders on mobile (no vertical scroll conflict!) */
+  .eq-fader-bank {
+    grid-template-columns: 1fr;
+    gap: 9px;
+    padding: 10px 12px;
+  }
+  .eq-col {
+    display: grid;
+    grid-template-columns: 52px 44px 1fr 48px;
+    align-items: center;
+    gap: 8px;
+  }
+  .eq-freq-lbl { order: 1; text-align: left; }
+  .eq-band-name { order: 2; text-align: left; }
+  .eq-fader-wrap {
+    order: 3;
+    height: auto;
+    width: 100%;
+  }
+  .eq-fader-wrap input[type=range] {
+    width: 100%;
+    transform: none;
+    height: 8px;
+  }
+  .eq-col .val { order: 4; text-align: right; }
+
+  /* Touch target sizing on mobile */
+  .row label { flex: 0 0 80px; font-size: 12px; }
+  input[type=range]::-webkit-slider-thumb { width: 22px; height: 22px; }
+  button { min-height: 36px; }
+
+  /* Sticky Bottom PTT Dock for Handheld Operation */
+  .mobile-dock {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 80;
+    background: rgba(8, 13, 24, 0.94);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--line-hi);
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -6px 24px rgba(0,0,0,0.6);
+  }
+  .mobile-dock .m-ptt {
+    flex: 1;
+    min-height: 44px;
+    font-size: 14px;
+  }
+  .mobile-dock .m-mon {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- ==================== TOP COMMAND BAR ==================== -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="brand-mark" style="position:relative;overflow:hidden"><img src="/brand-icon.png" alt="黑猫互联" style="width:100%;height:100%;object-fit:contain;border-radius:inherit"><span class="brand-dot" id="hbDot" style="position:absolute;bottom:2px;right:2px"></span></div>
+      <div class="brand-text">
+        <h1><span data-hm="panel">黑猫控制面板</span> <span class="brand-ver">无线电与网络对讲</span></h1>
+        <div id="handsetName" style="font-size:16px;overflow-wrap:anywhere;max-width:36ch">黑猫智能手台</div>
+        <div class="brand-sub"><span data-hm="project">黑猫互联</span> · <span data-hm="device">黑猫智能手台</span></div>
+      </div>
+    </div>
+    <div class="telemetry-strip">
+      <span class="pill" id="wifiPill">WiFi ...</span>
+      <span class="pill" id="lanPill">LAN -</span>
+      <span class="pill cyan" id="modePill">-</span>
+      <span class="pill" id="pttPill">PTT IDLE</span>
+      <span class="pill" id="rssiPill">RSSI -</span>
+      <span class="pill" id="upPill">-</span>
+    </div>
+  </div>
+</header>
+
+<main class="workspace">
+
+  <!-- ==================== HERO TRANSCEIVER DECK ==================== -->
+  <section class="hero-deck">
+
+    <!-- Left: Dual VFO & Signal Cockpit -->
+    <div class="lcd-cockpit">
+      <div class="name-plate" aria-label="手台名称">
+        <div class="stage-head"><span class="stage-title">● 手台名称</span><span id="handsetUse">正在读取…</span></div>
+        <div class="name-plate-row">
+          <input type="text" id="handsetNameInput" maxlength="48" placeholder="例如：车载主台" title="最多 24 字，网页与 APP 共用；清空恢复默认名称。" autocomplete="off">
+          <button type="button" class="pri" id="handsetNameSave">保存</button>
+        </div>
+        <div class="name-plate-meta"><span id="handsetIdentity">核对设备身份中…</span></div>
+        <div id="handsetNameResult" role="status"></div>
+      </div>
+      <div class="lcd-top">
+        <div class="lcd-tag" id="rfVfoBand">读取模块频段…</div>
+        <div class="lcd-badges">
+          <span class="tag-chip" id="sqlBadge">SQL 待机</span>
+          <span class="tag-chip" id="ampBadge">PA 功放 关</span>
+          <span class="tag-chip" id="mState">守听 -</span>
+        </div>
+      </div>
+
+      <div class="vfo-grid">
+        <div class="vfo-cell" id="vfoRxCell">
+          <div class="vfo-head">
+            <span class="vfo-role rx">VFO-A · 接收 RX</span>
+            <span class="vfo-subtone" id="vfoRxTone">CTCSS 关</span>
+          </div>
+          <div class="vfo-digits"><span id="vfoRxBig">—</span><small>MHz</small></div>
+        </div>
+        <div class="vfo-cell" id="vfoTxCell">
+          <div class="vfo-head">
+            <span class="vfo-role tx">VFO-B · 发射 TX</span>
+            <span class="vfo-subtone" id="vfoTxTone">CTCSS 关</span>
+          </div>
+          <div class="vfo-digits"><span id="vfoTxBig">—</span><small>MHz</small></div>
+        </div>
+      </div>
+
+      <div class="vfo-summary-bar">
+        <span id="vfoFreq">读取射频配置…</span>
+        <span id="vfoSub">25 kHz 宽带 · 低功率 0.5W · 静噪 SQ 1</span>
+      </div>
+
+      <!-- Dual 24-Segment Bargraphs (S-Meter + Audio Peak VU) -->
+      <div class="meters-box">
+        <div class="meter-row">
+          <span class="meter-lbl">RF S-METER</span>
+          <div class="seg-meter" id="sMeterSegs"></div>
+          <span class="meter-val" id="sMeterVal">S0</span>
+        </div>
+        <div class="meter-row">
+          <span class="meter-lbl">AF PEAK VU</span>
+          <div class="seg-meter" id="afMeterSegs"></div>
+          <span class="meter-val" id="lvlval">0</span>
+        </div>
+        <div class="bar-compat"><i id="lvlbar"></i></div>
+      </div>
+
+      <!-- 8-Cell Telemetry Matrix -->
+      <div class="kv-matrix" id="stat"></div>
+    </div>
+
+    <!-- Right: Mode Architecture, Master PTT & RoIP Bridge Hub -->
+    <div class="dispatch-cockpit">
+      <div>
+        <div class="sec-label" style="margin-top:0">
+          <span>通信架构模式切换 (HOT-SWITCH)</span>
+          <span id="txState" class="tag-chip">PTT 待机</span>
+        </div>
+        <div id="ixSeg">
+          <button type="button" data-m="0" class="on">
+            <span class="m-code" id="rfModeCode">MODE 00 · RF</span>
+            <span class="m-title">本地模拟</span>
+          </button>
+          <button type="button" data-m="1">
+            <span class="m-code">MODE 01 · NET-P2P</span>
+            <span class="m-title">公网直连</span>
+          </button>
+          <button type="button" data-m="2">
+            <span class="m-code">MODE 02 · EMQX</span>
+            <span class="m-title">网络中继</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Master PTT Trigger & Monitor Controls -->
+      <div class="ptt-console">
+        <div class="ptt-main-row">
+          <button class="tx" id="txBtn">● 开始电台发射 (PTT)</button>
+          <button id="mOn" class="pri" title="开启 SA818 模拟接收守听">开启守听</button>
+          <button id="mOff" title="停止模拟守听">静音</button>
+        </div>
+        <div class="ptt-sub-row">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:11.5px;color:var(--dim)">单次发射限时</span>
+            <input type="number" id="secs" value="30" min="5" max="60" style="width:62px;flex:none;padding:4px 7px">
+            <span style="font-size:11px;color:var(--dim)">秒</span>
+          </div>
+          <div class="secs-Quick">
+            <button type="button" data-sec="10">10s</button>
+            <button type="button" data-sec="30">30s</button>
+            <button type="button" data-sec="60">60s</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 01/02: should a network talk also key the local radio? -->
+      <div class="ptt-sub-row" data-modes="1,2" style="display:none">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:11.5px;color:var(--dim)">网络对讲发射方式</span>
+          <div class="secs-Quick" id="rfSeg">
+            <button type="button" data-rf="0" class="on">仅网络</button>
+            <button type="button" data-rf="1">网络 + 本机射频</button>
+          </div>
+          <span style="font-size:11px;color:var(--dim)">「网络 + 本机射频」= 麦克风音频同时上中继和本机电台</span>
+        </div>
+      </div>
+
+      <!-- Contextual Mode Panel: Mode 0 (Local Summary) -->
+      <div class="mode-stage" data-modes="0">
+        <div class="stage-head">
+          <span class="stage-title">● 本地模拟对讲链路</span>
+          <span class="tag-chip" id="rfPhysical">射频待设置</span>
+        </div>
+        <div class="topo-flow">
+          <span class="topo-node">麦克风 / ES8311</span>
+          <span class="topo-arrow">⇄</span>
+          <span class="topo-node">ESP32-S3 6段EQ/固定增益</span>
+          <span class="topo-arrow">⇄</span>
+          <span class="topo-node" id="rfAntenna">SA818S 射频天线</span>
+        </div>
+      </div>
+
+      <!-- Contextual Mode Panel: Mode 2 (EMQX MQTT Relay + Analog Bridge) -->
+      <div class="mode-stage" data-modes="2" style="display:none">
+        <div class="stage-head">
+          <span class="stage-title">● 网络中继 · EMQX</span>
+          <button id="brTest2" class="pri" style="padding:3px 9px;font-size:11px">注入 3s 接收自检音</button>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>EMQX 服务器</label>
+          <input type="text" id="ixBroker2" placeholder="host:port">
+          <button id="ixBrokerSet2" class="pri">保存重连</button>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>用户 / 密码</label>
+          <input type="text" id="ixUser2" maxlength="31" placeholder="用户名（空=匿名）" style="flex:1">
+          <input type="password" id="ixPass2" maxlength="47" placeholder="密码" style="flex:1">
+          <button id="ixPassSet2" class="pri">保存</button>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>引擎 / 诊断</label>
+          <span id="ixState2" style="flex:1;font-family:var(--mono);font-size:11px;color:var(--fg-2)">-</span>
+        </div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--amber);margin:-2px 0 2px" id="ixDiag2">-</div>
+        <div class="subcard">
+          <div class="subcard-head">
+            <span>⇄ 模拟电台 ⇔ 云端中继双向桥接</span>
+            <span id="brS2" style="font-family:var(--mono);font-size:11.5px;color:var(--dim)">已关闭</span>
+          </div>
+          <div class="row" style="margin:4px 0">
+            <button id="brT2" class="pri">启用桥接</button>
+            <select id="brChan2"><option value="0">选择预设频道…</option></select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contextual Mode Panel: Mode 1 (NET-P2P public STUN hole-punching) -->
+      <div class="mode-stage" data-modes="1" style="display:none">
+        <div class="stage-head">
+          <span class="stage-title" style="color:#a78bfa">● 公网直连</span>
+          <span id="npHubOffBadge" class="np2p-huboff" style="display:none">枢纽离线</span>
+        </div>
+        <div class="np2p-pub">
+          <span class="np2p-ip" id="npPub">0.0.0.0:0</span>
+          <span class="np2p-nat" id="npNat" style="flex:1;text-align:right">-</span>
+        </div>
+        <!-- 本机 IPv6：与上面 IPv4 同一个方框样式，可直接当对端地址用 -->
+        <div class="np2p-pub np2p-pub6">
+          <span class="np2p-ip" id="npV6">—</span>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>互通房间号</label>
+          <input type="number" id="ixRoom1" min="1000" max="9999" step="1" value="1000">
+          <button id="ixRoomSet1" class="pri">切换房间</button>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>STUN 覆盖</label>
+          <input type="text" id="npStun" placeholder="host:port" style="flex:1">
+          <button id="npStunSet" class="pri">应用</button>
+        </div>
+        <div class="row" style="margin:2px 0 0">
+          <label>对端列表</label>
+        </div>
+        <div id="npPeerList"></div>
+        <div class="row" style="margin:3px 0">
+          <input type="text" id="npPeerName" maxlength="7" placeholder="名称" style="width:86px;flex:none">
+          <input type="text" id="npPeerAddr" placeholder="公网 ip:port" style="flex:1">
+          <button id="npPeerAdd" class="pri">添加对端</button>
+        </div>
+        <div class="row" style="margin:3px 0">
+          <label>hub 星型群聊</label>
+          <button id="npHubT" class="pri" style="flex:none">开启 hub</button>
+          <span id="npState1" style="flex:1;font-family:var(--mono);font-size:11px;color:var(--fg-2)">-</span>
+        </div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--amber);margin:-2px 0 2px" id="npDiag1">-</div>
+        <div class="subcard">
+          <div class="subcard-head">
+            <span>⇄ 模拟电台 ⇔ 公网直连双向桥接</span>
+            <span id="brS1" style="font-family:var(--mono);font-size:11.5px;color:var(--dim)">已关闭</span>
+          </div>
+          <div class="row" style="margin:4px 0">
+            <button id="brT1" class="pri">启用桥接</button>
+            <select id="brChan1"><option value="0">选择预设频道…</option></select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ==================== MOBILE MODULE FILTER BAR ==================== -->
+  <nav class="mobile-nav" id="mobNav">
+    <button type="button" data-sec-tab="all" class="on">全部模块</button>
+    <button type="button" data-sec-tab="rf">射频调谐</button>
+    <button type="button" data-sec-tab="audio">音频尾音</button>
+    <button type="button" data-sec-tab="ch">预设信道</button>
+    <button type="button" data-sec-tab="eq">均衡日志</button>
+  </nav>
+
+  <!-- ==================== 3-COLUMN INSTRUMENT RACK ==================== -->
+  <section class="rack-grid" id="rackGrid">
+
+    <!-- 网络通联: browser audio head (radio -> browser speaker, browser mic -> radio) -->
+    <div class="card" style="grid-column:1/-1">
+      <div class="card-head">
+        <h2><i></i>网络通联 · 浏览器收听与发射</h2>
+        <span id="sdrBadge" class="tag-chip" style="font-size:11px">已关闭</span>
+      </div>
+      <div class="row" style="margin:2px 0 6px;gap:8px">
+        <button id="sdrBtn" class="pri" style="flex:1;min-height:42px">开启网络通联</button>
+        <button id="sdrBeep" class="mini" style="min-height:42px;padding:0 10px" title="播放 1 秒测试音，确认浏览器音频输出正常">测试喇叭</button>
+        <button id="sdrPtt" class="tx" style="flex:1;min-height:42px" disabled>● 点击发射 (PTT)</button>
+      </div>
+      <div class="row" style="margin:0 0 6px;gap:6px;align-items:center">
+        <span style="font-size:11.5px;color:var(--dim);white-space:nowrap">麦克风</span>
+        <select id="sdrMic" style="flex:1;font-size:12px;min-height:34px;background:var(--bg2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:0 6px">
+          <option value="">（默认设备）</option>
+        </select>
+        <button id="sdrMicScan" class="mini" style="min-height:34px;padding:0 8px">刷新</button>
+      </div>
+      <div id="sdrHttpsHint" style="display:none;font-size:11.5px;color:var(--amber);line-height:1.6;margin:0 0 6px">
+        当前是 http 页面，浏览器不允许使用麦克风。
+        <a id="sdrHttpsLink" href="#" style="color:var(--amber);text-decoration:underline;font-weight:600">点这里用 https 打开本面板</a>
+        （首次会提示证书风险，选择"继续访问"即可；之后收听、发射都正常）
+      </div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.6" id="sdrInfo">电台接收音频 → 本浏览器喇叭；按住 PTT 用本机麦克风发射</div>
+    </div>
+
+
+    <!-- Column 1: SA818 RF Synthesizer & Sub-audible Tones -->
+    <div class="card" data-mob-sec="rf">
+      <div class="card-head">
+        <h2><i></i>射频信道与亚音调谐</h2>
+        <span class="tag-chip" id="rfRange">频段待读取</span>
+      </div>
+
+      <div class="row">
+        <label>物理模块频段</label>
+        <select id="rfBand">
+          <option value="" disabled>请选择安装的模块</option>
+          <option value="UHF">SA818S-U · UHF 400–480 MHz</option>
+          <option value="VHF">SA818S-V · VHF 134–174 MHz</option>
+        </select>
+        <button id="rfBandSet" class="pri">确认频段</button>
+      </div>
+      <div id="rfStatus" style="font-size:12px;line-height:1.6;margin-bottom:10px;color:var(--amber)">读取射频状态…</div>
+      <div style="font-size:11px;color:var(--dim);line-height:1.6;margin-bottom:10px">按实际安装的模块选择，并使用对应频段天线。切换后由你提交收发频率，原信道库保留。</div>
+
+      <div class="row">
+        <label>发射频率 TX</label>
+        <input type="number" id="ftx" step="0.0125" placeholder="先确认模块频段">
+        <span class="val">MHz</span>
+      </div>
+      <div class="row">
+        <label>接收频率 RX</label>
+        <input type="number" id="frx" step="0.0125" placeholder="先确认模块频段">
+        <span class="val">MHz</span>
+      </div>
+
+      <div class="step-strip">
+        <button type="button" data-fstep="-0.025">-25k</button>
+        <button type="button" data-fstep="-0.0125">-12.5k</button>
+        <button type="button" id="fSync" title="将接收频率设为与发射频率一致">TX=RX</button>
+        <button type="button" data-fstep="0.0125">+12.5k</button>
+        <button type="button" data-fstep="0.025">+25k</button>
+      </div>
+
+      <div class="row" style="margin-bottom:12px">
+        <button id="fset" class="pri" style="flex:1;padding:8px 12px">立即下发收发频率至电台模块</button>
+      </div>
+
+      <div class="sec-label"><span>信道带宽 · 静噪 · 发射功率</span></div>
+      <div class="row">
+        <label>信道带宽</label>
+        <select id="bw">
+          <option value="0">12.5 kHz 窄带 (NFM)</option>
+          <option value="1">25.0 kHz 宽带 (WFM)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>发射功率</label>
+        <button id="pwrT" style="flex:1">切换高 / 低功率</button>
+        <span class="val" id="pwrV">-</span>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">低功率接地，高功率释放；发射中更改会在松开 PTT 后生效。</div>
+      <div class="row">
+        <label>静噪门限 SQ</label>
+        <input type="range" id="sq" min="0" max="8">
+        <span class="val" id="sqV">-</span>
+      </div>
+      <div class="row">
+        <label>模块音量 VOL</label>
+        <input type="range" id="vol" min="1" max="8">
+        <span class="val" id="volV">-</span>
+      </div>
+
+      <div class="sec-label"><span>CTCSS 模拟亚音 / DCS 数字亚音</span></div>
+      <div class="row">
+        <label>发射亚音 TX</label>
+        <select id="ttx">
+          <option value="off">关闭 (0000)</option>
+          <option value="ctcss">CTCSS 模拟亚音</option>
+          <option value="dcs">DCS 数字亚音</option>
+        </select>
+      </div>
+      <div class="row" id="atxRow" style="display:none">
+        <label>└ 频率 TX</label>
+        <select id="atx"></select>
+      </div>
+      <div class="row" id="dtxRow" style="display:none">
+        <label>└ 数码 TX</label>
+        <select id="dtx"></select>
+        <select id="dtxp" style="flex:0 0 86px">
+          <option value="N">正相 N</option>
+          <option value="I">反相 I</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>接收亚音 RX</label>
+        <select id="trx">
+          <option value="off">关闭 (0000)</option>
+          <option value="ctcss">CTCSS 模拟亚音</option>
+          <option value="dcs">DCS 数字亚音</option>
+        </select>
+      </div>
+      <div class="row" id="arxRow" style="display:none">
+        <label>└ 频率 RX</label>
+        <select id="arx"></select>
+      </div>
+      <div class="row" id="drxRow" style="display:none">
+        <label>└ 数码 RX</label>
+        <select id="drx"></select>
+        <select id="drxp" style="flex:0 0 86px">
+          <option value="N">正相 N</option>
+          <option value="I">反相 I</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Column 2: Audio DSP Gain Matrix & Roger Beep Studio -->
+    <div class="card" data-mob-sec="audio">
+      <div class="card-head">
+        <h2><i></i>音频增益矩阵与尾音信令</h2>
+        <span class="tag-chip">ES8311 DSP</span>
+      </div>
+
+      <div class="sec-label" style="margin-top:0"><span>喇叭音量</span></div>
+      <div class="row">
+        <label>音量档位</label>
+        <input type="range" id="spkVol" min="0" max="7" step="1">
+        <span class="val" id="spkVolV">-</span>
+      </div>
+
+      <div class="sec-label"><span>前置面板按键</span></div>
+      <div class="row">
+        <label>VOL+</label>
+        <select id="fpk0" style="flex:1"></select>
+      </div>
+      <div class="row">
+        <label>VOL-</label>
+        <select id="fpk1" style="flex:1"></select>
+      </div>
+      <div class="row">
+        <label>CH+</label>
+        <select id="fpk2" style="flex:1"></select>
+      </div>
+      <div class="row">
+        <label>CH-</label>
+        <select id="fpk3" style="flex:1"></select>
+      </div>
+
+      <div class="sec-label"><span>发射结束信令 (ROGER BEEP)</span></div>
+      <div class="row">
+        <label>信令样式</label>
+        <select id="ixTailSel">
+          <option value="0">关闭尾音</option>
+          <option value="1">单音 Beep (880Hz)</option>
+          <option value="2">业余无线电 K-CHOO</option>
+          <option value="3">宝峰 ROGER 经典单音</option>
+          <option value="4">摩托罗拉 MDC-1200</option>
+          <option value="5">Icom IDAS Go-Ahead *</option>
+          <option value="6">Icom IDAS Go-Ahead #</option>
+          <option value="7">泉盛 UV-K5 双音</option>
+          <option value="8">自定义上传音频</option>
+        </select>
+        <button id="ixTailPrev" class="pri">试听</button>
+      </div>
+      <div class="row" style="flex-wrap:wrap;align-items:center">
+        <label>应用模式</label>
+        <label style="display:flex;align-items:center;gap:4px;width:auto">
+          <input type="checkbox" id="ixTailM0" value="1" checked>
+          MODE 00 · 本地射频
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;width:auto">
+          <input type="checkbox" id="ixTailM1" value="2" checked>
+          MODE 01 · 公网 P2P
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;width:auto">
+          <input type="checkbox" id="ixTailM2" value="4" checked>
+          MODE 02 · 网络中继
+        </label>
+      </div>
+      <div class="row" style="flex-wrap:wrap">
+        <label class="file-pick" id="ixTailPick">
+          <input type="file" id="ixTailFile" accept=".wav,.mp3,audio/wav,audio/mpeg">
+          <span class="pick-chip">选择文件</span>
+          <span class="pick-name" id="ixTailName">未选择</span>
+        </label>
+        <button id="ixTailUp" class="pri">上传转换</button>
+        <button id="ixTailDel">删除</button>
+      </div>
+      <div class="row" style="margin-bottom:0">
+        <label>Flash 已存</label>
+        <span id="ixTailInfo" style="flex:1;font-family:var(--mono);font-size:11.5px;color:var(--dim)">-</span>
+      </div>
+
+      <!-- Per-path transmit gains: one row per physical route through the board. -->
+      <div class="sec-label"><span>发射路径增益 (PER-PATH GAIN)</span></div>
+      <div class="row" style="margin-top:0">
+        <label>本机麦克风 → 射频</label>
+        <input type="range" id="txgain" min="1" max="255" step="1">
+        <span class="val" id="txgainV">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px">
+        <span style="flex:1;font-size:11px;color:var(--dim)">机身麦克风专用；调手机发话用下一行</span>
+      </div>
+      <div class="row">
+        <label>手机/网络语音 → 射频</label>
+        <input type="range" id="ntxgain" min="1" max="255" step="1">
+        <span class="val" id="ntxgainV">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px">
+        <span style="flex:1;font-size:11px;color:var(--dim)">只影响手机 App / 网页语音，不动机身麦克风</span>
+      </div>
+      <div class="row" style="margin-top:-2px">
+        <label>发射预加重</label>
+        <input type="checkbox" id="txpre" style="flex:0 0 auto">
+        <span style="flex:1;font-size:11px;color:var(--dim)">+6 dB/倍频程（1.2 kHz 起）；对端是商业手台时保持开启</span>
+      </div>
+      <div class="row">
+        <label>网络桥接 → 射频重发</label>
+        <input type="range" id="bgtx" min="0" max="64" step="1">
+        <span class="val" id="bgtxV">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px">
+        <span style="flex:1;font-size:11px;color:var(--dim)">只影响“模拟↔网络桥接”转发的那条路</span>
+      </div>
+      <div class="row">
+        <label>射频 → 喇叭</label>
+        <input type="range" id="gain" min="1" max="255" step="1">
+        <span class="val" id="gainV">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px">
+        <span style="flex:1;font-size:11px;color:var(--dim)">只影响本机喇叭这条接收路（1/16 倍）</span>
+      </div>
+      <div class="row">
+        <label>射频 → 网络</label>
+        <input type="range" id="rxnetgain" min="0" max="255" step="1">
+        <span class="val" id="rxnetgainV">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px">
+        <span style="flex:1;font-size:11px;color:var(--dim)">只影响推给浏览器/APP 的那份；64 = +12 dB</span>
+      </div>
+      <div class="row" style="margin-bottom:0">
+        <label>DAC 数字音量</label>
+        <span id="cvolV" style="flex:1;font-family:var(--mono);font-size:11.5px;color:var(--dim)">-</span>
+        <span style="font-size:11px;color:var(--dim)">只读</span>
+      </div>
+      <div class="row" style="margin-bottom:0">
+        <label>发射峰值</label>
+        <span id="txPeakV" style="flex:1;font-family:var(--mono);font-size:11.5px;color:var(--dim)">-</span>
+      </div>
+      <div class="row" style="margin-top:-6px;margin-bottom:0">
+        <span style="flex:1;font-size:11px;color:var(--dim)">手机送入 / 板端送出（满刻度 32767）/ 削顶样本数；发一次话再看</span>
+      </div>
+    </div>
+
+    <!-- Column 3: Preset Channel Memory Bank -->
+    <div class="card" data-mob-sec="ch">
+      <div class="card-head">
+        <h2><i></i>预设信道存储库 (MEMORY BANK)</h2>
+        <span class="tag-chip" id="chCountBadge">0 / 99</span>
+      </div>
+
+      <div class="row" style="margin-top:0">
+        <input id="chName" type="text" maxlength="23" placeholder="输入频道名称（如：救援中继 / 438.5直频）">
+        <button id="chSave" class="pri">存入当前参数</button>
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <input id="chSearch" type="search" placeholder="搜索频道名或频率（如 438.5 / 中继）">
+      </div>
+
+      <div class="ch-list" id="chList"></div>
+    </div>
+
+  </section>
+
+  <!-- ==================== BOTTOM RACK: 6-BAND EQ MIXER & EVENT CONSOLE ==================== -->
+  <section class="bottom-grid" data-mob-sec="eq">
+
+    <!-- Left: 6-Band Parametric Equalizer Fader Console + Live SVG Curve -->
+    <div class="card">
+      <div class="card-head">
+        <h2><i></i>6 段参量均衡调音台 (PARAMETRIC EQ)</h2>
+        <button id="eqReset" class="pri">全部归 0 dB</button>
+      </div>
+
+      <div class="eq-Curve-box">
+        <svg class="eq-svg" viewBox="0 0 600 84" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="eqFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#00e5ff" stop-opacity="0.0"/>
+            </linearGradient>
+          </defs>
+          <line x1="0" y1="14" x2="600" y2="14" stroke="#182438" stroke-dasharray="3,3"/>
+          <line x1="0" y1="42" x2="600" y2="42" stroke="#243654" stroke-width="1"/>
+          <line x1="0" y1="70" x2="600" y2="70" stroke="#182438" stroke-dasharray="3,3"/>
+          <path id="eqAreaSpk" d="M0,42 L600,42 L600,84 L0,84 Z" fill="url(#eqFill)"/>
+          <polyline id="eqLineMic" fill="none" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="4,3" points="50,42 150,42 250,42 350,42 450,42 550,42"/>
+          <polyline id="eqLineSpk" fill="none" stroke="#00e5ff" stroke-width="2.4" points="50,42 150,42 250,42 350,42 450,42 550,42"/>
+        </svg>
+      </div>
+
+      <div class="eq-tabs">
+        <div class="eq-dir-seg">
+          <button type="button" id="eqTabSpk" class="on">喇叭接收输出 (SPK)</button>
+          <button type="button" id="eqTabMic">麦克风发射输入 (MIC)</button>
+        </div>
+        <div class="eq-presets">
+          <button type="button" data-eqp="voice">人声清晰</button>
+          <button type="button" data-eqp="punch">穿透增强</button>
+          <button type="button" data-eqp="warm">温暖厚重</button>
+          <button type="button" data-eqp="flat">当前平直</button>
+        </div>
+      </div>
+
+      <!-- Speaker 6-Band Faders -->
+      <div class="eq-fader-bank" id="eqBankSpk">
+        <div class="eq-col"><span class="val" id="eq_spk_bassV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_bass" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">150Hz</span><span class="eq-band-name">低音</span></div>
+        <div class="eq-col"><span class="val" id="eq_spk_warmV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_warm" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">400Hz</span><span class="eq-band-name">暖度</span></div>
+        <div class="eq-col"><span class="val" id="eq_spk_bodyV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_body" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">900Hz</span><span class="eq-band-name">人声</span></div>
+        <div class="eq-col"><span class="val" id="eq_spk_clearV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_clear" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">2.0k</span><span class="eq-band-name">清晰</span></div>
+        <div class="eq-col"><span class="val" id="eq_spk_presV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_pres" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.2k</span><span class="eq-band-name">临场</span></div>
+        <div class="eq-col"><span class="val" id="eq_spk_airV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_spk_air" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.8k</span><span class="eq-band-name">空气</span></div>
+      </div>
+
+      <!-- Microphone 6-Band Faders -->
+      <div class="eq-fader-bank" id="eqBankMic" style="display:none">
+        <div class="eq-col"><span class="val" id="eq_mic_bassV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_bass" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">150Hz</span><span class="eq-band-name">低音</span></div>
+        <div class="eq-col"><span class="val" id="eq_mic_warmV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_warm" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">400Hz</span><span class="eq-band-name">暖度</span></div>
+        <div class="eq-col"><span class="val" id="eq_mic_bodyV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_body" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">900Hz</span><span class="eq-band-name">人声</span></div>
+        <div class="eq-col"><span class="val" id="eq_mic_clearV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_clear" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">2.0k</span><span class="eq-band-name">清晰</span></div>
+        <div class="eq-col"><span class="val" id="eq_mic_presV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_pres" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.2k</span><span class="eq-band-name">临场</span></div>
+        <div class="eq-col"><span class="val" id="eq_mic_airV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_air" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.8k</span><span class="eq-band-name">空气</span></div>
+      </div>
+    </div>
+
+    <!-- Right: Real-time Event & Telemetry Console -->
+    <div class="card">
+      <div class="card-head">
+        <h2><i></i>系统事件与指令终端 (EVENT LOG)</h2>
+        <button id="logClr" style="padding:3px 9px;font-size:11px">清空终端</button>
+      </div>
+      <div id="log"></div>
+      <div class="row" style="margin-top:10px;margin-bottom:0;gap:8px">
+        <button id="facReset" class="warn-btn" style="flex:1;padding:9px 12px;min-height:40px">面板恢复默认参数</button>
+        <button id="facWipe" class="warn-btn" style="flex:1;padding:9px 12px;min-height:40px">彻底恢复出厂设置</button>
+      </div>
+      <div class="row" style="margin-top:8px;margin-bottom:0;gap:8px">
+        <label class="file-pick" id="otaPick">
+          <input type="file" id="otaFile" accept=".bin">
+          <span class="pick-chip">选择文件</span>
+          <span class="pick-name" id="otaName">未选择</span>
+        </label>
+        <button id="otaBtn" class="pri" style="flex:none;padding:9px 14px;min-height:40px">上传升级固件</button>
+      </div>
+      <div id="otaHint" style="font-size:11px;color:var(--dim);margin-top:6px;line-height:1.5">
+        选择黑猫智能手台的应用 OTA 固件（.bin）：上传后自动校验并重启，升级期间不要断电。
+      </div>
+    </div>
+
+
+  </section>
+
+</main>
+
+<!-- ==================== STICKY MOBILE HANDHELD DOCK ==================== -->
+<div class="mobile-dock">
+  <button type="button" class="tx m-ptt" id="txBtnMob">● 开始发射 (PTT)</button>
+  <button type="button" class="pri m-mon" id="mToggleMob">守听: 开</button>
+</div>
+
+<script src="/app-control.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+function escHtml(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function initSegMeters() {
+  for (const id of ['sMeterSegs', 'afMeterSegs']) {
+    const box = $(id);
+    if (!box) continue;
+    let h = '';
+    for (let i = 0; i < 24; i++) {
+      const cls = i < 15 ? 'g' : (i < 20 ? 'y' : 'r');
+      h += '<b data-c="' + cls + '"></b>';
+    }
+    box.innerHTML = h;
+  }
+}
+initSegMeters();
+
+function setSegMeter(id, pct) {
+  const box = $(id);
+  if (!box) return;
+  const n = Math.max(0, Math.min(24, Math.round(pct * 24 / 100)));
+  const segs = box.children;
+  for (let i = 0; i < segs.length; i++) {
+    const c = segs[i].getAttribute('data-c');
+    segs[i].className = i < n ? ('on ' + c) : '';
+  }
+}
+
+function wifiIcon(r) {
+  const L = r >= -55 ? 4 : r >= -65 ? 3 : r >= -75 ? 2 : 1;
+  const on = '#34d399', off = '#334155';
+  const c = k => k <= L ? on : off;
+  return '<svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" width="14" height="14" style="vertical-align:-2px"><path d="M2.6 9.4a13.2 13.2 0 0 1 18.8 0" stroke="' + c(4) + '" stroke-width="2.4"/><path d="M5.6 12.4a9 9 0 0 1 12.8 0" stroke="' + c(3) + '" stroke-width="2.4"/><path d="M8.6 15.4a4.8 4.8 0 0 1 6.8 0" stroke="' + c(2) + '" stroke-width="2.4"/><circle cx="12" cy="18.6" r="1.7" fill="' + c(1) + '"/></svg>';
+}
+
+function log(m, cls) {
+  const l = $('log');
+  if (!l) return;
+  const t = new Date().toLocaleTimeString();
+  const item = document.createElement('div');
+  if (cls) item.className = cls;
+  item.textContent = '[' + t + '] ' + m;
+  l.appendChild(item);
+  while (l.childNodes.length > 200) l.removeChild(l.firstChild);
+  l.scrollTop = l.scrollHeight;
+}
+
+$('logClr').onclick = () => { $('log').innerHTML = ''; };
+
+/* Read-only requests only: never retry PTT, setters, uploads or SDR audio. */
+const PANEL_READ_PATHS = new Set(['/api/status', '/api/radio', '/api/live',
+  '/api/ctcss', '/api/dcs', '/api/channels']);
+const PANEL_TABLE_PATHS = new Set(['/api/ctcss', '/api/dcs', '/api/channels']);
+async function panelReadJson(path) {
+  if (!PANEL_READ_PATHS.has(path)) throw new Error('不是面板只读接口');
+  const table = PANEL_TABLE_PATHS.has(path), attempts = table ? 3 : 1;
+  let error;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch(path, {method: 'GET', cache: 'no-store', signal: controller.signal});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      if (table && !Array.isArray(data)) throw new Error('列表格式错误');
+      return data;
+    } catch (e) { error = e; }
+    finally { clearTimeout(timer); }
+    if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
+  }
+  throw new Error(path + ': ' + ((error && error.message) || error));
+}
+let panelRefreshBusy = false, panelOnline = false;
+
+/*
+ * Factory reset: two-step confirm (no window.confirm -- it is clumsy on a
+ * phone and blocks the polling loop).  First tap arms the button for 4 s.
+ */
+let facArmed = 0;
+let facWipeArmed = 0;
+
+$('facReset').onclick = async () => {
+  const now = Date.now();
+  if (now - facArmed > 4000) {
+    facArmed = now;
+    $('facReset').textContent = '⚠ 再点一次确认';
+    $('facReset').className = 'tx';
+    setTimeout(() => {
+      if (Date.now() - facArmed > 3900) {
+        facArmed = 0;
+        $('facReset').textContent = '面板恢复默认参数';
+        $('facReset').className = 'warn-btn';
+      }
+    }, 4200);
+    return;
+  }
+  facArmed = 0;
+  $('facReset').textContent = '正在恢复…';
+  $('facReset').className = 'warn-btn';
+  try {
+    const r = await fetch('/api/set?k=factory_reset&v=1');
+    const j = await r.json();
+    log('面板恢复默认参数: ' + (j.ok ? '完成' : ('失败: ' + (j.err || ''))),
+        j.ok ? 'good' : 'err');
+    last = '';
+    holdSyncUntil = 0;
+    await loadChannels();
+    await loadBridgeChans();
+    refresh();
+  } catch (e) {
+    log('面板恢复默认参数失败: ' + e, 'err');
+  }
+  $('facReset').textContent = '面板恢复默认参数';
+  $('facReset').className = 'warn-btn';
+};
+
+$('facWipe').onclick = async () => {
+  const now = Date.now();
+  if (now - facWipeArmed > 4000) {
+    facWipeArmed = now;
+    $('facWipe').textContent = '⚠ 再点一次确认';
+    $('facWipe').className = 'tx';
+    setTimeout(() => {
+      if (Date.now() - facWipeArmed > 3900) {
+        facWipeArmed = 0;
+        $('facWipe').textContent = '彻底恢复出厂设置';
+        $('facWipe').className = 'warn-btn';
+      }
+    }, 4200);
+    return;
+  }
+  facWipeArmed = 0;
+  $('facWipe').textContent = '正在擦除…';
+  $('facWipe').className = 'warn-btn';
+  try {
+    await fetch('/api/set?k=factory_wipe&v=1');
+  } catch (e) {}
+  log('彻底恢复出厂设置: 正在擦除并重启，热点 黑猫智能手台-XXXXXX 会重新出现', 'err');
+};
+
+/* ------------------------------------------------------------------ OTA --- */
+/*
+ * 固件升级：把 openradiolink.bin 原样 POST 到 /api/ota。伺服端写入备用 OTA
+ * 分区、校验镜像后才切换启动分区并重启；上传中断或文件不对只会被拒绝，
+ * 正在运行的固件不受影响。
+ */
+$('otaBtn').onclick = async () => {
+  const f = $('otaFile').files && $('otaFile').files[0];
+  if (!f) { log('请先选择固件文件 (*.bin)', 'err'); return; }
+  if (!/\.bin$/i.test(f.name)) { log('请选择手台的 .bin 应用 OTA 固件', 'err'); return; }
+  if ($('otaBtn').disabled) return;
+  $('otaBtn').disabled = true;
+  $('otaBtn').textContent = '上传中…';
+  $('otaHint').textContent = '上传 0%';
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded * 100 / e.total);
+      $('otaHint').textContent = '上传 ' + pct + '% （' + Math.round(e.loaded / 1024) + ' / ' + Math.round(e.total / 1024) + ' KB）';
+    }
+  };
+  xhr.onload = () => {
+    let j = {};
+    try { j = JSON.parse(xhr.responseText); } catch (e) {}
+    if (j.ok) {
+      $('otaHint').textContent = '校验通过，设备正在重启…';
+      log('固件上传完成，设备正在重启升级…', 'good');
+      let tries = 0;
+      const iv = setInterval(async () => {
+        tries++;
+        try {
+          const r = await fetch('/api/status', { cache: 'no-store' });
+          if (r.ok) { clearInterval(iv); $('otaHint').textContent = '升级完成，正在刷新面板…'; setTimeout(() => location.reload(), 800); }
+        } catch (e) {}
+        if (tries > 40) { clearInterval(iv); $('otaHint').textContent = '等待设备超时，请手动刷新'; }
+      }, 2000);
+    } else {
+      $('otaBtn').disabled = false;
+      $('otaBtn').textContent = '上传升级固件';
+      $('otaHint').textContent = '升级失败：' + (j.err || ('HTTP ' + xhr.status));
+      log('固件升级失败: ' + (j.err || xhr.status), 'err');
+    }
+  };
+  xhr.onerror = () => {
+    $('otaBtn').disabled = false;
+    $('otaBtn').textContent = '上传升级固件';
+    $('otaHint').textContent = '上传失败（连接中断）';
+    log('固件上传失败：连接中断', 'err');
+  };
+  try {
+    await ORLControl.authorizeXhr(xhr);
+    xhr.send(f);
+  } catch (e) {
+    $('otaBtn').disabled = false;
+    $('otaBtn').textContent = '上传升级固件';
+    $('otaHint').textContent = e.message;
+  }
+};
+
+/* ------------------------------------------------------------------ SDR --- */
+
+/* Only touch the DOM when the label really changes: the 1 s meter poll and
+ * the 3 s status poll both render the PTT buttons. */
+function setPttLabel(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
+/* PCM16 LE, mono. All durations are derived from the board's sample rate. */
+const SDR = {
+  on: false, ws: null, http: false, ctx: null, sp: null, worklet: null,
+  wire: 16000, maxFrame: 2048, player: 'none', frames: 0, peak: 0,
+  ptt: false, keyed: false, keyPending: false, txEpoch: 0, rxRun: 0,
+  micCtx: null, micStream: null, micSp: null, micPeak: 0, micFrames: 0,
+  tick: null, txQueue: [], txQueued: 0, txBusy: false, txDrop: 0,
+  rxStats: {ms: 0, underruns: 0, dropped: 0}, httpMs: 0,
+  control: Promise.resolve(), session: Promise.resolve(), releasePending: Promise.resolve(true),
+  txIdle: Promise.resolve(), keyId: 0, keyAck: null,
+  sid: 0, activeTx: 0, txId: 0, stateRun: 0,
+  client: Math.floor(Math.random()*4294967294)+1,
+};
+
+function sdrBadge(txt, cls) {
+  $('sdrBadge').textContent = txt;
+  $('sdrBadge').className = 'tag-chip' + (cls ? ' ' + cls : '');
+}
+(function sdrHttpsEntry() {
+  if (!window.isSecureContext) {
+    $('sdrHttpsLink').href = 'https://' + location.hostname +
+      (location.port && location.port !== '80' ? ':' + location.port : '') + '/';
+    $('sdrHttpsHint').style.display = '';
+  }
+})();
+
+/* Fixed anti-alias/reconstruction filters; no level-dependent processing. */
+function sdrBiquad(fs, fc, Q) {
+  const w = 2 * Math.PI * fc / fs, c = Math.cos(w), a = Math.sin(w) / (2 * Q);
+  return {b0: (1-c)/2/(1+a), b1: (1-c)/(1+a), b2: (1-c)/2/(1+a),
+    a1: -2*c/(1+a), a2: (1-a)/(1+a), x1: 0, x2: 0, y1: 0, y2: 0};
+}
+function sdrBiquadRun(f, x) {
+  const y = f.b0*x + f.b1*f.x1 + f.b2*f.x2 - f.a1*f.y1 - f.a2*f.y2;
+  f.x2 = f.x1; f.x1 = x; f.y2 = f.y1; f.y1 = y;
+  return y;
+}
+function sdrLowPass4(fs) {
+  return [sdrBiquad(fs, 3600, 0.5411961), sdrBiquad(fs, 3600, 1.3065630)];
+}
+function sdrLowPassRun(f, x) { return sdrBiquadRun(f[1], sdrBiquadRun(f[0], x)); }
+
+/* Used in the audio thread, and by the receive-only insecure-HTTP fallback. */
+class SdrPlayback {
+  constructor(wire, native) {
+    this.wire = wire; this.cap = wire * 2; this.ring = new Float32Array(this.cap);
+    this.w = 0; this.r = 0; this.n = 0; this.pos = 0; this.step = wire / native;
+    this.prime = Math.round(wire * 0.90); this.reprime = Math.round(wire * 0.30);
+    this.need = this.prime; this.primed = false; this.underruns = 0; this.dropped = 0;
+    this.lp = sdrLowPass4(native);
+  }
+  clear() {
+    this.w = this.r = this.n = this.pos = 0;
+    this.primed = false; this.need = this.prime;
+    this.lp.forEach(f => { f.x1 = f.x2 = f.y1 = f.y2 = 0; });
+  }
+  push(pcm) {
+    for (let i = 0; i < pcm.length; i++) {
+      if (this.n === this.cap) {
+        this.r = (this.r + 1) % this.cap; this.n--; this.dropped++;
+      }
+      this.ring[this.w] = pcm[i] / 32768;
+      this.w = (this.w + 1) % this.cap; this.n++;
+    }
+  }
+  render(out) {
+    out.fill(0);
+    if (!this.primed) {
+      if (this.n < this.need) return;
+      this.primed = true;
+    }
+    for (let i = 0; i < out.length; i++) {
+      if (this.n < 3) {
+        this.primed = false; this.need = this.reprime; this.underruns++; break;
+      }
+      const cap = this.cap, r = this.r, f = this.pos;
+      const p0 = this.ring[(r-1+cap)%cap], p1 = this.ring[r];
+      const p2 = this.ring[(r+1)%cap], p3 = this.ring[(r+2)%cap];
+      const c1 = (p2-p0)*0.5, c2 = p0-2.5*p1+2*p2-0.5*p3;
+      const c3 = -0.5*p0+1.5*p1-1.5*p2+0.5*p3;
+      out[i] = sdrLowPassRun(this.lp, ((c3*f+c2)*f+c1)*f+p1);
+      this.pos += this.step;
+      while (this.pos >= 1 && this.n > 0) {
+        this.pos--; this.r = (this.r+1)%cap; this.n--;
+      }
+    }
+  }
+  stats() {
+    return {ms: Math.round(this.n*1000/this.wire), underruns: this.underruns,
+      dropped: this.dropped};
+  }
+}
+
+/* Serialized into an AudioWorklet module; both resamplers run off the UI thread. */
+function sdrRegisterAudio() {
+  class RadioPlayer extends AudioWorkletProcessor {
+    constructor(options) {
+      super(); this.audio = new SdrPlayback(options.processorOptions.wire, sampleRate);
+      this.elapsed = 0;
+      this.port.onmessage = e => {
+        if (e.data.type === 'push') this.audio.push(e.data.samples);
+        if (e.data.type === 'clear') this.audio.clear();
+      };
+    }
+    process(inputs, outputs) {
+      const out = outputs[0][0];
+      this.audio.render(out); this.elapsed += out.length;
+      if (this.elapsed >= sampleRate) {
+        this.elapsed -= sampleRate; this.port.postMessage(this.audio.stats());
+      }
+      return true;
+    }
+  }
+  class RadioRecorder extends AudioWorkletProcessor {
+    constructor(options) {
+      super(); this.wire = options.processorOptions.wire;
+      this.size = Math.min(1024, Math.round(this.wire * 0.040));
+      this.active = false;
+      this.port.onmessage = e => {
+        this.active = !!e.data.on; this.epoch = e.data.epoch;
+        this.buf = new Int16Array(this.size); this.fill = 0;
+        this.phase = 0; this.sum = 0; this.count = 0; this.peak = 0;
+        this.lp = sdrLowPass4(sampleRate);
+      };
+    }
+    process(inputs, outputs) {
+      if (outputs[0]) outputs[0].forEach(out => out.fill(0));
+      if (!this.active || !inputs[0] || !inputs[0][0]) return true;
+      const input = inputs[0][0];
+      for (let i = 0; i < input.length; i++) {
+        this.sum += sdrLowPassRun(this.lp, input[i]); this.count++;
+        this.phase += this.wire;
+        if (this.phase >= sampleRate) {
+          this.phase -= sampleRate;
+          const v = Math.max(-32768, Math.min(32767, Math.round(this.sum/this.count*32767)));
+          this.sum = 0; this.count = 0; this.buf[this.fill++] = v;
+          this.peak = Math.max(this.peak, Math.abs(v));
+          if (this.fill === this.size) {
+            this.port.postMessage({epoch: this.epoch, samples: this.buf,
+              stamp: currentTime, peak: this.peak}, [this.buf.buffer]);
+            this.buf = new Int16Array(this.size); this.fill = 0; this.peak = 0;
+          }
+        }
+      }
+      return true;
+    }
+  }
+  registerProcessor('radio-player', RadioPlayer);
+  registerProcessor('radio-recorder', RadioRecorder);
+}
+function sdrWorkletSource() {
+  return [sdrBiquad, sdrBiquadRun, sdrLowPass4, sdrLowPassRun, SdrPlayback]
+    .map(f => f.toString()).join('\n') + '\n(' + sdrRegisterAudio.toString() + ')();';
+}
+
+let sdrRepAcc = 0;
+function sdrReport(tag) {
+  const q = new URLSearchParams({tag, on: +SDR.on, ptt: +SDR.ptt,
+    tr: SDR.http ? 'http' : 'ws', ws: SDR.ws ? SDR.ws.readyState : -1,
+    ctx: SDR.ctx ? SDR.ctx.state : 'none', sr: SDR.ctx ? SDR.ctx.sampleRate : 0,
+    wire: SDR.wire, pl: SDR.player, fr: SDR.frames, mfr: SDR.micFrames,
+    rq: SDR.rxStats.ms, ru: SDR.rxStats.underruns, rd: SDR.rxStats.dropped,
+    tq: Math.round(SDR.txQueued*1000/SDR.wire), td: SDR.txDrop,
+    wb: SDR.ws ? SDR.ws.bufferedAmount : 0, hm: SDR.httpMs});
+  fetch('/api/sdr_report?' + q, {cache: 'no-store'}).catch(() => {});
+}
+
+async function sdrMicList() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    const sel = $('sdrMic'), saved = localStorage.getItem('sdrMicId') || sel.value;
+    sel.innerHTML = '';
+    inputs.forEach((d, i) => {
+      const o = document.createElement('option'); o.value = d.deviceId;
+      o.textContent = d.label || ('麦克风 ' + (i+1)); sel.appendChild(o);
+    });
+    if (inputs.some(d => d.deviceId === saved)) sel.value = saved;
+    sel.onchange = () => localStorage.setItem('sdrMicId', sel.value);
+  } catch (e) { log('枚举麦克风失败: ' + e, 'err'); }
+}
+
+/* Keep the timeout in force while consuming the body, not just its headers. */
+async function sdrRequest(path, options = {}, type = 'json') {
+  const controller = new AbortController(), start = performance.now();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const r = await fetch(path, {...options, cache: 'no-store', signal: controller.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = type === 'pcm' ? await r.arrayBuffer() :
+      (type === 'json' || type === 'state') ? await r.json() : await r.arrayBuffer();
+    if (type === 'json' && data.ok === false) throw new Error(data.err || data.reason || '设备拒绝操作');
+    SDR.httpMs = Math.round(performance.now() - start);
+    return data;
+  } finally { clearTimeout(timer); }
+}
+function sdrOnline() { return SDR.http || !!(SDR.ws && SDR.ws.readyState === 1); }
+function sdrHttpPtt(on, tx = SDR.activeTx, sid = SDR.sid, epoch = SDR.txEpoch) {
+  if (!sid || !tx) return Promise.resolve(true);
+  SDR.control = SDR.control.catch(() => {}).then(async () => {
+    if (on && (!SDR.on || !SDR.ptt || SDR.txEpoch !== epoch || SDR.sid !== sid)) return false;
+    const id = ++SDR.keyId;
+    const reply = await sdrRequest('/api/sdr_ptt?on=' + (+on) + '&sid=' + sid + '&tx=' + tx + '&id=' + id,
+      {keepalive: !on});
+    return reply.sid === sid && reply.tx === tx && reply.id === id && reply.ptt === on;
+  });
+  return SDR.control;
+}
+function sdrFinishAck(error, accepted) {
+  const pending = SDR.keyAck;
+  if (!pending) return;
+  SDR.keyAck = null; clearTimeout(pending.timer);
+  if (error) pending.reject(error); else pending.resolve(accepted);
+}
+function sdrPttMsg(on, tx = SDR.activeTx, sid = SDR.sid, epoch = SDR.txEpoch) {
+  const ws = SDR.ws;
+  if (!ws || ws.readyState !== 1 || SDR.http) return sdrHttpPtt(on, tx, sid, epoch);
+  sdrFinishAck(new Error('键控请求已取消'));
+  return new Promise((resolve, reject) => {
+    const id = ++SDR.keyId;
+    const timer = setTimeout(() => sdrFinishAck(new Error('手台端键控确认超时')), 2000);
+    SDR.keyAck = {ws, id, tx, sid, on, timer, resolve, reject};
+    try { ws.send((on ? 'ptt1:' : 'ptt0:') + sid + ':' + tx + ':' + id); }
+    catch (e) { sdrFinishAck(e); }
+  });
+}
+function sdrSendAudio(pcm, stamp) {
+  if (!SDR.on || !SDR.ptt || !SDR.keyed) return;
+  if (SDR.ctx && SDR.ctx.currentTime - stamp > 0.5) { SDR.txDrop += pcm.length; return; }
+  if (SDR.http) {
+    SDR.txQueue.push({pcm, stamp}); SDR.txQueued += pcm.length;
+    while (SDR.txQueued > SDR.wire * 0.5) SDR.txDrop += sdrDropTxFrame();
+    if (!SDR.txBusy) SDR.txIdle = sdrHttpTxPump();
+    return;
+  }
+  const ws = SDR.ws;
+  if (!ws || ws.readyState !== 1) { sdrPttUp(); return; }
+  if (ws.bufferedAmount > SDR.wire * 2 * 0.25) {
+    SDR.txDrop += pcm.length;
+    ws.close(); sdrHttpStart();
+    log('音频发送持续积压，已停止本次发射，请检查网络后重试', 'err'); return;
+  }
+  const max = Math.floor((SDR.maxFrame - 8) / 2);
+  for (let i = 0; i < pcm.length; i += max) {
+    try {
+      const part = pcm.subarray(i, i+max), frame = new ArrayBuffer(8+part.byteLength), view = new DataView(frame);
+      view.setUint32(0, SDR.sid, true); view.setUint32(4, SDR.activeTx, true);
+      new Int16Array(frame, 8).set(part); ws.send(frame);
+    }
+    catch (e) { sdrPttUp(); log('音频发送失败: ' + e, 'err'); break; }
+  }
+}
+function sdrDropTxFrame() {
+  const frame = SDR.txQueue.shift(); SDR.txQueued -= frame.pcm.length; return frame.pcm.length;
+}
+async function sdrHttpTxPump() {
+  if (SDR.txBusy) return;
+  SDR.txBusy = true;
+  const epoch = SDR.txEpoch, sid = SDR.sid, tx = SDR.activeTx;
+  try {
+    while (SDR.http && SDR.ptt && SDR.keyed && SDR.txEpoch === epoch && SDR.txQueue.length) {
+      while (SDR.txQueue.length && SDR.ctx.currentTime-SDR.txQueue[0].stamp > 0.5)
+        SDR.txDrop += sdrDropTxFrame();
+      if (!SDR.txQueue.length) break;
+      const frames = []; let count = 0;
+      while (SDR.txQueue.length && count+SDR.txQueue[0].pcm.length <= 4096) {
+        const f = SDR.txQueue.shift(); frames.push(f.pcm); count += f.pcm.length;
+      }
+      SDR.txQueued -= count;
+      const body = new Int16Array(count); let off = 0;
+      frames.forEach(f => {body.set(f, off); off += f.length;});
+      await sdrRequest('/api/sdr_tx?sid=' + sid + '&tx=' + tx, {method: 'POST', body: body.buffer}, 'empty');
+    }
+  } catch (e) {
+    if (SDR.txEpoch === epoch) { sdrPttUp(); log('HTTP 音频发送失败: ' + e, 'err'); }
+  } finally {
+    SDR.txBusy = false;
+  }
+}
+
+function sdrHttpStart() {
+  if (!SDR.on || SDR.http) return;
+  const ws = SDR.ws; SDR.ws = null; SDR.http = true;
+  sdrFinishAck(new Error('音频连接已切换到 HTTP'));
+  sdrPttUp();
+  if (SDR.tick) { clearInterval(SDR.tick); SDR.tick = null; }
+  if (ws) { try { ws.close(); } catch (e) {} }
+  sdrBadge('HTTP 兼容通道 · 收听中', 'live'); sdrReport('http');
+  const run = ++SDR.rxRun;
+  const pump = async () => {
+    if (!SDR.on || !SDR.http || SDR.rxRun !== run) return;
+    let delay = 50;
+    if (!SDR.ptt) {
+      const start = performance.now();
+      try {
+        const b = await sdrRequest('/api/sdr_rx?sid=' + SDR.sid + '&t=' + Date.now(), {}, 'pcm');
+        if (!SDR.on || !SDR.http || SDR.rxRun !== run) return;
+        if (b.byteLength % 2) throw new Error('音频帧长度无效');
+        if (b.byteLength) sdrRxPush(new Int16Array(b));
+        /* A full response means backlog: fetch again immediately. Otherwise
+         * target a 50 ms period INCLUDING the request, never request + 100 ms. */
+        delay = b.byteLength/2 >= SDR.wire*0.14 ? 0 : Math.max(0, 50-(performance.now()-start));
+      } catch (e) { delay = 200; }
+    }
+    if (SDR.on && SDR.http && SDR.rxRun === run) setTimeout(pump, delay);
+  };
+  pump();
+}
+function sdrConnect() {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/sdr?sid=' + SDR.sid);
+  SDR.ws = ws; ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    if (SDR.ws !== ws || !SDR.on) return;
+    sdrBadge('已连接 · 收听中', 'live'); sdrReport('open');
+    SDR.tick = setInterval(() => {
+      if (SDR.ws !== ws || ws.readyState !== 1 || SDR.keyed) return;
+      if (ws.bufferedAmount < SDR.wire/2) {
+        try { ws.send(new Uint8Array([0])); } catch (e) { ws.close(); }
+      }
+    }, 50);
+  };
+  ws.onclose = e => {
+    if (SDR.ws !== ws || !SDR.on) return;
+    log('音频连接断开（' + e.code + '），改用 HTTP；如需发射请重新点击 PTT', 'err');
+    sdrHttpStart();
+  };
+  ws.onerror = () => {
+    if (SDR.ws !== ws || !SDR.on) return;
+    try { ws.close(); } catch (e) { sdrHttpStart(); }
+  };
+  ws.onmessage = e => {
+    if (SDR.ws !== ws || !SDR.on) return;
+    if (e.data instanceof ArrayBuffer && e.data.byteLength % 2 === 0) sdrRxPush(new Int16Array(e.data));
+    else if (typeof e.data === 'string') {
+      try {
+        const reply = JSON.parse(e.data), pending = SDR.keyAck;
+        if (pending && pending.ws === ws && reply.id === pending.id &&
+            reply.sid === pending.sid && reply.tx === pending.tx) {
+          if (reply.ok !== true) sdrFinishAck(new Error(reply.reason || '手台端拒绝键控'));
+          else sdrFinishAck(null, reply.ptt === pending.on);
+        }
+      } catch (err) {}
+    }
+  };
+}
+
+function sdrRxStart() {
+  if (SDR.ctx) {
+    if (SDR.ctx.state === 'suspended') SDR.ctx.resume().catch(() => {});
+    return SDR.audioReady;
+  }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return Promise.reject(new Error('浏览器不支持 WebAudio'));
+  const ctx = new AC(); SDR.ctx = ctx;
+  SDR.rxGain = ctx.createGain(); SDR.rxGain.connect(ctx.destination);
+  ctx.onstatechange = () => {
+    if (SDR.ctx === ctx && SDR.keyed && ctx.state !== 'running') {
+      sdrPttUp(); log('音频设备暂停，已停止发射', 'err');
+    }
+  };
+  SDR.audioReady = (async () => {
+    let url;
+    try {
+      if (!ctx.audioWorklet) throw new Error('AudioWorklet 需要 HTTPS');
+      url = URL.createObjectURL(new Blob([sdrWorkletSource()], {type: 'text/javascript'}));
+      await ctx.audioWorklet.addModule(url);
+      if (SDR.ctx !== ctx || ctx.state === 'closed') return;
+      const node = new AudioWorkletNode(ctx, 'radio-player', {
+        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+        processorOptions: {wire: SDR.wire}});
+      node.port.onmessage = e => { if (SDR.worklet === node) SDR.rxStats = e.data; };
+      node.connect(SDR.rxGain); SDR.worklet = node; SDR.player = 'worklet';
+    } catch (e) {
+      if (SDR.ctx !== ctx || ctx.state === 'closed') return;
+      /* HTTP pages may listen without microphone permission or a secure context. */
+      const sp = ctx.createScriptProcessor(1024, 1, 1), audio = new SdrPlayback(SDR.wire, ctx.sampleRate);
+      sp.onaudioprocess = event => {
+        audio.render(event.outputBuffer.getChannelData(0)); SDR.rxStats = audio.stats();
+      };
+      const quiet = ctx.createConstantSource(); quiet.offset.value = 0;
+      quiet.connect(sp); quiet.start(); sp.connect(SDR.rxGain);
+      SDR.sp = sp; SDR.quiet = quiet; SDR.fallback = audio; SDR.player = 'scriptprocessor';
+    } finally { if (url) URL.revokeObjectURL(url); }
+  })();
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  return SDR.audioReady;
+}
+function sdrRxPush(pcm) {
+  SDR.frames++;
+  for (let i = 0; i < pcm.length; i++) SDR.peak = Math.max(SDR.peak, Math.abs(pcm[i]));
+  if (SDR.worklet) SDR.worklet.port.postMessage({type: 'push', samples: pcm}, [pcm.buffer]);
+  else if (SDR.fallback) SDR.fallback.push(pcm);
+}
+function sdrRxClear() {
+  if (SDR.worklet) SDR.worklet.port.postMessage({type: 'clear'});
+  if (SDR.fallback) SDR.fallback.clear();
+}
+async function sdrToggle() {
+  $('sdrBtn').disabled = true;
+  try {
+    if (SDR.on) { await sdrStop(); return; }
+    /* AudioContext creation stays in the user's click gesture. */
+    const ready = sdrRxStart();
+    await Promise.all([sdrSession(true), ready]);
+    SDR.on = true; SDR.http = false; SDR.frames = SDR.peak = SDR.txDrop = 0;
+    SDR.rxStats = {ms: 0, underruns: 0, dropped: 0};
+    $('sdrBtn').textContent = '关闭网络通联'; $('sdrPtt').disabled = false;
+    sdrBadge('连接中…'); sdrMicList(); sdrConnect(); sdrStateStart();
+  } catch (e) { log('网络通联开启失败: ' + e, 'err'); await sdrStop(); }
+  finally { $('sdrBtn').disabled = false; }
+}
+function sdrSession(on) {
+  /* Closing the old session precedes opening a new one. A stale tab can only
+   * close its own sid. Neither tokenless nor old PCM is accepted by r10. */
+  SDR.session = SDR.session.catch(() => {}).then(async () => {
+    if (!on && !SDR.sid) return;
+    const reply = await sdrRequest('/api/sdr?on=' + (+on) +
+      (on ? '&client=' + SDR.client : '&sid=' + SDR.sid));
+    if (on) {
+      if (!reply.sid || reply.on !== true) throw new Error('会话未建立');
+      if (SDR.sid !== reply.sid) { SDR.txId = 0; SDR.activeTx = 0; }
+      SDR.sid = reply.sid;
+    } else { SDR.sid = 0; }
+  });
+  return SDR.session;
+}
+
+function sdrApplyState(reply, sid = SDR.sid) {
+  if (!SDR.on || SDR.sid !== sid) return;
+  if (reply.sid !== sid || !reply.on) {
+    sdrPttUp(false); sdrStop(false);
+    log('手台端音频会话已结束，请重新开启网络通联', 'err'); return;
+  }
+  // A poll sent before key-on can report the preceding TX. Only a matching
+  // transmission ID is authoritative for this press.
+  if (SDR.keyed && reply.tx === SDR.activeTx && !reply.ptt) {
+    sdrPttUp(false);
+    log('手台端已停止发射: ' + (reply.reason || 'released'), 'err');
+  }
+}
+function sdrStateStart() {
+  const run = ++SDR.stateRun, sid = SDR.sid;
+  const poll = async () => {
+    if (!SDR.on || run !== SDR.stateRun || sid !== SDR.sid) return;
+    try { sdrApplyState(await sdrRequest('/api/sdr_state?sid=' + sid, {}, 'state'), sid); }
+    catch (e) {
+      // A state failure while transmitting ends local capture as well.
+      if (SDR.on && run === SDR.stateRun && SDR.ptt) {
+        sdrPttUp(); log('无法确认手台端发射状态，已停止麦克风', 'err');
+      }
+    }
+    if (SDR.on && run === SDR.stateRun) setTimeout(poll, 500);
+  };
+  poll();
+}
+function sdrStop(notify = true) {
+  sdrPttUp(notify); SDR.on = false; SDR.http = false; SDR.rxRun++; SDR.stateRun++;
+  if (SDR.tick) { clearInterval(SDR.tick); SDR.tick = null; }
+  const ws = SDR.ws; SDR.ws = null;
+  if (ws) { try { ws.close(); } catch (e) {} }
+  if (SDR.quiet) { try { SDR.quiet.stop(); SDR.quiet.disconnect(); } catch (e) {} }
+  if (SDR.sp) { SDR.sp.onaudioprocess = null; SDR.sp.disconnect(); }
+  if (SDR.worklet) SDR.worklet.disconnect();
+  const ctx = SDR.ctx; SDR.ctx = SDR.sp = SDR.worklet = SDR.quiet = SDR.fallback = null;
+  SDR.player = 'none'; if (ctx) ctx.close().catch(() => {});
+  $('sdrBtn').textContent = '开启网络通联'; $('sdrPtt').disabled = true; sdrBadge('已关闭');
+  sdrFinishAck(new Error('网络通联已关闭'));
+  if (!notify) { SDR.sid = 0; return Promise.resolve(); }
+  return sdrSession(false).catch(e => log('关闭网络通联失败: ' + e, 'err'));
+}
+
+async function sdrPttDown(ev) {
+  if (ev) ev.preventDefault();
+  if (!SDR.on || SDR.ptt) return;
+  if (!window._radio || !window._radio.ready) { log('射频待设置，请先确认模块和收发频率', 'err'); return; }
+  if (!sdrOnline()) { log('音频通道未连接', 'err'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    log('浏览器麦克风需要 HTTPS，请从面板 HTTPS 入口打开', 'err'); return;
+  }
+  SDR.ptt = true; const epoch = ++SDR.txEpoch, tx = ++SDR.txId, sid = SDR.sid;
+  SDR.activeTx = tx;
+  setPttLabel($('sdrPtt'), '正在打开麦克风 · 点击取消');
+  const active = () => SDR.on && SDR.ptt && SDR.txEpoch === epoch;
+  try {
+    await sdrRxStart();
+    const released = await SDR.releasePending;
+    await SDR.txIdle;
+    if (!active()) return;
+    if (!released) throw new Error('上次松开未确认，请关闭后重新开启网络通联');
+    if (!SDR.worklet) throw new Error('麦克风采集需要支持 AudioWorklet 的 HTTPS 浏览器');
+    if (SDR.ctx.sampleRate < SDR.wire) throw new Error('麦克风采样率低于电台音频采样率');
+    const audio = {channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false};
+    if ($('sdrMic').value) audio.deviceId = {exact: $('sdrMic').value};
+    const stream = await navigator.mediaDevices.getUserMedia({audio});
+    if (!active()) { stream.getTracks().forEach(t => t.stop()); return; }
+    SDR.micStream = stream; SDR.micCtx = SDR.ctx;
+    const ctx = SDR.ctx, src = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, 'radio-recorder', {
+      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+      channelCount: 1, channelCountMode: 'explicit', processorOptions: {wire: SDR.wire}});
+    SDR.micSource = src; SDR.micSp = node; SDR.micPeak = SDR.micFrames = 0;
+    node.onprocessorerror = () => {
+      if (active()) { sdrPttUp(); log('麦克风音频任务停止，已松开 PTT', 'err'); }
+    };
+    SDR.micLabel = stream.getAudioTracks()[0].label || '麦克风';
+    node.port.onmessage = e => {
+      if (!active() || !SDR.keyed || e.data.epoch !== epoch) return;
+      SDR.micFrames++; SDR.micPeak = Math.max(SDR.micPeak, e.data.peak);
+      sdrSendAudio(e.data.samples, e.data.stamp);
+    };
+    stream.getTracks().forEach(t => { t.onended = () => {
+      if (active()) { sdrPttUp(); log('麦克风已断开，停止发射', 'err'); }
+    }; });
+    src.connect(node); node.connect(ctx.destination); // Recorder output is always zero.
+    await ctx.resume(); if (!active()) return;
+    SDR.keyPending = true;
+    const keyed = await sdrPttMsg(true, tx, sid, epoch);
+    if (!active()) return;
+    if (!keyed) throw new Error('键控未确认');
+    if (ctx.state !== 'running') throw new Error('音频设备已暂停');
+    SDR.keyPending = false; SDR.keyed = true; SDR.rxGain.gain.value = 0; sdrRxClear();
+    node.port.postMessage({on: true, epoch});
+    $('sdrPtt').className = 'tx live'; setPttLabel($('sdrPtt'), '■ 发射中 · 点击停止');
+    sdrReport('mic-ready'); sdrMicList();
+  } catch (e) {
+    if (active()) { sdrPttUp(); log('麦克风发射失败: ' + e, 'err'); }
+  }
+}
+function sdrPttUp(notify = true) {
+  stopSdrPttClock();
+  const release = notify && (SDR.keyed || SDR.keyPending);
+  const tx = SDR.activeTx, sid = SDR.sid;
+  SDR.ptt = SDR.keyed = SDR.keyPending = false; SDR.txEpoch++;
+  SDR.txQueue = []; SDR.txQueued = 0;
+  if (SDR.micSp) {
+    SDR.micSp.port.onmessage = null; SDR.micSp.port.postMessage({on: false});
+    SDR.micSp.disconnect(); SDR.micSp = null;
+  }
+  if (SDR.micSource) { SDR.micSource.disconnect(); SDR.micSource = null; }
+  if (SDR.micStream) {
+    SDR.micStream.getTracks().forEach(t => { t.onended = null; t.stop(); }); SDR.micStream = null;
+  }
+  SDR.micCtx = null;
+  if (release) {
+    SDR.releasePending = sdrPttMsg(false, tx, sid).then(ok => {
+      if (!ok) throw new Error('手台端未确认松开 PTT');
+      return true;
+    }).catch(async () => {
+      /* A blocked audio socket cannot carry an urgent release reliably. */
+      if (SDR.on && !SDR.http) {
+        const ws = SDR.ws;
+        if (ws) { try { ws.close(); } catch (e) {} }
+        sdrHttpStart();
+      }
+      await sdrHttpPtt(false, tx, sid); return true;
+    }).catch(e => { log('松开 PTT 请求失败: ' + e, 'err'); return false; });
+    sdrRxClear();
+  }
+  if (SDR.rxGain) SDR.rxGain.gain.value = 1;
+  $('sdrPtt').className = 'tx'; setPttLabel($('sdrPtt'), '● 点击发射 (PTT)');
+}
+async function sdrBeepTest() {
+  try {
+    await sdrRxStart(); const ctx = SDR.ctx; await ctx.resume();
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.frequency.value = 1000; g.gain.value = 0.15;
+    osc.connect(g); g.connect(ctx.destination); osc.start();
+    osc.stop(ctx.currentTime+0.7); osc.onended = () => {osc.disconnect(); g.disconnect();};
+  } catch (e) { log('测试喇叭失败: ' + e, 'err'); }
+}
+$('sdrBtn').onclick = sdrToggle; $('sdrBeep').onclick = sdrBeepTest;
+$('sdrMicScan').onclick = sdrMicList;
+async function sdrPttToggle(ev) {
+  if (ev) ev.preventDefault();
+  if (SDR.ptt) { sdrPttUp(); return; }
+  const seconds = Math.min(30, Math.max(5, parseInt($('secs').value, 10) || 30));
+  const down = sdrPttDown(ev), epoch = SDR.txEpoch;
+  await down;
+  if (SDR.ptt && SDR.keyed && SDR.txEpoch === epoch) {
+    SDR.pttTimer = setTimeout(() => {sdrPttUp(); log('单次发射限时已到，停止发射', 'err');}, seconds*1000);
+  }
+}
+function stopSdrPttClock() {
+  if (SDR.pttTimer) { clearTimeout(SDR.pttTimer); SDR.pttTimer = null; }
+}
+$('sdrPtt').addEventListener('click', sdrPttToggle);
+window.addEventListener('blur', () => sdrPttUp());
+window.addEventListener('pagehide', () => sdrPttUp());
+document.addEventListener('visibilitychange', () => { if (document.hidden) sdrPttUp(); });
+window.addEventListener('orl-control-lost', () => { sdrStop(false); });
+document.addEventListener('click', () => {
+  if (SDR.ctx && SDR.ctx.state === 'suspended') SDR.ctx.resume().catch(() => {});
+});
+
+
+/* Mobile Section Filter Navigation */
+document.querySelectorAll('#mobNav button').forEach(btn => {
+  btn.onclick = () => {
+    const tab = btn.getAttribute('data-sec-tab');
+    document.querySelectorAll('#mobNav button').forEach(b => {
+      b.className = (b === btn) ? 'on' : '';
+    });
+    document.querySelectorAll('[data-mob-sec]').forEach(sec => {
+      const k = sec.getAttribute('data-mob-sec');
+      sec.style.display = (tab === 'all' || tab === k) ? '' : 'none';
+    });
+  };
+});
+
+let last = '';
+let holdSyncUntil = 0;
+function touchInput() { holdSyncUntil = Date.now() + 1800; }
+
+const spkIds = ['eq_spk_bass','eq_spk_warm','eq_spk_body','eq_spk_clear','eq_spk_pres','eq_spk_air'];
+const micIds = ['eq_mic_bass','eq_mic_warm','eq_mic_body','eq_mic_clear','eq_mic_pres','eq_mic_air'];
+
+function fmtSlider(id, v) {
+  if (id === 'micgain') return (v * 6) + 'dB';
+  if (id === 'txgain' || id === 'ntxgain' || id === 'bgtx' || id === 'gain' || id === 'rxnetgain') {
+    const n = Number(v);
+    if (!(n > 0)) return '关闭 (0×)';
+    const mult = n / 16;
+    const db = 20 * Math.log10(mult);
+    return mult.toFixed(2) + '× (' + (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB)';
+  }
+  if (id.indexOf('eq_') === 0) return (v > 0 ? '+' + v : v) + 'dB';
+  return v;
+}
+
+function updateEqCurve() {
+  const xs = [50, 150, 250, 350, 450, 550];
+  const spkPts = xs.map((x, i) => {
+    const v = parseFloat($(spkIds[i]).value || 0);
+    const y = 42 - (v / 12) * 28;
+    return x + ',' + y.toFixed(1);
+  });
+  const micPts = xs.map((x, i) => {
+    const v = parseFloat($(micIds[i]).value || 0);
+    const y = 42 - (v / 12) * 28;
+    return x + ',' + y.toFixed(1);
+  });
+  $('eqLineSpk').setAttribute('points', spkPts.join(' '));
+  $('eqLineMic').setAttribute('points', micPts.join(' '));
+  $('eqAreaSpk').setAttribute('d', 'M0,42 L' + spkPts.join(' L') + ' L600,42 L600,84 L0,84 Z');
+}
+
+let activeEqDir = 'spk';
+$('eqTabSpk').onclick = () => {
+  activeEqDir = 'spk';
+  $('eqTabSpk').className = 'on';
+  $('eqTabMic').className = '';
+  $('eqBankSpk').style.display = 'grid';
+  $('eqBankMic').style.display = 'none';
+};
+$('eqTabMic').onclick = () => {
+  activeEqDir = 'mic';
+  $('eqTabMic').className = 'on';
+  $('eqTabSpk').className = '';
+  $('eqBankMic').style.display = 'grid';
+  $('eqBankSpk').style.display = 'none';
+};
+
+/* EQ Presets & Immediate Zero Reset */
+document.querySelectorAll('[data-eqp]').forEach(btn => {
+  btn.onclick = async () => {
+    const p = btn.dataset.eqp;
+    const curves = {
+      voice: [-4, -4, 0, 3, 2, 2],
+      punch: [-8, -8, 0, 5, 5, 3],
+      warm:  [2, 3, 2, 0, -3, -4],
+      flat:  [0, 0, 0, 0, 0, 0],
+    };
+    const vals = curves[p];
+    if (!vals) return;
+    const ids = activeEqDir === 'spk' ? spkIds : micIds;
+    holdSyncUntil = Date.now() + 2500;
+    for (let i = 0; i < 6; i++) {
+      $(ids[i]).value = vals[i];
+      $(ids[i] + 'V').textContent = fmtSlider(ids[i], vals[i]);
+    }
+    updateEqCurve();
+    for (let i = 0; i < 6; i++) {
+      await fetch('/api/set?k=' + ids[i] + '&v=' + vals[i]);
+    }
+    holdSyncUntil = 0;
+    last = '';
+    log('已应用 ' + (activeEqDir === 'spk' ? '喇叭' : '麦克风') + ' EQ 预设: ' + btn.textContent, 'good');
+    refresh();
+  };
+});
+
+/* Fix #2: eqReset immediately zeros all 12 faders + SVG curve + clears debounce lock */
+$('eqReset').onclick = async () => {
+  holdSyncUntil = 0;
+  last = '';
+  for (let i = 0; i < 6; i++) {
+    $(spkIds[i]).value = 0;
+    $(spkIds[i] + 'V').textContent = '0dB';
+    $(micIds[i]).value = 0;
+    $(micIds[i] + 'V').textContent = '0dB';
+  }
+  updateEqCurve();
+  await cmd('eq_reset', 0);
+};
+
+const R = [
+  ['sq','sqV'], ['vol','volV'],
+  ['txgain','txgainV'], ['ntxgain','ntxgainV'], ['bgtx','bgtxV'], ['gain','gainV'], ['rxnetgain','rxnetgainV'],
+  ['eq_spk_bass','eq_spk_bassV'], ['eq_spk_warm','eq_spk_warmV'],
+  ['eq_spk_body','eq_spk_bodyV'], ['eq_spk_clear','eq_spk_clearV'],
+  ['eq_spk_pres','eq_spk_presV'], ['eq_spk_air','eq_spk_airV'],
+  ['eq_mic_bass','eq_mic_bassV'], ['eq_mic_warm','eq_mic_warmV'],
+  ['eq_mic_body','eq_mic_bodyV'], ['eq_mic_clear','eq_mic_clearV'],
+  ['eq_mic_pres','eq_mic_presV'], ['eq_mic_air','eq_mic_airV']
+];
+
+for (const [id, vid] of R) {
+  const e = $(id);
+  if (!e) continue;
+  e.addEventListener('input', () => {
+    touchInput();
+    $(vid).textContent = fmtSlider(id, e.value);
+    if (id.indexOf('eq_') === 0) updateEqCurve();
+  });
+  e.addEventListener('change', () => {
+    touchInput();
+    cmd(id, e.value);
+  });
+}
+
+/* The four function keys are remappable: one table, pushed as fp_key0..fp_key3. */
+const FP_ACTS = [
+  ['off', '无功能'], ['ch+', '频道 +'], ['ch-', '频道 -'],
+  ['vol+', '音量 +'], ['vol-', '音量 -'],
+  ['sql+', '静噪 +'], ['sql-', '静噪 -'],
+  ['power', '高/低功率切换'], ['monitor', '守听开/关'],
+  ['mode', '模式切换 (0→1→2)'], ['bridge', '模拟桥开/关']
+];
+for (let i = 0; i < 4; i++) {
+  const sel = $('fpk' + i);
+  if (!sel) continue;
+  sel.innerHTML = FP_ACTS.map(([v, t]) => '<option value="' + v + '">' + t + '</option>').join('');
+  sel.addEventListener('change', () => {
+    touchInput();
+    cmd('fp_key' + i, sel.value);
+  });
+}
+
+async function cmd(k, v) {
+  try {
+    const r = await fetch('/api/set?k=' + encodeURIComponent(k) + '&v=' + encodeURIComponent(v));
+    const j = await r.json();
+    log(k + ' = ' + v + (j.ok ? '  [OK]' : '  [失败: ' + (j.err || '未知') + ']'), j.ok ? 'good' : 'err');
+    last = '';
+    setTimeout(refresh, 60);
+    return j;
+  } catch (e) {
+    log(k + ' 请求异常: ' + e, 'err');
+  }
+}
+
+$('spkVol').addEventListener('input', () => {
+  touchInput();
+  $('spkVolV').textContent = $('spkVol').value;
+});
+$('spkVol').addEventListener('change', () => {
+  touchInput();
+  cmd('spk_vol', $('spkVol').value);
+});
+$('ixRoomSet1').onclick = () => cmd('ix_room', $('ixRoom1').value);
+$('ixBrokerSet2').onclick = () => cmd('ix_broker', $('ixBroker2').value.trim());
+
+/* MQTT credentials need their own setter: cmd() logs "k = v", which would put
+ * the password in the event log (and the /api/status log tail).  An empty
+ * password field means "keep the stored one"; to go back to an anonymous
+ * connection, empty the username instead. */
+/* Same k/v pairs the GET form takes, but in a POST body: the MQTT password must
+ * not travel in a URL (browser history, proxy logs). */
+async function setPost(k, v) {
+  const r = await fetch('/api/set', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'k=' + encodeURIComponent(k) + '&v=' + encodeURIComponent(v),
+  });
+  return await r.json();
+}
+
+async function credSet() {
+  const u = $('ixUser2').value.trim();
+  const p = $('ixPass2').value;
+  try {
+    let j = await setPost('ix_user', u);
+    if (!j.ok) { log('用户名保存失败: ' + (j.err || '未知'), 'err'); return; }
+    if (p !== '') {
+      j = await setPost('ix_pass', p);
+      if (!j.ok) { log('密码保存失败: ' + (j.err || '未知'), 'err'); return; }
+      $('ixPass2').value = '';
+    }
+    log('EMQX 凭据已保存（' + (u ? '用户 ' + u : '匿名连接') + '）', 'good');
+    last = '';
+    setTimeout(refresh, 60);
+  } catch (e) {
+    log('凭据请求异常: ' + e, 'err');
+  }
+}
+$('ixPassSet2').onclick = credSet;
+
+$('ixTailSel').onchange = () => cmd('tail', $('ixTailSel').value);
+$('ixTailM0').onchange = tailModesApply;
+$('ixTailM1').onchange = tailModesApply;
+$('ixTailM2').onchange = tailModesApply;
+function tailModesValue() {
+  return ['ixTailM0', 'ixTailM1', 'ixTailM2'].reduce((v, id) =>
+    v | ($(id).checked ? +$(id).value : 0), 0);
+}
+function tailModesRestore(modes) {
+  ['ixTailM0', 'ixTailM1', 'ixTailM2'].forEach(id => {
+    const el = $(id);
+    if (document.activeElement !== el) el.checked = !!(modes & +el.value);
+  });
+}
+async function tailModesApply() {
+  const modes = tailModesValue();
+  if (!modes) {
+    log('尾音至少选择一个应用模式；如需全部关闭请选择“关闭尾音”', 'err');
+    tailModesRestore((window._st && window._st.tail && window._st.tail.modes) || 7);
+    return;
+  }
+  await cmd('tail_modes', modes);
+}
+$('ixTailPrev').onclick = () => {
+  const v = parseInt($('ixTailSel').value, 10);
+  if (v) cmd('tail_preview', v);
+  else log('请先选择一种尾音样式再试听', 'err');
+};
+
+$('ixTailUp').onclick = async () => {
+  const f = $('ixTailFile').files[0];
+  if (!f) { log('请先选择 WAV 或 MP3 音频文件', 'err'); return; }
+  if (f.size > 512 * 1024) { log('文件超过 512 KB 上限', 'err'); return; }
+  log('正在上传并转换 ' + f.name + ' (' + f.size + ' B)...');
+  const buf = new Uint8Array(await f.arrayBuffer());
+  try {
+    const r = await fetch('/api/tail_upload', { method: 'POST', body: buf });
+    const j = await r.json();
+    if (j.ok) {
+      log('自定义尾音已存储: ' + j.seconds + ' s (8 kHz μ-law)', 'good');
+      $('ixTailSel').value = '8';
+      cmd('tail', '8');
+      resetPick('ixTailFile', 'ixTailPick', 'ixTailName');
+    } else {
+      log('上传失败: ' + (j.err || ''), 'err');
+    }
+  } catch (e) {
+    log('上传异常: ' + e, 'err');
+  }
+};
+$('ixTailDel').onclick = () => cmd('tail_custom_del', 1);
+
+$('mOn').onclick = () => cmd('monitor', 1);
+$('mOff').onclick = () => cmd('monitor', 0);
+$('mToggleMob').onclick = () => {
+  const monOn = window._st && String(window._st.mode).indexOf('MONITOR') >= 0;
+  cmd('monitor', monOn ? 0 : 1);
+};
+$('pwrT').onclick = () => cmd('power', (window._st && window._st.freq && window._st.freq.power) ? 0 : 1);
+$('bw').onchange = () => cmd('bw', $('bw').value);
+
+function radioFrequency(text) {
+  const r = window._radio;
+  if (!r || !r.min || !/^\d+(?:\.\d*)?$/.test(String(text).trim())) return null;
+  const v = Number(text);
+  return Number.isFinite(v) && v >= r.min && v <= r.max &&
+    Math.abs(v * 80 - Math.round(v * 80)) < 0.0000001 ? v : null;
+}
+
+function radioFrequencyError() {
+  const r = window._radio;
+  log(r && r.min ? ('收发频率须在 ' + r.min + '–' + r.max + ' MHz 内，步进 12.5 kHz') :
+    '请先确认实际安装的模块频段', 'err');
+}
+
+$('rfBand').onchange = () => { $('rfBand').dataset.dirty = '1'; };
+$('txpre').onchange = () => cmd('txpre', $('txpre').checked ? '1' : '0');
+$('rfBandSet').onclick = async () => {
+  const band = $('rfBand').value;
+  if (!band) { radioFrequencyError(); return; }
+  const result = await cmd('rf_band', band);
+  if (result && result.ok) {
+    $('rfBand').dataset.dirty = '';
+    last = '';
+    await refresh();
+    await Promise.all([loadChannels(), loadBridgeChans()]);
+  }
+};
+
+function renderRadio(r) {
+  const old = window._radio;
+  window._radio = r;
+  const selected = !!r.min;
+  $('rfVfoBand').textContent = selected ? r.band + ' ' + r.min + '–' + r.max + ' MHz · TRANSCEIVER VFO' : '模块频段待确认';
+  $('rfRange').textContent = selected ? r.min + '–' + r.max + ' MHz' : '模块频段待确认';
+  $('rfModeCode').textContent = 'MODE 00 · ' + (selected ? r.band : 'RF');
+  $('rfPhysical').textContent = r.ready ? r.band + ' 物理发射' : '射频待设置';
+  $('rfPhysical').className = 'tag-chip' + (r.ready ? ' live' : '');
+  $('rfAntenna').textContent = (selected ? r.model : 'SA818S') + ' 射频天线';
+  $('rfStatus').textContent = r.ready ? (r.model + ' · 射频就绪') :
+    !selected ? '射频待设置：请先确认安装的模块频段。' :
+    !r.compatible ? '射频待设置：请填写并提交本频段收发频率；旧配置和信道仍保留。' :
+    '射频待设置：模块配置未确认，请重新提交收发频率。';
+  $('rfStatus').title = r.reason || '';
+  $('rfStatus').style.color = r.ready ? 'var(--emerald)' : 'var(--amber)';
+  if (!$('rfBand').dataset.dirty && document.activeElement !== $('rfBand')) {
+    $('rfBand').value = selected ? r.band : '';
+  }
+  for (const id of ['ftx', 'frx']) {
+    const el = $(id);
+    el.min = selected ? r.min : '';
+    el.max = selected ? r.max : '';
+    el.placeholder = selected ? r.min + '–' + r.max + ' MHz' : '先确认模块频段';
+    if ((!old || old.band !== r.band) && !r.compatible) el.value = '';
+  }
+  $('fset').disabled = !selected;
+  $('pwrT').disabled = !r.ready;
+  $('chSave').disabled = !r.ready;
+  $('pwrV').textContent = (r.power_applied ? '1.0W 高' : '0.5W 低') +
+    (r.power_pending ? ' · 待松开 PTT' : '');
+}
+
+document.querySelectorAll('[data-sec]').forEach(b => {
+  b.onclick = () => { $('secs').value = b.dataset.sec; };
+});
+
+/* Atomic dual-frequency step using freq_pair */
+document.querySelectorAll('[data-fstep]').forEach(b => {
+  b.onclick = () => {
+    const step = parseFloat(b.dataset.fstep);
+    const tx = radioFrequency($('ftx').value);
+    const rx = radioFrequency($('frx').value);
+    if (tx === null || rx === null) { radioFrequencyError(); return; }
+    const ntx = radioFrequency((tx + step).toFixed(4));
+    const nrx = radioFrequency((rx + step).toFixed(4));
+    if (ntx === null || nrx === null) { radioFrequencyError(); return; }
+    touchInput();
+    $('ftx').value = ntx.toFixed(4);
+    $('frx').value = nrx.toFixed(4);
+    cmd('freq_pair', ntx.toFixed(4) + ',' + nrx.toFixed(4));
+  };
+});
+
+let tonesReady = false, dcsReady = false, channelsReady = false;
+let panelListsPending = null, channelsPending = null;
+function readChannels() {
+  if (!channelsPending) {
+    channelsPending = panelReadJson('/api/channels').finally(() => { channelsPending = null; });
+  }
+  return channelsPending;
+}
+function loadPanelLists() {
+  if (!panelListsPending) {
+    panelListsPending = (async () => {
+      if (!tonesReady) await loadTones();
+      if (!dcsReady) await loadDcs();
+      if (!channelsReady) await loadChannels();
+    })().finally(() => { panelListsPending = null; });
+  }
+  return panelListsPending;
+}
+async function loadTones() {
+  try {
+    const a = await panelReadJson('/api/ctcss');
+    const h = '<option value="0000">关闭亚音</option>' +
+      a.map(t => '<option value="' + escHtml(t.code) + '">' + escHtml(t.label) + ' (' + escHtml(t.code) + ')</option>').join('');
+    $('atx').innerHTML = h;
+    $('arx').innerHTML = h;
+    tonesReady = true;
+    last = '';
+  } catch (e) {
+    log('模拟亚音表加载失败: ' + e, 'err');
+  }
+}
+
+async function loadDcs() {
+  try {
+    const a = await panelReadJson('/api/dcs');
+    const h = a.map(c => '<option value="' + escHtml(c.code) + '">' + escHtml(c.label) + '</option>').join('');
+    $('dtx').innerHTML = h;
+    $('drx').innerHTML = h;
+    dcsReady = true;
+    last = '';
+  } catch (e) {
+    log('数字亚音码表加载失败: ' + e, 'err');
+  }
+}
+
+function showSub() {
+  $('atxRow').style.display = ($('ttx').value === 'ctcss') ? 'flex' : 'none';
+  $('dtxRow').style.display = ($('ttx').value === 'dcs') ? 'flex' : 'none';
+  $('arxRow').style.display = ($('trx').value === 'ctcss') ? 'flex' : 'none';
+  $('drxRow').style.display = ($('trx').value === 'dcs') ? 'flex' : 'none';
+}
+
+/* Picking a tone type while the tone list still sits on "0000 关闭亚音"
+ * used to send 0000, which the board stored as off and the next status poll
+ * pushed back into the type select ("it jumps back").  Choose a real tone first
+ * and ignore status-driven type changes until the write has been acknowledged. */
+let subPendingUntil = 0;
+function firstToneOf(sel) {
+  for (const opt of sel.options) {
+    if (opt.value && opt.value !== '0000') return opt.value;
+  }
+  return '';
+}
+
+function toneToSendTx() {
+  const t = $('ttx').value;
+  if (t === 'off') return '0000';
+  if (t === 'ctcss') {
+    const v = $('atx').value;
+    if (!v || v === '0000') { $('atx').value = firstToneOf($('atx')) || '0001'; }
+    return $('atx').value;
+  }
+  if (t === 'dcs') {
+    const v = $('dtx').value;
+    if (!v) { $('dtx').value = firstToneOf($('dtx')) || '023'; }
+    return $('dtx').value + $('dtxp').value;
+  }
+  return null;
+}
+
+function toneToSendRx() {
+  const t = $('trx').value;
+  if (t === 'off') return '0000';
+  if (t === 'ctcss') {
+    const v = $('arx').value;
+    if (!v || v === '0000') { $('arx').value = firstToneOf($('arx')) || '0001'; }
+    return $('arx').value;
+  }
+  if (t === 'dcs') {
+    const v = $('drx').value;
+    if (!v) { $('drx').value = firstToneOf($('drx')) || '023'; }
+    return $('drx').value + $('drxp').value;
+  }
+  return null;
+}
+
+function pushTx() {
+  const value = toneToSendTx();
+  if (value === null) return;
+  subPendingUntil = Date.now() + 1500;
+  return cmd('ctcss_tx', value);
+}
+
+function pushRx() {
+  const value = toneToSendRx();
+  if (value === null) return;
+  subPendingUntil = Date.now() + 1500;
+  return cmd('ctcss_rx', value);
+}
+
+$('ttx').onchange = () => { showSub(); pushTx(); };
+$('trx').onchange = () => { showSub(); pushRx(); };
+$('atx').onchange = pushTx; $('dtx').onchange = pushTx; $('dtxp').onchange = pushTx;
+$('arx').onchange = pushRx; $('drx').onchange = pushRx; $('drxp').onchange = pushRx;
+
+async function loadBridgeChans() {
+  try {
+    renderBridgeChans(await readChannels());
+  } catch (e) { log('桥接频道列表加载失败: ' + e, 'err'); }
+}
+function renderBridgeChans(a) {
+  const h = '<option value="0">选择预设频道…</option>' +
+    a.map(c => '<option value="' + (c.i + 1) + '"' + (c.compatible ? '' : ' disabled') + '>#' + (c.i + 1) + ' ' + escHtml(c.name) +
+      ' · ' + escHtml(c.band) + (c.compatible ? '' : ' 不适用') +
+      ' · RX ' + Number(c.rx).toFixed(4) + ' / TX ' + Number(c.tx).toFixed(4) + '</option>').join('');
+  if ($('brChan1')) $('brChan1').innerHTML = h;
+  if ($('brChan2')) $('brChan2').innerHTML = h;
+  if (window._st) syncBridge(window._st);
+}
+
+function syncBridge(st) {
+  const b = (st && st.bridge) || { en: 0, chan: 0, active: 0, keyed: 0, chan_name: '' };
+  for (const p of ['1', '2']) {
+    const t = $('brT' + p), c = $('brChan' + p), s = $('brS' + p);
+    if (!t || !c || !s) continue;
+    t.textContent = b.en ? '停用桥接' : '启用桥接';
+    t.className = b.en ? 'ok-btn' : 'pri';
+    if (document.activeElement !== c && String(c.value) !== String(b.chan)) {
+      c.value = String(b.chan);
+    }
+    let txt = '已关闭';
+    let col = 'var(--dim)';
+    if (b.en) {
+      if (!b.chan) {
+        txt = '请先选择预设频道';
+        col = 'var(--amber)';
+      } else if (b.active) {
+        if (b.keyed) {
+          txt = '发射中：网络语音 → 电台 TX';
+          col = 'var(--rose)';
+        } else {
+          txt = '双向转发中：' + (b.chan_name ? ('#' + b.chan + ' ' + b.chan_name) : ('频道 #' + b.chan));
+          col = 'var(--emerald)';
+        }
+      } else {
+        txt = '待命（等待网络引擎）';
+        col = 'var(--amber)';
+      }
+    }
+    s.textContent = txt;
+    s.style.color = col;
+  }
+}
+
+function brToggle(en) { cmd('bridge_en', en ? 1 : 0); }
+$('brT1').onclick = () => brToggle(!((window._st && window._st.bridge) && window._st.bridge.en));
+$('brT2').onclick = () => brToggle(!((window._st && window._st.bridge) && window._st.bridge.en));
+$('brChan1').onchange = () => cmd('bridge_chan', $('brChan1').value);
+$('brChan2').onchange = () => cmd('bridge_chan', $('brChan2').value);
+$('brTest2').onclick = () => cmd('bridge_test', 3000);
+$('npPeerAdd').onclick = () => {
+  const name = $('npPeerName').value.trim();
+  const addr = $('npPeerAddr').value.trim();
+  if (!name || !addr) { log('请填写对端名称与 ip:port', 'err'); return; }
+  cmd('np2p_peer_add', name + ',' + addr);
+};
+$('npHubT').onclick = () => {
+  const hub = !!(window._st && window._st.np2p && window._st.np2p.hub);
+  cmd('np2p_hub', hub ? 0 : 1);
+};
+$('npStunSet').onclick = () => cmd('np2p_stun', $('npStun').value.trim());
+
+function renderNp2p(s) {
+  const np = s.np2p;
+  if (!np) return;
+  /* "222.182.14.49:7959" as ONE text node: no line break on copy, and it
+   * selects like normal text.  Only rewrite when the value really changed,
+   * otherwise the once-per-second refresh wipes the user's selection. */
+  const pubTxt = (np.pub || '0.0.0.0') + ':' + (np.port || 0);
+  if ($('npPub').textContent !== pubTxt) {
+    $('npPub').textContent = pubTxt;
+  }
+  if ($('npV6')) {
+    const v6 = (s.wifi && s.wifi.ip6 && s.wifi.ip6.length) ? s.wifi.ip6 : '';
+    const el = $('npV6');
+    const txt = v6 ? ('[' + v6 + ']:54321')
+                   : ((s.wifi && s.wifi.connected)
+                      ? '无 IPv6（路由器未下发 RA）' : '无 IPv6');
+    if (el.textContent !== txt) {
+      el.textContent = txt;
+    }
+    el.classList.toggle('np2p-empty', !v6);
+  }
+  let natTxt = 'NAT 未知';
+  let natCls = 'np2p-nat';
+  if (np.nat === 'port-preserving') { natTxt = '端口保持 NAT'; natCls = 'np2p-nat'; }
+  else if (np.nat === 'not-port-preserving') { natTxt = '非端口保持 NAT'; natCls = 'np2p-nat warn'; }
+  const age = np.stun_age_s;
+  if (age >= 0 && age > 30) { natTxt += ' · 地址可能过期(' + age + 's)'; natCls = 'np2p-nat bad'; }
+  else if (age >= 0) { natTxt += ' · 刷新 ' + age + 's 前'; }
+  const eNat = $('npNat');
+  eNat.textContent = natTxt;
+  eNat.className = natCls;
+  const ho = np.hub_offline;
+  const badge = $('npHubOffBadge');
+  badge.style.display = ho ? '' : 'none';
+  badge.textContent = ho ? ('枢纽离线 ' + (np.hub_quiet_s || 0) + 's') : '枢纽离线';
+  /* "linked" now really means the link is alive (PING/PONG), so the label no
+   * longer needs to hint at expiry; the audio age is shown next to it. */
+  const stMap = { linked: '已连通', knocking: '敲击中', expired: '已过期' };
+  const rows = (np.peers || []).map((p, i) => {
+    const st = stMap[p.state] || p.state;
+    const stCls = p.state === 'linked' ? 'linked' : (p.state === 'knocking' ? 'knocking' : '');
+    return '<div class="np2p-peerrow">' +
+      '<span class="np-name">' + escHtml(p.name || ('#' + i)) + '</span>' +
+      '<span class="np-addr">' + escHtml(p.ip) + ':' + p.port + '</span>' +
+      '<span class="np-st ' + stCls + '">' + st + '</span>' +
+      '<span class="np-meta">rtt ' + (p.rtt_ms >= 0 ? p.rtt_ms + 'ms' : '-') +
+        ' · rx ' + p.rx + ' / tx ' + p.tx + ' / 丢 ' + p.drop + '</span>' +
+      '<button type="button" class="pri" data-np-knock="' + i + '" style="padding:2px 8px;font-size:11px">重敲</button>' +
+      '<button type="button" data-np-del="' + i + '" style="padding:2px 8px;font-size:11px">删除</button>' +
+      '</div>';
+  });
+  $('npPeerList').innerHTML = rows.length
+    ? rows.join('')
+    : '<div style="font-size:11.5px;color:var(--dim);padding:2px 0">（暂无对端 —— 把对端面板上的公网地址填到下方添加）</div>';
+  // Delegated once on the container: the list is rebuilt every refresh, so
+  // per-row handlers would be re-bound (and could miss a click that lands
+  // between the rebuild and the rebind).
+  const npl = $('npPeerList');
+  if (!npl.dataset.bound) {
+    npl.dataset.bound = '1';
+    npl.addEventListener('click', e => {
+      const kb = e.target.closest('[data-np-knock]');
+      const db = e.target.closest('[data-np-del]');
+      if (kb) cmd('np2p_knock', kb.dataset.npKnock);
+      else if (db) cmd('np2p_peer_del', db.dataset.npDel);
+    });
+  }
+  const hub = np.hub;
+  const ht = $('npHubT');
+  ht.textContent = hub ? '关闭 hub' : '开启 hub';
+  ht.className = hub ? 'ok-btn' : 'pri';
+  const npSm = { linked: '已连通', knocking: '敲击中', expired: '地址过期', empty: '-' };
+  const linked = (np.peers || []).filter(p => p.state === 'linked').length;
+  $('npState1').textContent = 'hub ' + (hub ? '开' : '关') +
+    ' · 连通 ' + linked + '/' + (np.peers || []).length +
+    ' · RTT ' + (np.rtt_ms >= 0 ? np.rtt_ms + 'ms' : '-') +
+    ' · STUN ' + escHtml(np.stun || '(内置列表)') + (np.stun ? '' : '');
+  $('npDiag1').textContent = s.intercom && s.intercom.diag
+    ? ('诊断: ' + s.intercom.diag)
+    : (linked === 0 && (np.peers || []).length > 0 ? '敲击中' : '状态正常');
+  if (document.activeElement !== $('npStun')) $('npStun').value = np.stun || '';
+  if (document.activeElement !== $('ixRoom1')) $('ixRoom1').value = s.intercom.room;
+}
+
+const CH_MAX = 99;
+let _chAll = [];
+
+async function loadChannels() {
+  try {
+    _chAll = await readChannels();
+    renderChannels();
+    renderBridgeChans(_chAll);
+    channelsReady = true;
+  } catch (e) {
+    log('频道列表加载失败: ' + e, 'err');
+  }
+}
+
+/* Filtered client-side: the whole list is already in memory, so typing in the
+ * search box must not hit the radio. */
+function renderChannels() {
+  const q = (($('chSearch') && $('chSearch').value) || '').trim().toLowerCase();
+  const fx = c => Number(c.rx).toFixed(4);
+  const ft = c => Number(c.tx).toFixed(4);
+  const a = !q ? _chAll : _chAll.filter(function(c) {
+    return (c.name || '').toLowerCase().indexOf(q) >= 0 ||
+           fx(c).indexOf(q) >= 0 || ft(c).indexOf(q) >= 0;
+  });
+  $('chCountBadge').textContent = _chAll.length + ' / ' + CH_MAX +
+    (q && a.length !== _chAll.length ? ' · 命中 ' + a.length : '');
+  if (!_chAll.length) {
+    $('chList').innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px 0;text-align:center">暂无保存的预设信道</div>';
+    return;
+  }
+  if (!a.length) {
+    $('chList').innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px 0;text-align:center">没有匹配 “' + escHtml(q) + '” 的频道</div>';
+    return;
+  }
+  $('chList').innerHTML = a.map(function(c) {
+    return '<div class="chrow"><div class="chhead"><span class="chidx">CH' + String(c.i + 1).padStart(2, '0') + '</span><span class="chname">' + escHtml(c.name) + '</span>' +
+      '<button data-ch="load" data-i="' + c.i + '" class="pri"' + (c.compatible ? '' : ' disabled') + '>调谐</button>' +
+      '<button data-ch="bridge" data-i="' + (c.i + 1) + '" title="绑定为模拟桥接频道"' + (c.compatible ? '' : ' disabled') + '>桥接</button>' +
+      '<button data-ch="del" data-i="' + c.i + '">删</button></div>' +
+      '<div class="chdata"><span class="chrx">RX ' + fx(c) + '</span>' +
+        '<span class="chtx">TX ' + ft(c) + '</span><span class="chunit">MHz</span></div>' +
+      '<div class="chdata2">' + escHtml(c.band) + (c.compatible ? '' : ' · 本模块不可调用') + ' · 亚音 ' + escHtml(c.txt === '0000' ? '关' : c.txt) + '/' + escHtml(c.rxt === '0000' ? '关' : c.rxt) +
+      ' · ' + (c.bw === 1 ? '25k宽' : '12.5k窄') + ' · SQ' + c.sq + ' · ' + (c.pwr ? '1W' : '0.5W') + '</div></div>';
+  }).join('');
+}
+
+if ($('chSearch')) {
+  $('chSearch').oninput = renderChannels;
+}
+
+/* Both file pickers show the chosen name inside the control and turn it cyan,
+ * so "did it take my file?" is answered without reading the OS dialog. */
+function wirePick(inputId, pickId, nameId) {
+  const inp = $(inputId), pick = $(pickId), nm = $(nameId);
+  if (!inp || !pick || !nm) return;
+  inp.addEventListener('change', function() {
+    const f = inp.files && inp.files[0];
+    nm.textContent = f ? f.name : '未选择';
+    pick.classList.toggle('has-file', !!f);
+  });
+}
+function resetPick(inputId, pickId, nameId) {
+  const inp = $(inputId), pick = $(pickId), nm = $(nameId);
+  if (!inp || !pick || !nm) return;
+  inp.value = '';
+  nm.textContent = '未选择';
+  pick.classList.remove('has-file');
+}
+wirePick('otaFile', 'otaPick', 'otaName');
+wirePick('ixTailFile', 'ixTailPick', 'ixTailName');
+
+$('chSave').onclick = async () => {
+  const n = ($('chName').value || '').trim() || ('信道' + (Date.now() % 1000));
+  try {
+    const r = await fetch('/api/channel?op=save&name=' + encodeURIComponent(n));
+    const j = await r.json();
+    if (j.ok) {
+      log('已保存当前配置为预设信道: ' + n, 'good');
+      $('chName').value = '';
+      await loadChannels();
+    } else {
+      log('保存失败: ' + j.err, 'err');
+    }
+  } catch (e) {
+    log('保存异常: ' + e, 'err');
+  }
+};
+
+$('chList').onclick = async (ev) => {
+  const b = ev.target.closest('button[data-ch]');
+  if (!b) return;
+  const op = b.dataset.ch;
+  if (op === 'bridge') {
+    await cmd('bridge_chan', b.dataset.i);
+    return;
+  }
+  const isLoad = op === 'load';
+  try {
+    const r = await fetch('/api/channel?op=' + op + '&i=' + b.dataset.i);
+    const j = await r.json();
+    if (j.ok) {
+      log(isLoad ? ('已调谐至信道 #' + (Number(b.dataset.i) + 1)) : '已删除信道', 'good');
+      await loadChannels();
+      last = '';
+      refresh();
+    } else {
+      log('操作失败: ' + j.err, 'err');
+    }
+  } catch (e) {
+    log('操作异常: ' + e, 'err');
+  }
+};
+
+$('fset').onclick = () => {
+  const a = radioFrequency($('ftx').value), b = radioFrequency($('frx').value);
+  if (a === null || b === null) { radioFrequencyError(); return; }
+  cmd('freq_pair', a.toFixed(4) + ',' + b.toFixed(4));
+};
+$('fSync').onclick = () => {
+  if ($('ftx').value) {
+    $('frx').value = $('ftx').value;
+    log('已同步接收频率 RX = TX (' + $('ftx').value + ' MHz)');
+  }
+};
+
+let txOn = false, txEnd = 0, talkToken = 0, talkBusy = false, txLive = false;
+async function toggleTalk() {
+  if (talkBusy) return;
+  talkBusy = true;
+  try {
+  if (txOn) {
+    const r = await fetch('/api/talk?on=0&tx=' + talkToken);
+    const j = await r.json();
+    if (!j.ok) log('本次对讲已结束: ' + (j.err || ''), 'err');
+    txOn = false; txLive = false;
+    refresh();
+    return;
+  }
+  const s = Math.min(60, Math.max(5, parseInt($('secs').value, 10) || 30));
+  const r = await fetch('/api/talk?on=1&secs=' + s + '&confirm=1');
+  const j = await r.json();
+  if (j.ok) {
+    txOn = true; txLive = true;
+    talkToken = j.tx;
+    txEnd = Date.now() + s * 1000;
+    log('PTT 发射已启动（限时 ' + s + ' 秒）', 'err');
+    refresh();
+  } else {
+    log('发射被拒绝: ' + j.err, 'err');
+  }
+  } catch (e) { log('PTT 请求失败: ' + e, 'err'); }
+  finally { talkBusy = false; }
+}
+$('txBtn').onclick = toggleTalk;
+$('txBtnMob').onclick = toggleTalk;
+
+
+function applyMode(m, liveTx) {
+  if (liveTx !== undefined) txLive = !!liveTx;
+  const els = document.querySelectorAll('[data-modes]');
+  for (let i = 0; i < els.length; i++) {
+    const el = els[i];
+    el.style.display = el.dataset.modes.split(',').indexOf('' + m) >= 0 ? '' : 'none';
+  }
+  const bs = document.querySelectorAll('#ixSeg button');
+  for (let i = 0; i < bs.length; i++) {
+    bs[i].className = (+bs[i].dataset.m === m) ? 'on' : '';
+  }
+  /* liveTx comes from /api/live (1 Hz) so a press on the physical PTT key shows
+   * up at once; the 3 s status poll falls back to the locally tracked flag. */
+  const on = txLive;
+  const label = on
+    ? (m >= 1 ? '■ 停止网络对讲' : '■ 停止电台发射')
+    : (m >= 1 ? '● 开始网络对讲 (PTT)' : '● 开始电台发射 (PTT)');
+  setPttLabel($('txBtn'), label);
+  setPttLabel($('txBtnMob'), label);
+  showSub();
+}
+
+document.querySelectorAll('#ixSeg button').forEach(function(b) {
+  b.onclick = function() { cmd('ix_mode', b.dataset.m); };
+});
+
+/* Persisted in NVS: whether a network talk also puts the mic on the local air. */
+document.querySelectorAll('#rfSeg button').forEach(function(b) {
+  b.onclick = function() { cmd('ix_rf', b.dataset.rf); };
+});
+
+/*
+ * 1 Hz path: only what actually moves -- meters, PTT lamp, squelch lamps.
+ *
+ * The full /api/status document is ~2 KB and makes the board walk every
+ * subsystem (including reading the radio profile out of NVS), so it is now
+ * polled every 3 s; the meters talk to /api/live instead, which answers in
+ * ~120 bytes and touches nothing but counters.
+ */
+/*
+ * The PTT pill must not claim the radio is transmitting when it is not: a plain
+ * network talk runs the PTT state machine but keys no pad at all (rf_key is the
+ * real pad state, straight from the PTT driver).
+ */
+function pttText(s, isTx) {
+  if (!isTx) {
+    return 'PTT ' + s.ptt;
+  }
+  if (!s.rf_key) {
+    return 'TX 网络';
+  }
+  return (s.ic_mode >= 1) ? 'TX 射频+网络' : 'TX 射频';
+}
+
+async function refreshMeter() {
+  try {
+    const s = await panelReadJson('/api/live');
+    const isTx = s.ptt !== 'IDLE';
+
+    $('hbDot').style.background = isTx ? 'var(--rose)' : 'var(--emerald)';
+    $('hbDot').style.boxShadow = isTx ? '0 0 12px var(--rose)' : '0 0 10px var(--emerald)';
+    $('hbDot').title = isTx ? pttText(s, isTx) : '控制面板在线';
+
+    $('pttPill').textContent = pttText(s, isTx);
+    $('pttPill').className = 'pill ' + (isTx ? 'down' : 'up');
+    $('rssiPill').textContent = 'RSSI ' + (isTx ? 'TX' : s.rssi);
+
+    /* Which transmission mode the press will use (MODE 01/02 only). */
+    const rbs = document.querySelectorAll('#rfSeg button');
+    for (let i = 0; i < rbs.length; i++) {
+      rbs[i].className = (+rbs[i].dataset.rf === (s.rf_tx ? 1 : 0)) ? 'on' : '';
+    }
+
+    /*
+     * 1 Hz sync of the talk button with the real transmitter state.  The
+     * physical PTT key (GPIO41) runs the same voice_start() path as this
+     * button, so without this the panel would keep saying "开始网络对讲" for up
+     * to 3 s after the key was pressed.
+     */
+    applyMode(s.ic_mode, isTx);
+    $('txState').textContent = isTx ? '发射中' : 'PTT 待机';
+    $('txState').className = 'tag-chip ' + (isTx ? 'tx' : '');
+    $('txBtn').className = 'tx' + (isTx ? ' live' : '');
+    $('txBtnMob').className = 'tx m-ptt' + (isTx ? ' live' : '');
+
+    $('vfoRxCell').className = 'vfo-cell' + (s.mod_sq && !isTx ? ' active-rx' : '');
+    $('vfoTxCell').className = 'vfo-cell' + (isTx ? ' active-tx' : '');
+
+    $('sqlBadge').textContent = s.mod_sq ? '● 载波静噪打开' : '静噪关闭';
+    $('sqlBadge').className = 'tag-chip ' + (s.mod_sq ? 'live' : '');
+    $('ampBadge').textContent = s.mod_sq ? '● PA 功放激活' : 'PA 功放待机';
+    $('ampBadge').className = 'tag-chip ' + (s.mod_sq ? 'live' : '');
+
+    const rssiNum = isTx ? 0 : Math.max(0, s.rssi);
+    setSegMeter('sMeterSegs', Math.min(100, Math.round(rssiNum * 100 / 140)));
+    $('sMeterVal').textContent = isTx ? 'TX' : ('RSSI ' + rssiNum);
+
+    const afPct = Math.min(100, Math.round(s.peak / 327));
+    setSegMeter('afMeterSegs', afPct);
+    $('lvlbar').style.width = afPct + '%';
+    $('lvlval').textContent = s.peak;
+
+    /*
+     * A network talk with the engine down goes nowhere: the board refuses it
+     * now, so grey the button out and say why before the press, instead of
+     * letting the operator talk to nobody.
+     */
+    const netBlocked = (s.ic_mode >= 1) && !s.net_ready;
+    const rfBlocked = (s.ic_mode === 0 || s.rf_tx) && (!window._radio || !window._radio.ready);
+    [$('txBtn'), $('txBtnMob')].forEach(function(b) {
+      if (!b) { return; }
+      b.disabled = (netBlocked || rfBlocked) && !isTx;
+      b.title = (rfBlocked && !isTx) ? '射频待设置：请确认模块频段并提交收发频率' : (netBlocked && !isTx)
+        ? '网络中继未就绪（EMQX 未连接或没有对端）——填好 broker 与账号，或切回 MODE 00 用电台发射'
+        : '';
+    });
+  } catch (e) {
+    /* the 3 s refresh owns the "disconnected" indication */
+  }
+}
+
+async function refresh() {
+  if (panelRefreshBusy) return false;
+  panelRefreshBusy = true;
+  try {
+    const [s, radio] = await Promise.all(['/api/status', '/api/radio'].map(panelReadJson));
+    const bandChanged = window._radio && window._radio.band !== radio.band;
+    renderRadio(radio);
+    if (bandChanged) { loadChannels(); loadBridgeChans(); }
+    window._st = s;
+    if (window.HMDeviceName) window.HMDeviceName.accept(s);
+    if (!panelOnline) {
+      panelOnline = true;
+      log('黑猫控制面板已连接', 'good');
+      loadPanelLists();
+    }
+    if (s.audio_rate) SDR.wire = s.audio_rate;
+
+    const isTx = s.ptt !== 'IDLE';
+    $('hbDot').style.background = isTx ? 'var(--rose)' : 'var(--emerald)';
+    $('hbDot').style.boxShadow = isTx ? '0 0 12px var(--rose)' : '0 0 10px var(--emerald)';
+    $('hbDot').title = isTx ? '正在发射' : '控制面板在线';
+
+    $('wifiPill').innerHTML = s.wifi.connected
+      ? (wifiIcon(s.wifi.rssi) + ' ' + escHtml(s.wifi.ssid || s.wifi.ip) + ' ' + s.wifi.rssi + 'dBm')
+      : (wifiIcon(0) + ' ' + escHtml(s.wifi.state));
+    $('wifiPill').className = 'pill ' + (s.wifi.connected ? 'up' : 'down');
+
+    /* The panel lives on https://<host>.local; show that exact address so it can
+     * be copied or tapped instead of a bare hostname. */
+    const lanHost = (s.wifi.host || '').replace(/[^a-z0-9-]/gi, '').toLowerCase();
+    $('lanPill').innerHTML = s.wifi.connected && lanHost
+      ? ('<a href="https://' + lanHost + '.local/" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' +
+         escHtml(s.wifi.ip) + ' · https://' + lanHost + '.local</a>')
+      : (s.wifi.ap ? ('AP ' + escHtml(s.wifi.ap_ip)) : escHtml(s.wifi.state));
+    $('lanPill').className = 'pill ' + (s.wifi.connected ? 'up' : 'down');
+
+    const modeMap = ['MODE 00 · 本地模拟', 'MODE 01 · NET-P2P 公网直连', 'MODE 02 · EMQX 网络中继'];
+    $('modePill').textContent = modeMap[s.intercom.mode] || s.mode;
+
+    /* pttPill / rssiPill belong to refreshMeter (1 Hz): it is the only place
+     * that knows whether the radio is really keyed (rf_key from /api/live). */
+    const mm = Math.floor(s.uptime / 60), ss = s.uptime % 60;
+    $('upPill').textContent = mm + 'm' + ss + 's · ' + Math.round(s.heap / 1024) + 'KB';
+
+    const sub = v => v === '0000' ? '关' : v;
+    const subtx = sub(s.freq.ctcss_tx), subrx = sub(s.freq.ctcss_rx);
+
+    $('vfoRxBig').textContent = radio.compatible ? s.freq.rx.toFixed(4) : '—';
+    $('vfoTxBig').textContent = radio.compatible ? s.freq.tx.toFixed(4) : '—';
+    $('vfoRxTone').textContent = 'RX 亚音: ' + subrx;
+    $('vfoTxTone').textContent = 'TX 亚音: ' + subtx;
+    $('vfoRxCell').className = 'vfo-cell' + (s.mod_sq && !isTx ? ' active-rx' : '');
+    $('vfoTxCell').className = 'vfo-cell' + (isTx ? ' active-tx' : '');
+
+    $('vfoFreq').textContent = radio.compatible ? 'TX ' + s.freq.tx.toFixed(4) + ' / RX ' + s.freq.rx.toFixed(4) + ' MHz' : '射频待设置';
+    $('vfoSub').textContent = (s.freq.bw === 1 ? '25 kHz 宽带' : '12.5 kHz 窄带') +
+      ' · 静噪 SQ ' + s.freq.sq + ' · ' + (s.freq.power ? '高功率 1W' : '低功率 0.5W');
+
+    $('sqlBadge').textContent = s.mod_sq ? '● 载波静噪打开' : '静噪关闭';
+    $('sqlBadge').className = 'tag-chip ' + (s.mod_sq ? 'live' : '');
+    $('ampBadge').textContent = s.mod_sq ? '● PA 功放激活' : 'PA 功放待机';
+    $('ampBadge').className = 'tag-chip ' + (s.mod_sq ? 'live' : '');
+
+    const rssiNum = isTx ? 0 : Math.max(0, s.rssi);
+    const rssiPct = Math.min(100, Math.round(rssiNum * 100 / 140));
+    setSegMeter('sMeterSegs', rssiPct);
+    $('sMeterVal').textContent = isTx ? 'TX' : ('RSSI ' + rssiNum);
+
+    const afPct = Math.min(100, Math.round(s.peak / 327));
+    setSegMeter('afMeterSegs', afPct);
+    $('lvlbar').style.width = afPct + '%';
+    $('lvlval').textContent = s.peak;
+
+    const kv = [
+      ['音频通路', s.mode.indexOf('MONITOR') >= 0 ? 'MONITOR 守听' : (s.mode.indexOf('TALK') >= 0 ? 'TALK 发射' : 'IDLE 待机')],
+      ['PTT 键控累计', s.ptt + ' (' + s.tx_count + '次)'],
+      ['网络房间 / 节点', s.intercom.mode === 0 ? '本地直频'
+        : ((s.intercom.mode === 1 ? '#' + s.intercom.room + ' · ' : '') + s.intercom.peers + ' 在线')],
+      ['模拟桥接转发', s.bridge.en ? (s.bridge.active ? (s.bridge.keyed ? 'TX 发射中' : 'RX 守听转发') : '待命') : '已关闭'],
+      ['喇叭音量', s.spk],
+      ['峰值 / 硬削顶计数', s.peak + ' / ' + s.clip],
+      ['ADC 溢出 / 欠载', s.ovf + ' / ' + s.underruns],
+      ['尾音信令', s.tail && s.tail.id ? ('#' + s.tail.id + ' 已启用') : '未启用']
+    ];
+    $('stat').innerHTML = kv.map(([a, b]) => '<div class="kv-item"><span>' + escHtml(a) + '</span><b>' + escHtml(b) + '</b></div>').join('');
+
+    const monOn = s.mode.indexOf('MONITOR') >= 0;
+    $('mState').textContent = monOn ? '● 守听运行中' : '守听已停止';
+    $('mState').className = 'tag-chip ' + (monOn ? 'live' : '');
+    $('mToggleMob').textContent = monOn ? '守听: 开' : '守听: 关';
+    $('mToggleMob').className = (monOn ? 'ok-btn' : 'pri') + ' m-mon';
+
+    if (txOn && (Date.now() > txEnd || s.ptt === 'IDLE')) {
+      if (Date.now() > txEnd) log('单次发射计时结束', 'good');
+      txOn = false;
+    }
+    /* txState and the button classes belong to refreshMeter (1 Hz, driven by the
+     * real PTT state, so a physical key press shows up within a second). */
+    applyMode(s.intercom.mode);
+
+    const sm = {
+      stub: '等待引擎',
+      idle: '空闲守听',
+      tx: '正在发送语音',
+      rx: '正在接收语音',
+      stopped: '已停止',
+      'no-engine': '无引擎',
+      connecting: '连接服务器中'
+    };
+    const ist = '在线 ' + s.intercom.peers + ' · ' +
+      (sm[s.intercom.state] || s.intercom.state) +
+      ' · TX ' + s.intercom.tx + ' / RX ' + s.intercom.rx;
+    $('ixState2').textContent = ist;
+    $('ixDiag2').textContent = s.intercom.diag ? ('诊断: ' + s.intercom.diag) : '状态正常';
+    if (s.intercom.mode === 1 && s.np2p) renderNp2p(s);
+    syncBridge(s);
+
+    if (s.sdr) {
+      const micOk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      const wsOk = !!(SDR.ws && SDR.ws.readyState === 1);
+      const cs = SDR.ctx ? SDR.ctx.state : '未创建';
+      const lvl = SDR.peak > 2000 ? '▇▇▇' : SDR.peak > 300 ? '▅▅▅' : SDR.peak > 60 ? '▂▂' : '··';
+      const micLvl = SDR.micPeak > 2000 ? '▇▇▇' : SDR.micPeak > 300 ? '▅▅▅' : SDR.micPeak > 60 ? '▂▂' : '··';
+      $('sdrInfo').textContent = s.sdr.on
+        ? ('手台端 ' + (s.sdr.ws ? '已连接' : '等网页') + ' · RX 包 ' + s.sdr.rx +
+           ' / TX 包 ' + s.sdr.tx +
+           '  ｜  本机 ' + (SDR.http ? 'HTTP 通道' : (wsOk ? '已连接' : '未连接')) + ' · 音频' +
+           (cs === 'running' ? '运行中' : cs) + ' · 收到 ' + SDR.frames +
+           ' 帧 · 电平 ' + lvl + ' · TXQ ' + (typeof s.sdr.inj === 'number' ? s.sdr.inj : '?') +
+           (SDR.ptt ? (' ｜ 麦克风 ' + micLvl + ' · ' + (SDR.micLabel || '?') +
+             ' · TX峰 ' + (s.sdr.rawpk || 0) + '/' + (s.sdr.outpk || 0) +
+             ' · 饱和 ' + (s.sdr.clip || 0)) : '') +
+           (micOk ? '' : ' · 麦克风需 https'))
+        : '电台接收音频 → 本浏览器喇叭；点击 PTT 用本机麦克风发射';
+      SDR.peak = 0;                 /* the level shows the last second only */
+      /*
+       * Clock recovery for the transmit path: keep ~96 ms queued in the board's
+       * injection ring.  Too little and the monitor fills silent 16 ms blocks
+       * (chopped audio); too much and the delay grows.  A 0.1 %/s trim of the
+       * resampling ratio is inaudible and far above the crystal drift.
+       */
+      /* The board now holds its own injection ring at the target level
+       * (elastic playout in the monitor task), so the browser must NOT fight it
+       * with a second controller: keep the ratio at 1. */
+      SDR.micTrim = 1;
+      if (SDR.on && (++sdrRepAcc % 5) === 0) sdrReport('beat');
+      if (!s.sdr.on && SDR.on) sdrStop(false);
+    }
+
+    if (s.tail) {
+      if (document.activeElement !== $('ixTailSel') && $('ixTailSel').value !== String(s.tail.id)) {
+        $('ixTailSel').value = String(s.tail.id);
+      }
+      tailModesRestore(Number(s.tail.modes || 7));
+      $('ixTailInfo').textContent = s.tail.custom_s
+        ? (s.tail.custom_s.toFixed(2) + ' s · μ-law ' + Math.round(s.tail.custom_s * 8) + ' KB')
+        : '未上传（支持 ≤5s WAV/MP3）';
+    }
+
+    if (Date.now() < holdSyncUntil) return true;
+
+    /* Live meters for gain tuning: DAC volume and the last transmission's
+     * peaks.  Updated every refresh, not only when the settings change. */
+    if ($('cvolV')) $('cvolV').textContent = s.cvol + ' / 100';
+    if ($('txPeakV') && s.sdr) {
+      $('txPeakV').textContent = s.sdr.rawpk + ' → ' + s.sdr.outpk +
+        ' · 削顶 ' + s.sdr.clip + (s.sdr.clip > 0 ? '（已顶满，往回调）' : '');
+    }
+
+    const sig = [
+      s.spk, s.freq.sq, s.freq.vol, s.freq.tx, s.freq.rx, s.freq.bw,
+      s.freq.ctcss_tx, s.freq.ctcss_rx, s.freq.power,
+      radio.band, radio.compatible, radio.ready,
+      s.eq_spk.join(','), s.eq_mic.join(','),
+      s.txgain, s.ntxgain, s.bgtx, s.gain, s.cvol,
+      s.intercom.mode, s.intercom.room, s.intercom.broker,
+      s.tail ? s.tail.modes : '',
+      s.fp ? s.fp.act.join(',') : ''
+    ].join('|');
+
+    if (sig !== last) {
+      last = sig;
+      const setVal = (id, vid, val) => {
+        const el = $(id);
+        if (el && document.activeElement !== el) el.value = val;
+        if (vid && $(vid)) $(vid).textContent = fmtSlider(id, val);
+      };
+      setVal('spkVol', 'spkVolV', s.spk);
+      setVal('sq', 'sqV', s.freq.sq);
+      setVal('vol', 'volV', s.freq.vol);
+      setVal('txgain', 'txgainV', s.txgain);
+      setVal('ntxgain', 'ntxgainV', s.ntxgain);
+      setVal('bgtx', 'bgtxV', s.bgtx);
+      setVal('gain', 'gainV', s.gain);
+      if (document.activeElement !== $('txpre')) { $('txpre').checked = !!s.txpre; }
+      setVal('rxnetgain', 'rxnetgainV', s.rxnetgain);
+
+      /* Front-panel key mapping: never overwrite the dropdown the operator is
+       * looking at, same rule the sliders follow. */
+      if (s.fp) {
+        for (let i = 0; i < 4; i++) {
+          const sel = $('fpk' + i);
+          if (sel && document.activeElement !== sel && sel.value !== s.fp.act[i]) {
+            sel.value = s.fp.act[i];
+          }
+        }
+      }
+
+      for (let i = 0; i < 6; i++) {
+        setVal(spkIds[i], spkIds[i] + 'V', s.eq_spk[i]);
+        setVal(micIds[i], micIds[i] + 'V', s.eq_mic[i]);
+      }
+      updateEqCurve();
+
+      if (document.activeElement !== $('bw')) $('bw').value = s.freq.bw;
+      const subPendingNow = Date.now() < subPendingUntil;
+      if (tonesReady && !subPendingNow) {
+        $('atx').value = s.freq.ctcss_tx;
+        $('arx').value = s.freq.ctcss_rx;
+      }
+      const tx = (s.freq.ctcss_tx || '').toUpperCase();
+      const rx = (s.freq.ctcss_rx || '').toUpperCase();
+      const kt = (tx === '0000' || tx === '') ? 'off' : (/^[0-7]{3}[NI]$/.test(tx) ? 'dcs' : 'ctcss');
+      const kr = (rx === '0000' || rx === '') ? 'off' : (/^[0-7]{3}[NI]$/.test(rx) ? 'dcs' : 'ctcss');
+      const subPending = Date.now() < subPendingUntil;
+      if (!subPending && document.activeElement !== $('ttx') && $('ttx').value !== kt) $('ttx').value = kt;
+      if (!subPending && document.activeElement !== $('trx') && $('trx').value !== kr) $('trx').value = kr;
+      showSub();
+      if (kt === 'dcs' && dcsReady) {
+        $('dtx').value = tx.slice(0, 3);
+        $('dtxp').value = tx.slice(3);
+      }
+      if (kr === 'dcs' && dcsReady) {
+        $('drx').value = rx.slice(0, 3);
+        $('drxp').value = rx.slice(3);
+      }
+      if (document.activeElement !== $('ixRoom1')) $('ixRoom1').value = s.intercom.room;
+      if (document.activeElement !== $('ixBroker2')) $('ixBroker2').value = s.intercom.broker;
+      if (document.activeElement !== $('ixUser2')) $('ixUser2').value = s.intercom.user || '';
+      $('ixPass2').placeholder = s.intercom.pass ? '密码已设置（留空不改）' : '密码（可空）';
+      if (document.activeElement !== $('ftx')) $('ftx').value = radio.compatible ? s.freq.tx.toFixed(4) : '';
+      if (document.activeElement !== $('frx')) $('frx').value = radio.compatible ? s.freq.rx.toFixed(4) : '';
+    }
+    return true;
+  } catch (e) {
+    if (panelOnline) channelsReady = false;
+    panelOnline = false;
+    window._lastErr = String((e && (e.stack || e.message)) || e);
+    $('wifiPill').textContent = '面板连接断开';
+    $('wifiPill').className = 'pill down';
+    /* 控制面板离线：左上角品牌灯变红 */
+    $('hbDot').style.background = 'var(--rose)';
+    $('hbDot').style.boxShadow = '0 0 12px var(--rose)';
+    $('hbDot').title = '控制面板离线';
+    return false;
+  } finally { panelRefreshBusy = false; }
+}
+
+setInterval(refreshMeter, 1000);
+setInterval(refresh, 3000);
+window.onerror = function(msg, src, line) {
+  try { log('前端脚本异常: ' + msg + ' (行 ' + (line || '?') + ')', 'err'); } catch (e) {}
+};
+log('黑猫控制面板正在连接手台…');
+refresh();
+</script>
+<script src="/device-name.js"></script>
+</body>
+</html>

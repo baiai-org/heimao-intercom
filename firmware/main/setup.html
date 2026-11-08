@@ -1,0 +1,96 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title data-hm-title="网络设置">黑猫控制面板 · 网络设置</title><link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/brand-icon.png"><script src="/brand.js"></script>
+<style>
+:root{color-scheme:dark}body{margin:0;background:#0e1720;color:#e0ebf3;font:15px system-ui}main{max-width:700px;margin:auto;padding:24px}h1{font-size:24px}p{line-height:1.7;color:#abbecd}label{display:block;margin-top:14px}input,select,button{font:inherit;box-sizing:border-box;padding:10px;border-radius:7px;border:1px solid #476174;background:#172c3b;color:inherit}input:not([type=checkbox]),select{width:100%}button{cursor:pointer;margin:6px 6px 6px 0}button:disabled{opacity:.45}article{padding:14px;border:1px solid #314c60;border-radius:9px;margin:12px 0}.row{display:flex;gap:12px;align-items:center}.row label{flex:1}#message{white-space:pre-wrap;color:#91dbbc;line-height:1.7}#state{white-space:pre-wrap;line-height:1.7;color:#b8d3e7}a{color:#89c8ff}
+</style><style>
+#hostPreview{margin-top:10px;font-size:13px;color:#8fa6b8}
+#hostPreview.ok{color:#7fd8a1}
+#hostError{margin-top:6px;color:#ff9b9b;min-height:1.2em;font-size:13px}
+#hostHint{margin-top:4px;font-size:12.5px;color:#7e93a6;line-height:1.7}
+.hm-modal{position:fixed;inset:0;background:rgba(4,10,16,.72);display:flex;align-items:center;justify-content:center;padding:20px;z-index:2000}
+.hm-modal[hidden]{display:none}
+.hm-sheet{max-width:520px;width:100%;background:#132030;border:1px solid #2b4258;border-radius:14px;padding:20px}
+.hm-sheet h2{margin:0 0 10px;font-size:19px}
+.hm-sheet p{margin:8px 0;color:#c3d4e1}
+.hm-sheet .warn{color:#ffcf8a}
+.hm-sheet .row{display:flex;gap:12px;justify-content:flex-end;margin-top:16px}
+.hm-sheet button{padding:9px 16px}
+.hm-sheet .primary{background:#2d6fa8;color:#fff;border-color:#4086c2}
+</style><body><script src="/app-control.js"></script><main>
+<h1><img src="/brand-icon.png" alt="" style="width:36px;height:36px;border-radius:10px;vertical-align:middle;margin-right:10px">黑猫控制面板 · 网络设置</h1><p>黑猫互联 · 黑猫智能手台</p><p>支持保存多个路由器及手机热点。当前 Wi-Fi 正常时保持连接；断开后自动查找已保存网络，连续 60 秒未取得地址则重新开放配网热点。</p>
+<p>同一手机配网并开热点时：先连接手台热点提交资料，收到“已保存”后退出手台热点，开启手机的 <b>2.4 GHz 共享热点</b>。手台会继续寻找该热点。旧网络档案保留，失败后可回到配网。</p>
+<div id="state">读取网络状态…</div><div id="message" role="status"></div>
+<h2>添加或编辑网络</h2><form id="form">
+<label>可用网络 <select id="available"><option value="">扫描中，也可直接输入名称</option></select></label><button type="button" id="scan">重新扫描</button>
+<label>Wi-Fi 名称 <input id="ssid" maxlength="32" required autocomplete="off" autocapitalize="none"></label>
+<label>Wi-Fi 密码 <input id="password" type="password" maxlength="64" autocomplete="new-password" placeholder="开放网络留空"></label>
+<label id="keep-row" hidden><input id="keep" type="checkbox" checked> 保留已保存密码（取消后使用上面输入的密码）</label>
+<div class="row"><label><input id="auto" type="checkbox" checked> 允许自动连接</label><label>优先级（−100 至 100）<input id="priority" type="number" min="-100" max="100" value="0" required></label></div>
+<label>管理面板访问域名（必填）<input id="host" maxlength="63" placeholder="例如 heimao-u13" required autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+<div id="hostPreview">管理面板地址：https://…local</div>
+<div id="hostError" role="alert"></div>
+<div id="hostHint">只用字母、数字和连字符，首尾必须是字母或数字，最长 63 个；后缀 <b>.local</b> 由手台自动补上。留空不能保存。</div>
+<button type="submit" id="save">保存档案</button><button type="button" id="join">保存并连接</button><button type="button" id="new">新建网络</button>
+</form>
+<div id="hostConfirm" class="hm-modal" hidden><div class="hm-sheet">
+  <h2>请确认局域网内没有重复域名</h2>
+  <p>同一局域网里，每台设备的管理面板域名必须唯一。请先自行检查现有设备（其它手台、电脑、路由器设备列表）是否已在使用 <b id="confirmName">heimao.local</b>。</p>
+  <p class="warn">如果重名：两台会互相抢占，地址会时好时坏，手台可能被自动改成 <span id="confirmAlt">heimao-2.local</span>，配置里显示的名字就不再是能打开的那个。</p>
+  <p id="confirmHint" style="font-size:13px;color:#8fa6b8"></p>
+  <div class="row"><button type="button" id="confirmCancel">取消</button><button type="button" id="confirmOk" class="primary">我已确认，继续</button></div>
+</div></div>
+<h2>已保存网络</h2><div id="profiles"></div><p><a href="/">返回电台面板</a></p>
+<script>
+const $=id=>document.getElementById(id);let editing=0,busy=false,networks=[],scanPoll,lastHost='',pendingAction=null;
+const HOST_RE=/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function message(text){$('message').textContent=text;}
+function hostValue(){return ($('host').value||'').trim().toLowerCase();}
+function hostValid(){const v=hostValue();return v.length>0&&v.length<=63&&HOST_RE.test(v);}
+function paintHost(){
+  const v=hostValue(),ok=hostValid();
+  $('hostPreview').textContent=v?('管理面板地址：https://'+v+'.local'):('管理面板地址：'+(lastHost?('当前 https://'+lastHost+'.local，请在上面重新输入'):'未设置，请先填写'));
+  $('hostPreview').className=ok?'ok':'';
+  $('hostError').textContent=!v?'请填写域名；填写并确认后才能继续。':(ok?'':'只能字母、数字、连字符，首尾须为字母或数字，最长 63 个字符。');
+  $('save').disabled=!ok||busy;$('join').disabled=!ok||busy;
+  return ok;
+}
+function askHost(action){
+  if(busy||!$('form').reportValidity())return;
+  if(!paintHost())return;
+  const v=hostValue();
+  $('confirmName').textContent=v+'.local';
+  $('confirmAlt').textContent=v+'-2.local';
+  $('confirmHint').textContent='当前手台域名：'+(lastHost||'未设置')+'；本次改为 https://'+v+'.local。改名后旧地址立即失效，请重新收藏。';
+  pendingAction=action;$('hostConfirm').hidden=false;
+}
+$('host').addEventListener('input',paintHost);
+$('confirmCancel').onclick=()=>{$('hostConfirm').hidden=true;pendingAction=null;};
+$('confirmOk').onclick=()=>{$('hostConfirm').hidden=true;const a=pendingAction;pendingAction=null;if(a)a();};
+async function write(body){const r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.err||'操作失败');return d;}
+function edit(n){editing=n.id;$('ssid').value=n.ssid;$('password').value='';$('auto').checked=n.auto_join;$('priority').value=n.priority;$('keep-row').hidden=false;$('keep').checked=true;$('host').value='';$('host').placeholder=lastHost?('当前 '+lastHost+'，改名请重新输入'):'例如 heimao-u13';paintHost();message('正在编辑 '+n.ssid+'；已保存密码不会显示');}
+$('new').onclick=()=>{editing=0;$('form').reset();$('keep-row').hidden=true;paintHost();message('新建网络');};
+$('available').onchange=()=>{$('ssid').value=$('available').value;};
+async function refresh(){
+ try{const r=await fetch('/api/wifi',{cache:'no-store'}),d=await r.json();if(!r.ok||!d.profiles)throw Error(d.err||'状态读取失败');
+  networks=d.profiles;const active=networks.find(n=>n.id===d.active_id);
+  lastHost=(d.host||'').toLowerCase();
+  $('state').textContent='设备：'+(ORLControl.device||'核对中')+'\n状态：'+d.state+(active?' · '+active.ssid:'')+'\n管理面板地址：'+(lastHost?('https://'+lastHost+'.local'+(lastHost==='heimao'?'（出厂默认，建议改名）':'')):'未设置')+'\n配网热点：'+(d.ap?'已开放（无需 Wi-Fi 密码）':'关闭')+(!d.connected?' · 已断线 '+Math.floor(d.offline_ms/1000)+' 秒':'')+(d.storage_error?'\n存储异常，原资料已保留，请查看日志':'');
+  $('profiles').replaceChildren();
+  for(const n of networks){const card=document.createElement('article'),title=document.createElement('strong'),info=document.createElement('p');title.textContent=n.ssid;info.textContent=(n.id===d.active_id?(d.connected?'已连接':'正在连接'):'已保存')+' · 自动连接'+(n.auto_join?'开':'关')+' · 优先级 '+n.priority+(n.retry_in_ms?' · 冷却 '+Math.ceil(n.retry_in_ms/1000)+' 秒':'');card.append(title,info);
+   for(const [label,action] of [['连接',()=>write({op:'connect',id:n.id}).then(()=>message('已提交连接 '+n.ssid+'；网络即将切换'))],['编辑',()=>edit(n)],['忘记',async()=>{if(confirm('忘记 '+n.ssid+'？'))await write({op:'forget',id:n.id});}]]){const b=document.createElement('button');b.textContent=label;b.onclick=async()=>{try{await action();await refresh();}catch(e){message(e.message);}};card.append(b);}$('profiles').append(card);}
+  if(!networks.length)$('profiles').textContent='暂无已保存网络。';
+  if(!d.scan_running){clearTimeout(scanPoll);await readScan();}
+ }catch(e){$('state').textContent='当前地址无法连接。若刚切网，请让手机连接目标路由器，或开启已提交的手机热点，再在 App 中重新发现手台。';}
+}
+async function readScan(){const r=await fetch('/api/scan',{cache:'no-store'}),a=await r.json();if(!Array.isArray(a))return;$('available').replaceChildren(new Option('选择网络或手动输入',''));for(const n of a)$('available').add(new Option(n.ssid+' ('+n.rssi+' dBm)',n.ssid));}
+$('scan').onclick=async()=>{try{await fetch('/api/scan?force=1');message('已请求扫描，等待结果…');clearTimeout(scanPoll);scanPoll=setTimeout(refresh,1800);}catch(e){message(e.message);}};
+async function save(join){if(busy||!$('form').reportValidity()||!hostValid()){paintHost();return;}busy=true;paintHost();
+ try{const body={op:'save',id:editing||undefined,ssid:$('ssid').value,auto_join:$('auto').checked,priority:Number($('priority').value),host:$('host').value};if(!editing||!$('keep').checked)body.password=$('password').value;
+  const d=await write(body);editing=d.id;$('keep-row').hidden=false;$('keep').checked=true;$('password').value='';
+  const addr='https://'+hostValue()+'.local';
+  if(join){await write({op:'connect',id:d.id});message('已保存并提交连接，手台热点即将关闭。\n管理面板地址：'+addr+'\n请把手机连接到刚填写的网络，再用上面的地址打开面板。');}else message('网络档案已保存，当前连接保持。管理面板地址：'+addr);await refresh();
+ }catch(e){message(e.message);}finally{busy=false;paintHost();}}
+$('form').onsubmit=e=>{e.preventDefault();askHost(()=>save(false));};$('join').onclick=()=>askHost(()=>save(true));
+paintHost();
+(async()=>{try{await ORLControl.identity;await readScan();}catch(e){message(e.message);}await refresh();})();setInterval(refresh,4000);
+</script></main></body></html>

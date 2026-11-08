@@ -1,0 +1,18 @@
+# OpenRadioLink-v0.3 partition table -- 16 MB flash, OTA capable
+#
+# Offsets deliberately match the ESP-IDF defaults so that tools/flash.ps1 can
+# also fall back to hardcoded offsets when build/flash_args is unavailable.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x6000,
+otadata,    data, ota,      0xf000,   0x2000,
+phy_init,   data, phy,      0x11000,  0x1000,
+ota_0,      app,  ota_0,    0x20000,  0x400000,
+ota_1,      app,  ota_1,    0x420000, 0x400000,
+storage,    data, spiffs,   0x820000, 0x100000,
+# coredump: 256 KB, not the 64 KB this started with.  A dump of this firmware's
+# task stacks (23 modules, two httpd servers at 10 KB each, 8 KB console) does
+# not fit in 64 KB -- IDF gives up with "Not enough space to save core dump!"
+# and writes nothing, which is why a panic used to leave no evidence at all.
+# Everything after it up to 16 MB is unused, so this costs nothing.
+coredump,   data, coredump, 0x920000, 0x40000,

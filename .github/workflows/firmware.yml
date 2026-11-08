@@ -1,0 +1,35 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - "tools/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "tools/**"
+      - ".github/workflows/firmware.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build firmware
+        shell: bash
+        run: |
+          cd firmware
+          idf.py build
+      - name: Record build identity
+        shell: bash
+        run: |
+          ls -l firmware/build/openradiolink.bin
+          strings firmware/build/openradiolink.bin | grep -m1 '^r[0-9]' || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-app
+          path: firmware/build/openradiolink.bin

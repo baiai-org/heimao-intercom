@@ -1,0 +1,22 @@
+name: host-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest-and-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install host test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc nodejs
+          python -m pip install --upgrade pip
+      - name: Host regressions (known failures are reported as XFAIL)
+        run: python tools/run_host_tests.py

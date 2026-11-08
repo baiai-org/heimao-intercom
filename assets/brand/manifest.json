@@ -1,0 +1,20 @@
+{
+  "source": "operator supplied artwork; unchanged source.png",
+  "source_dimensions": [
+    1312,
+    1199
+  ],
+  "operation": "aspect-fit into white square; platform resize and ICO encoding only",
+  "files": {
+    "heimao.ico": "bb97ffd893d99fea9f1b1956f4b2dbf44ef26909d72d4ced8d81150d46b910a9",
+    "icon-144.png": "c81be0c80d74f60cc93b48e530e4439d61277b6511ce6aec28394e431cd693b9",
+    "icon-192.png": "94cc99f761efd33808ec2c72912f1b8771b3328497995d5432e4c6554227d184",
+    "icon-256.png": "34605c0225890c4115a4a10e6d80c7a35dd03e2ae8d643ae93f756b18173ba74",
+    "icon-32.png": "258bc20263e565c7e8b2f9ebf40deab1ca50f4ec1b65b312d589f3a32a8272c1",
+    "icon-48.png": "bf8846010fe14832a5da5da2d9c019e85b08e92a4422e21ca1662e62c4a820d9",
+    "icon-512.png": "251cf2a87b1ecb5e8bc9ce6be6e41c74a96342de6fca67b6013d2c9170dcb522",
+    "icon-72.png": "5fac9206620bcf903e8b9224fd5b71cd6836921c1bb12cd3bf6633adaef68ce9",
+    "icon-96.png": "24da739382fcc5fed516d617e9591ef540087ab3dd840659a691252ce41e8293",
+    "source.png": "b901a2d925751fba497dc92ae5c05efe12463af379321531adfa17c07f158e9b"
+  }
+}

@@ -1,0 +1,41 @@
+# --- build output -----------------------------------------------------------
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig.old
+app/.gradle/
+app/.kotlin/
+app/**/build/
+app/local.properties
+
+# --- project-local toolchains (re-installable, never commit) ----------------
+.idf/
+.tools/
+.tmp/
+.venv/
+.pylib/
+pip-*/
+esp_idf_activate_*/
+
+# --- per-build HTTPS certificate (see tools/gen_dev_cert.py) ----------------
+firmware/main/servercert.pem
+firmware/main/serverkey.pem
+
+# --- binaries and delivery artefacts (published via GitHub Releases) --------
+*.bin
+*.elf
+*.map
+*.apk
+*.zip
+*.exe
+bins/
+releases/
+
+# --- logs, captures, editor/OS -------------------------------------------------
+*.log
+*.raw
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

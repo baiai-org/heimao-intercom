@@ -1,0 +1,5 @@
+# The release also includes a full pip freeze lockfile.
+esptool==4.8.1
+pyserial==3.5
+bitstring==4.4.0
+pyinstaller==6.16.0
