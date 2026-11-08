@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+# Host-test fixtures contain synthetic byte strings that entropy heuristics
+# mistake for API keys.  They are not credentials.
+[[allowlists]]
+description = "radio-profile host test fixture"
+paths = ['''tools/test_radio_profile\.py''']

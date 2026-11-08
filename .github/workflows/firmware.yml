@@ -22,6 +22,8 @@ jobs:
       - name: Build firmware
         shell: bash
         run: |
+          if [ -z "${IDF_PATH:-}" ]; then export IDF_PATH=/opt/esp/idf; fi
+          . "$IDF_PATH/export.sh"
           cd firmware
           idf.py build
       - name: Record build identity
