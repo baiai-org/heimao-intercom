@@ -14,7 +14,7 @@ An ESP32-S3 handheld that is simultaneously an **SA818S analog radio**, a **netw
 |---|---|
 | Firmware | ESP-IDF 5.4.1, ESP32-S3-N16R8 (16 MB flash / 8 MB PSRAM), SA818S radio, ES8311 codec, front panel |
 | Web panel | Served by the device; HTTP and HTTPS (self-signed) |
-| Android app | Kotlin + Jetpack Compose; discovery, control lease, PTT, settings |
+| Android app | Kotlin + Jetpack Compose; discovery, device session, PTT, settings |
 | Flasher | Windows single-file EXE; keep-config or full erase; multiple COM ports |
 
 ## Downloads
