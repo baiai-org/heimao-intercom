@@ -5,7 +5,7 @@
 | 项 | 要求 |
 |---|---|
 | JDK | 21 |
-| Android SDK | Platform 37、Build-Tools 37.x |
+| Android SDK | Platform `android-37.0`、Build-Tools `36.0.0`（本机验证组合） |
 | Gradle | 使用仓库自带 Wrapper（`app/gradlew`） |
 | minSdk / targetSdk | 24 / 37 |
 | 包名 | `net.openradiolink.app` |
