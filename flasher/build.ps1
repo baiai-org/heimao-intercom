@@ -10,7 +10,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Python) { $Python = Join-Path $repoRoot '.tmp/flasher-build-env/Scripts/python.exe' }
-if (-not (Test-Path -LiteralPath $Python)) { throw 'Create a Python 3.11 build venv and install requirements-lock.txt first, or pass -Python.' }
+if (-not (Test-Path -LiteralPath $Python)) {
+    $command = Get-Command $Python -ErrorAction SilentlyContinue
+    if ($command) { $Python = $command.Source }
+    else { throw 'Create a Python 3.11 build venv and install requirements-lock.txt first, or pass -Python.' }
+}
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot '.tmp/portable-flasher/stage' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $assetRoot = Join-Path $OutputDirectory 'assets'

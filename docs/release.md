@@ -49,6 +49,8 @@ git push origin main --tags
    - 在 Windows 上构建不含内置固件的刷机工具；
    - 生成 `SHA256SUMS.txt` 并创建 Release。
 
+> **v1.0.0 首次发布**建议手工上传已验证的交付二进制（`3ede0b50…` full.bin、`f34ed6cc…` OTA、`6e498669…` APK），它们与源码提交 `c9d20b4` / `63ab6d3` 对应；Actions 重建的产物哈希不同（编译器、时间戳、证书与签名环境差异），不要混用。后续版本再以 Actions 产物为准。
+
 5. 发布前人工核对 Release：
    - 三个二进制与 `SHA256SUMS.txt` 都在；
    - APK 的 versionCode 与 CHANGELOG 一致；
