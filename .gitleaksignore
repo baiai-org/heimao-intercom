@@ -1,0 +1,2 @@
+# gitleaks fingerprints for false positives (synthetic host-test data).
+23714e0e336e7ddaa116e16dc161a376b6364e3e:tools/test_radio_profile.py:generic-api-key:359
