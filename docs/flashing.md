@@ -4,8 +4,8 @@
 
 | 文件 | 用途 | 能不能 OTA |
 |---|---|---|
-| `黑猫互联-full.bin` | 0x0 起始的完整合并镜像（bootloader + 分区表 + OTA 初始数据 + 应用） | **不能** |
-| `黑猫互联-app-OTA.bin` | 仅应用镜像 | 能 |
+| `黑猫互联-full-r11-83.bin` | 0x0 起始的完整合并镜像（bootloader + 分区表 + OTA 初始数据 + 应用） | **不能** |
+| `黑猫互联-app-OTA-r11-83.bin` | 仅应用镜像 | 能 |
 
 OTA 上传 full.bin 会失败；USB 刷机也不要用 OTA bin 当完整镜像。刷机工具会拒绝错误类型。
 
@@ -50,7 +50,7 @@ esptool.py --chip esp32s3 -p COM5 -b 460800 write_flash \
 
 # 全新刷机：整片擦除 + 合并镜像
 esptool.py --chip esp32s3 -p COM5 -b 460800 erase_flash
-esptool.py --chip esp32s3 -p COM5 -b 460800 write_flash 0x0 黑猫互联-full.bin
+esptool.py --chip esp32s3 -p COM5 -b 460800 write_flash 0x0 黑猫互联-full-r11-83.bin
 ```
 
 `write_flash 0x0 full.bin` 会把镜像中间的 `0xFF` 填充区一并写入，**等于清掉 NVS/PHY**；需要保留配置时用上面的分段方式或刷机工具的保留模式。

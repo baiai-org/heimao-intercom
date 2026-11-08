@@ -57,7 +57,7 @@ USB 刷机需要 0x0 起始的合并镜像。用刷机工具自带的打包脚�
 python flasher/make_firmware.py --output dist
 ```
 
-产物 `dist/黑猫互联-full.bin` 包含 bootloader + 分区表 + OTA 初始数据 + 应用；脚本会校验分区布局与本板一致。
+产物 `dist/黑猫互联-full-r11-83.bin` 包含 bootloader + 分区表 + OTA 初始数据 + 应用；脚本会校验分区布局与本板一致。输出文件名默认取 `flasher/brand.json` 的 `default_bin`（当前带 `r11-83`）；发版时同步修改 `firmware/VERSION` 与 `default_bin`，或用 `--name 黑猫互联-full-<版本>.bin` 显式指定。
 
 ## 主机回归
 

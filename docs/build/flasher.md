@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
 - 固件按 PolyForm Noncommercial 分发；
 - 内嵌会把固件带进 GPL，因此工具只提供“选择 BIN”。
 
-用户在工具中点“选择 BIN”，选中 `黑猫互联-full.bin` 后开始刷写。工具会校验：
+用户在工具中点“选择 BIN”，选中 `黑猫互联-full-r11-83.bin` 后开始刷写。工具会校验：
 
 - 不是 OTA 应用 BIN；
 - 分区布局与本板一致；
@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
 powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
   -Python .tmp/flasher-build-env/Scripts/python.exe `
   -OutputDirectory dist\flasher-internal `
-  -WithFirmware -FirmwareBin dist\黑猫互联-full.bin
+  -WithFirmware -FirmwareBin dist\黑猫互联-full-r11-83.bin
 ```
 
 > 一旦把内嵌固件的 EXE 发给客户，GPL 会覆盖整个分发物（包括其中的固件），与固件的商业授权冲突。对客户请始终发“无内嵌”版本 + 单独的 `full.bin`。
@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
 14 项离线测试，不需要串口；没有夹具时固件解析/并发相关的 11 项会跳过，仍运行 3 项解析与计划校验：
 
 ```bash
-set ORL_FLASHER_FIXTURE=D:\path\to\黑猫互联-full.bin
+set ORL_FLASHER_FIXTURE=D:\path\to\黑猫互联-full-r11-83.bin
 set HM_FLASHER_APP=D:\path\to\openradiolink.bin
 python flasher/test_flasher.py
 ```

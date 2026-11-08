@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--name', default=DEFAULT_BIN, help='output file name (include the firmware version)')
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     build = repo / 'firmware/build'
@@ -26,7 +27,7 @@ def main():
     parts = ((0, build / 'bootloader/bootloader.bin'), (0x8000, table),
              (0xF000, build / 'ota_data_initial.bin'), (0x20000, app))
     output.mkdir(parents=True, exist_ok=True)
-    target = output / DEFAULT_BIN
+    target = output / args.name
     command = ['--chip', 'esp32s3', 'merge_bin', '-o', str(target),
                '--flash_mode', 'dio', '--flash_freq', '80m', '--flash_size', '16MB']
     for address, path in parts:
@@ -35,7 +36,7 @@ def main():
     firmware = Firmware.load(target)
     if firmware.app_sha256 != accepted['bin_sha256'] or firmware.elf_sha256 != accepted['elf_sha256']:
         raise ValueError('Merging changed the accepted application')
-    manifest = {'file': DEFAULT_BIN, 'format': 'standard raw merged BIN at offset 0x0',
+    manifest = {'file': args.name, 'format': 'standard raw merged BIN at offset 0x0',
                 'version': firmware.version, 'bytes': len(firmware.data), 'sha256': firmware.sha256,
                 'app_sha256': firmware.app_sha256, 'elf_sha256': firmware.elf_sha256,
                 'accepted_source_commit': accepted['source_commit'], 'application_rebuilt': False,
