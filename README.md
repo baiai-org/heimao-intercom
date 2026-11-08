@@ -39,10 +39,10 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 
 | 文件 | 用途 |
 |---|---|
-| `黑猫对讲-<版本>.apk` | Android APP（Android 7.0+） |
-| `黑猫互联-full-r11-83.bin` | 完整固件，USB 刷机 / 救砖 |
-| `黑猫互联-app-OTA-r11-83.bin` | OTA 升级镜像（网页面板或 APP 上传） |
-| `黑猫互联刷机工具-<版本>.exe` | Windows 刷机工具（**不含内置固件**，需选择上面的 full BIN） |
+| `heimao-android-<版本>.apk` | Android APP（Android 7.0+） |
+| `heimao-full-r11-83.bin` | 完整固件，USB 刷机 / 救砖 |
+| `heimao-app-OTA-r11-83.bin` | OTA 升级镜像（网页面板或 APP 上传） |
+| `heimao-flasher-<版本>.exe` | Windows 刷机工具（**不含内置固件**，需选择上面的 full BIN） |
 | `SHA256SUMS.txt` | 校验 |
 
 > 刷机工具是 GPL-3.0 程序、固件是另一套许可，所以公开版不内嵌固件。下载后先选版本化的 full BIN，再开始刷写。
@@ -53,9 +53,9 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 
 ### 1. 刷机
 
-1. 下载 `黑猫互联-full-r11-83.bin` 与刷机工具；
+1. 下载 `heimao-full-r11-83.bin` 与刷机工具；
 2. 用 USB 数据线连接手台，打开工具，勾选出现的 COM 口；
-3. 点击“选择 BIN”，选中 `黑猫互联-full-r11-83.bin`（或当前版本）；
+3. 点击“选择 BIN”，选中 `heimao-full-r11-83.bin`（或当前版本）；
 4. 选择模式：
    - **保留配置**（默认）：保留 Wi-Fi、信道、参数、自定义尾音；
    - **全新刷机**：擦除整片 Flash，刷完重新配网。

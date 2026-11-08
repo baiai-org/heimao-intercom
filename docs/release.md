@@ -21,7 +21,7 @@ git push -u origin main
 ## 日常发布
 
 1. 更新版本：
-   - 固件：修改 `firmware/VERSION`（如 `r11-84`），并把 `flasher/brand.json` 的 `default_bin` 同步为 `黑猫互联-full-r11-84.bin`；
+   - 固件：修改 `firmware/VERSION`（如 `r11-84`），并把 `flasher/brand.json` 的 `default_bin` 同步为 `heimao-full-r11-84.bin`；
    - APP：修改 `app/app/build.gradle.kts` 的 `versionCode` / `versionName`；
    - 刷机工具：修改 `flasher/brand.json` 的 `version` 与 `flasher/version_info.txt`；
    - 更新 `CHANGELOG.md`。
@@ -44,7 +44,7 @@ git push origin main --tags
 ```
 
 4. GitHub Actions 会：
-   - 构建固件并生成 `黑猫互联-full-<版本>.bin` 与 `黑猫互联-app-OTA-<版本>.bin`；
+   - 构建固件并生成 `heimao-full-<版本>.bin` 与 `heimao-app-OTA-<版本>.bin`；
    - 构建 APK；
    - 在 Windows 上构建不含内置固件的刷机工具；
    - 生成 `SHA256SUMS.txt` 并创建 Release。

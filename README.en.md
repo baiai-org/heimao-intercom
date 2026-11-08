@@ -21,10 +21,10 @@ An ESP32-S3 handheld that is simultaneously an **SA818S analog radio**, a **netw
 
 From [Releases](../../releases):
 
-- `黑猫对讲-<version>.apk` — Android app (Android 7.0+)
-- `黑猫互联-full-r11-83.bin` — complete image for USB flashing
-- `黑猫互联-app-OTA-r11-83.bin` — OTA application image
-- `黑猫互联刷机工具-<version>.exe` — Windows flasher (**no embedded firmware**; select the full image)
+- `heimao-android-<version>.apk` — Android app (Android 7.0+)
+- `heimao-full-r11-83.bin` — complete image for USB flashing
+- `heimao-app-OTA-r11-83.bin` — OTA application image
+- `heimao-flasher-<version>.exe` — Windows flasher (**no embedded firmware**; select the full image)
 - `SHA256SUMS.txt`
 
 The public flasher does not bundle firmware because it is GPL-3.0 while the firmware is licensed separately.

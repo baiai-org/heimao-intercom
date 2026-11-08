@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           version="$(tr -d '\r\n' < firmware/VERSION)"
-          python flasher/make_firmware.py --output dist --name "黑猫互联-full-${version}.bin"
-          cp firmware/build/openradiolink.bin "dist/黑猫互联-app-OTA-${version}.bin"
+          python flasher/make_firmware.py --output dist --name "heimao-full-${version}.bin"
+          cp firmware/build/openradiolink.bin "dist/heimao-app-OTA-${version}.bin"
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-bins
@@ -54,7 +54,7 @@ jobs:
         run: |
           mkdir -p dist
           version="$(grep -oP 'versionName = "\K[^"]+' app/app/build.gradle.kts)"
-          cp app/app/build/outputs/apk/debug/app-debug.apk "dist/黑猫对讲-${version}.apk"
+          cp app/app/build/outputs/apk/debug/app-debug.apk "dist/heimao-android-${version}.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
@@ -78,7 +78,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content firmware/VERSION).Trim()
-          $env:ORL_FLASHER_FIXTURE = "dist\黑猫互联-full-$version.bin"
+          $env:ORL_FLASHER_FIXTURE = "dist\heimao-full-$version.bin"
           python flasher/test_flasher.py
       - name: Build public EXE (no embedded firmware)
         run: powershell -ExecutionPolicy Bypass -File flasher/build.ps1 -Python python -OutputDirectory dist/flasher -SkipTests

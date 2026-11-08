@@ -35,7 +35,7 @@
 - 移除真实 HTTPS 私钥，改为构建时生成；
 - 移除内部设备 IP、`device_id`、内部交接文档；
 - 新增 LICENSE、COMMERCIAL、CLA、TRADEMARK、NOTICE、THIRD_PARTY、SECURITY、CONTRIBUTING；
-- 固件 BIN 文件名带固件版本号：`黑猫互联-full-r11-83.bin`、`黑猫互联-app-OTA-r11-83.bin`；
+- 固件 BIN 文件名带固件版本号：`heimao-full-r11-83.bin`、`heimao-app-OTA-r11-83.bin`；
 - 新增 GitHub Actions：固件构建、主机回归、APP 构建、刷机工具测试、secret scan、license check、release。
 
 ### 已知问题

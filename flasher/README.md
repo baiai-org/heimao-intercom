@@ -6,7 +6,7 @@ Windows 10/11 x64，单文件 EXE，免安装、离线运行，不需要 Python/
 
 ## 使用
 
-1. 从 Releases 下载 `黑猫互联刷机工具-<版本>.exe` 和 `黑猫互联-full-r11-83.bin`，放在同一目录；
+1. 从 Releases 下载 `heimao-flasher-<版本>.exe` 和 `heimao-full-r11-83.bin`，放在同一目录；
 2. 双击运行，USB 连接手台；
 3. 勾选要刷写的 COM 口（可多选，真正并行）；
 4. 点击“选择 BIN”，选中 `full.bin`；
@@ -34,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
 ## 测试
 
 ```bash
-set ORL_FLASHER_FIXTURE=D:\path\to\黑猫互联-full-r11-83.bin
+set ORL_FLASHER_FIXTURE=D:\path\to\heimao-full-r11-83.bin
 python flasher/test_flasher.py
 ```
 
