@@ -41,6 +41,8 @@ def main():
             continue
         if str(rel).split("/")[0] == "flasher":
             continue
+        if str(rel) == "tools/check_licenses.py":
+            continue  # contains the marker strings it searches for
         if not any(str(rel).startswith(prefix + "/") for prefix in SCAN_DIRS):
             continue
         try:
