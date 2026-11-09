@@ -1,7 +1,7 @@
 # 黑猫互联 · Heimao Intercom
 
 ![黑猫互联](assets/brand/icon-512.png)
-
+嘉立创硬件开源项目地址：(https://oshwhub.com/redcnts/project_qdvhfjnc?jlc_vid=TwAMUV0AQlELUwJSRQNeUlZQRwBeUwdWQVlZUVNRQgcxVlNfQ1NcVVBWRVldVjtWKAkaExQVTU5BCBcOAAkbBUoFGAw=)
 ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**网络语音终端**（局域网直连 / P2P / MQTT 中继）、**6 段 EQ**、**99 槽信道库**，自带浏览器控制面板与 Android 对讲 APP。
 
 > **许可声明（请先读）**
