@@ -139,7 +139,7 @@ HTTPS 证书是构建期生成的自签证书（ECDSA P-256，SAN 只有 DNS 名
 | 最大 socket | 9 | 5 |
 | keep-alive | 开（idle 10 s / 2 s / 3 次） | 同 |
 | LRU 回收 | 开 | 开 |
-| 路由表 | 同一份 `s_routes`（47 条） | 同 |
+| 路由表 | 同一份 `s_routes` | 同 |
 
 keep-alive 是必需项而不是优化：固件注释给出的板端实测是"一次 TLS 握手约 470 ms、
 已建连接上的一个请求约 22 ms"，关掉 keep-alive 面板的轮询根本跟不上。
@@ -473,7 +473,7 @@ PTT 模块只有一个键控入口（`pad_apply`），电平是两路键控域�
 
 - 网络引擎的任务栈（`MALLOC_CAP_SPIRAM`）、抖动缓冲、TX 队列；
 - SDR 收发环形缓冲、`sdr_tx`/`sdr_tone` 任务栈；
-- `/api/status` 每次请求单独分配 4608 字节响应缓冲。
+- `/api/status` 每次请求单独分配 12288 字节响应缓冲，并为完整 16 个 P2P 对端预留 5120 字节。
 
 ### 6.3 两个栈相关的硬约束
 
@@ -492,8 +492,8 @@ PTT 模块只有一个键控入口（`pad_apply`），电平是两路键控域�
 |---|---|---|
 | SDR RX 环 | `AUDIO_SAMPLE_RATE_HZ * 3`（3 s） | PSRAM |
 | SDR TX 环 | 8192 样本 | PSRAM |
-| P2P 每对端抖动缓冲 | 128 槽 × Opus 帧 | PSRAM |
-| P2P 对端数 | 4 个持久 + 1 个自测槽 | — |
+| P2P 每对端抖动缓冲 | 128 槽 ×（Opus 帧 + 序号 + 有效位），首次收音时分配 | PSRAM |
+| P2P 对端数 | 16 个持久 + 1 个自测槽 | — |
 | 中继抖动缓冲 | 128 槽 | PSRAM |
 
 源码位置：`firmware/sdkconfig`、`firmware/main/CMakeLists.txt`、

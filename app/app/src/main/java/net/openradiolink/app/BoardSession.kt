@@ -259,6 +259,7 @@ class BoardSession(
         if (api.token.isNotBlank()) api.json("api/control",JSONObject().put("op","release"))
         api.token="";publish { it.copy(mine=false) };refresh()
     }
+    internal suspend fun deniedPeers():List<DeniedPeer> = parseDeniedPeers(api.json("api/np2p/denied"))
     suspend fun set(key: String,value: String) {
         ensureLease();reads.incrementAndGet()
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }

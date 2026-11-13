@@ -10,6 +10,8 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "np_peer_store.h"
+#define NETP2PNET_STATUS_RESERVE (1024 + NP_PEER_LIMIT * 256)
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +30,9 @@ void netp2pnet_status_json(char *buf, size_t n);
 /* Peer table (panel / CLI).  ip is a dotted string; name up to 7 chars. */
 esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port);
 esp_err_t netp2pnet_peer_del(int index);
+esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_t port, bool restore);
+esp_err_t netp2pnet_unblock(const char *id);
+esp_err_t netp2pnet_denied_json(char *buf, size_t n);
 esp_err_t netp2pnet_peer_knock(int index);     /* force a fresh KNOCK */
 int      netp2pnet_peer_count(void);
 /* Fills the row for one peer; state is a static string.  -1 = no such peer. */

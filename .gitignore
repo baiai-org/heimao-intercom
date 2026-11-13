@@ -39,3 +39,16 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# --- local handoff, publishing outputs and private credentials ---------------
+dist/
+diagnostics/
+private/
+接手前必读.md
+AGENT-HANDOFF.md
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+**/keystore.properties

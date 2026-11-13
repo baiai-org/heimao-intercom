@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "sa818_freq.h"
@@ -63,12 +64,33 @@ esp_err_t sa818_cfg_load(sa818_cfg_t *cfg);
 esp_err_t sa818_cfg_apply(const sa818_cfg_t *cfg, char *log, size_t log_len);
 /* Operator change: apply and persist under one configuration lock. */
 esp_err_t sa818_cfg_update(const sa818_cfg_t *cfg, char *log, size_t log_len);
+enum { SA818_EDIT_TX = 1u, SA818_EDIT_RX = 2u, SA818_EDIT_BW = 4u,
+    SA818_EDIT_SQ = 8u, SA818_EDIT_VOLUME = 16u, SA818_EDIT_TXT = 32u,
+    SA818_EDIT_RXT = 64u, SA818_EDIT_POWER = 128u, SA818_EDIT_TAIL = 256u,
+    SA818_EDIT_FILTER_PRE = 512u, SA818_EDIT_FILTER_HP = 1024u, SA818_EDIT_FILTER_LP = 2048u };
+esp_err_t sa818_cfg_update_fields(const sa818_cfg_t *values, uint32_t fields,
+                                 char *log, size_t log_len);
+/* Partial edits merge under the apply lock, avoiding stale snapshot overwrite. */
+esp_err_t sa818_cfg_update_changed(const sa818_cfg_t *before, const sa818_cfg_t *after,
+                                  char *log, size_t log_len);
+typedef enum { SA818_APPLY_NONE, SA818_APPLY_BUSY, SA818_APPLY_GROUP,
+    SA818_APPLY_VOLUME, SA818_APPLY_FILTER, SA818_APPLY_TAIL,
+    SA818_APPLY_STORAGE, SA818_APPLY_READY } sa818_apply_stage_t;
+typedef struct {
+    unsigned revision, applied_revision, stage, attempts;
+    int error;
+    bool ready, recovery_pending, maintenance_pending;
+} sa818_cfg_status_t;
+/* Software ACK/commit state, never advertised as hardware parameter readback. */
+void sa818_cfg_status(sa818_cfg_status_t *out);
+
 /* Keep the physical band and saved channels; clear the operating profile. */
 esp_err_t sa818_cfg_reset(void);
 
 /*
- * Re-send the profile once after an over, but only when the station has been
- * idle for a second and stays idle for five more.  Silent by design.
+ * Check after an over; healthy profiles are never periodically retuned. Recover
+ * uncertain configuration only after one idle second and ten more. Recovery is bounded
+ * to three attempts per generation and never rewrites unchanged NVS.
  */
 void sa818_cfg_arm_refresh(void);
 void sa818_cfg_refresh_tick(void);

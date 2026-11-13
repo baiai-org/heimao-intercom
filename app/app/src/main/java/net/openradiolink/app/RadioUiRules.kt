@@ -5,16 +5,24 @@ import java.math.RoundingMode
 import org.json.JSONObject
 
 internal object RadioUiRules {
-    fun frequency(text:String,min:String,max:String):String {
+    fun frequencyGridHz(radio:JSONObject):Int = if(radio.optInt("freq_grid_hz")==500)500 else 12500
+    fun frequency(text:String,min:String,max:String,gridHz:Int=12500):String {
+        require(Regex("\\d+(?:\\.\\d*)?").matches(text.trim())){"请输入有效的 MHz 频率"}
         val value=text.trim().toBigDecimalOrNull() ?: error("请输入有效的 MHz 频率")
         val lower=min.toBigDecimalOrNull() ?: error("尚未读取模块频率范围")
         val upper=max.toBigDecimalOrNull() ?: error("尚未读取模块频率范围")
         require(value>=lower && value<=upper){"频率应为 $min–$max MHz"}
-        require(value.remainder(BigDecimal("0.0125")).compareTo(BigDecimal.ZERO)==0){"频率需符合 12.5 kHz 步进"}
-        return value.setScale(4,RoundingMode.UNNECESSARY).toPlainString()
+        val grid=BigDecimal(if(gridHz==500)"0.0005" else "0.0125")
+        require(value.remainder(grid).compareTo(BigDecimal.ZERO)==0){"频率需符合 ${if(gridHz==500)"0.5" else "12.5"} kHz 设置分辨率"}
+        return exactFrequency(value)
     }
     fun displayFrequency(value:String):String = value.toBigDecimalOrNull()?.takeIf{it>BigDecimal.ZERO}
-        ?.setScale(4,RoundingMode.HALF_UP)?.toPlainString() ?: "—.————"
+        ?.let{exactFrequency(it)} ?: "—.————"
+    private fun exactFrequency(value:BigDecimal):String = value.setScale(4,RoundingMode.HALF_UP).toPlainString()
+    fun stepFrequency(text:String,deltaHz:Int,min:String,max:String,gridHz:Int):String {
+        val current=frequency(text,min,max,gridHz).toBigDecimal()
+        return frequency(current.add(BigDecimal(deltaHz).movePointLeft(6)).toPlainString(),min,max,gridHz)
+    }
     fun nameError(name:String):String? = if(name.isBlank())"请输入信道名称" else if(name.toByteArray(Charsets.UTF_8).size>23)"名称最多 23 个 UTF-8 字节" else null
     // Indices shift when a channel is removed. Favorites follow its contents instead.
     fun channelKey(c:JSONObject):String= listOf("name","band","rx","tx","bw","sq","vol","pwr","txt","rxt")

@@ -6,13 +6,13 @@ Windows 10/11 x64，单文件 EXE，免安装、离线运行，不需要 Python/
 
 ## 使用
 
-1. 从 Releases 下载 `heimao-flasher-<版本>.exe` 和 `heimao-full-r11-83.bin`，放在同一目录；
+1. 从 Releases 下载 `heimao-flasher-<版本>.exe` 和 `heimao-full-r11-93.bin`，放在同一目录；
 2. 双击运行，USB 连接手台；
 3. 勾选要刷写的 COM 口（可多选，真正并行）；
 4. 点击“选择 BIN”，选中 `full.bin`；
 5. 选择模式，点击“开始刷写”。
 
-> 公开版**不内嵌固件**：工具是 GPL-3.0、固件是另一套许可，混装会把固件带进 GPL。工具会在开始前校验 BIN 类型、分区布局、芯片与 Flash 大小。
+> 公开版**不内嵌固件**：固件与工具分别下载、分别遵循各自许可证。工具会在开始前校验 BIN 类型、分区布局、芯片与 Flash 大小。
 
 | 模式 | 行为 |
 |---|---|
@@ -29,16 +29,16 @@ powershell -ExecutionPolicy Bypass -File flasher/build.ps1 `
   -OutputDirectory dist\flasher
 ```
 
-内部构建可加 `-WithFirmware -FirmwareBin <full.bin>` 内嵌固件；**不要把这个版本发给客户**（会把固件置于 GPL 之下）。
+工具1.1.4不提供内嵌构建选项。`-FixtureBin`和`-AppBin`只提供离线测试夹具；最终EXE归档只允许两个品牌图片资源，并生成bundle-verification.json。
 
 ## 测试
 
 ```bash
-set ORL_FLASHER_FIXTURE=D:\path\to\heimao-full-r11-83.bin
+set ORL_FLASHER_FIXTURE=D:\path\to\heimao-full-r11-93.bin
 python flasher/test_flasher.py
 ```
 
-没有夹具时，解析/并发相关的 11 项会跳过，仍会运行 3 项无夹具的解析与计划校验。
+没有夹具时，解析/并发相关的11项会跳过，仍运行6项无夹具测试；完整夹具下17项均需通过。
 
 ## 目录
 

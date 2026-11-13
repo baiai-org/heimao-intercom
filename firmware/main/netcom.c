@@ -25,6 +25,7 @@
 #include "ptt.h"
 #include "voice.h"
 #include "radio_led.h"
+#include "sdr.h"
 
 static const char *TAG = "netcom";
 #define NVS_NS      "orl"
@@ -432,6 +433,7 @@ static esp_err_t engine_stop(const netcom_engine_t *e)
     /* Close the old RF stream while its engine still owns a valid TX queue.
      * bridge_apply blocks the tap before releasing its monitor borrow. */
     s_engine_up = false;
+    sdr_rx_network_mode(NETCOM_MODE_LOCAL);
     radio_led_reset_net();
     bridge_mode_changed();
     if (e && e->stop) {
@@ -458,8 +460,10 @@ static esp_err_t engine_start(const netcom_engine_t *e)
         s_engine_up = false;
         return ESP_OK;
     }
+    sdr_rx_network_mode(s_cfg.mode);
     const esp_err_t err = e->start(&s_cfg);
     s_engine_up = (err == ESP_OK);
+    if (err != ESP_OK) { sdr_rx_network_mode(NETCOM_MODE_LOCAL); }
     return err;
 }
 

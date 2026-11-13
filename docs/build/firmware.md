@@ -18,7 +18,7 @@ cd firmware
 idf.py build
 ```
 
-版本串来自 `firmware/VERSION`（当前 `r11-83`），由 CMake 在 `project()` 之前读入，因此源码压缩包/干净克隆也能得到确定的版本号，不依赖 `git describe`。发版时修改该文件。
+版本串来自 `firmware/VERSION`（当前开发版本 `r11-85`），由 CMake 在 `project()` 之前读入，因此源码压缩包/干净克隆也能得到确定的版本号，不依赖 `git describe`。发版时修改该文件。
 
 预期产物：
 
@@ -57,7 +57,7 @@ USB 刷机需要 0x0 起始的合并镜像。用刷机工具自带的打包脚�
 python flasher/make_firmware.py --output dist
 ```
 
-产物 `dist/heimao-full-r11-83.bin` 包含 bootloader + 分区表 + OTA 初始数据 + 应用；脚本会校验分区布局与本板一致。输出文件名默认取 `flasher/brand.json` 的 `default_bin`（当前带 `r11-83`）；发版时同步修改 `firmware/VERSION` 与 `default_bin`，或用 `--name heimao-full-<版本>.bin` 显式指定。
+产物 `dist/heimao-full-r11-85.bin` 包含 bootloader + 分区表 + OTA 初始数据 + 应用；脚本会校验分区布局与本板一致。输出文件名默认取 `flasher/brand.json` 的 `default_bin`（当前带 `r11-85`）；发版时同步修改 `firmware/VERSION` 与 `default_bin`，或用 `--name heimao-full-<版本>.bin` 显式指定。
 
 ## 主机回归
 
@@ -69,7 +69,7 @@ python tools/run_host_tests.py
 
 依赖：`gcc`（部分测试编译真实 C 函数）、`node`。脚本直接使用仓库内的源码、网页文件与 `tools/vendor/cJSON`。
 
-> 有 4 个历史测试在旧仓库即失败（测试脚本未跟上生产代码），runner 会把它们标成 `XFAIL` 并继续；新增失败才会返回非零。`--strict` 可把 XFAIL 也当失败。
+> 有 3 个历史测试仍以 `XFAIL` 显式记录；桥接测试替身已随接收保护功能修复。新增失败才会返回非零。`--strict` 可把 XFAIL 也当失败。
 
 ## 资源约束（改代码前必读）
 

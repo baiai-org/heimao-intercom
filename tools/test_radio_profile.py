@@ -74,6 +74,15 @@ int gpio_config(const gpio_config_t *);
 void gpio_ll_get_io_config(int, int, bool *, bool *, bool *, bool *, bool *, uint32_t *, uint32_t *, uint32_t *, bool *);
 void board_sa818_power(bool);
 void board_sa818_high_power(bool);
+int64_t esp_timer_get_time(void);
+void bridge_apply(void);
+#define PTT_IDLE 0
+int ptt_get_state(void);
+bool voice_module_squelch_open(void);
+bool voice_rf_carrier_present(void);
+bool voice_network_busy(void);
+int voice_bridge_level(void);
+bool voice_sdr_tail_active(void);
 bool board_sa818_power_pending(void);
 bool board_ptt_is_asserted(void);
 bool board_safe_state_verify(int *, int *, int *);
@@ -96,6 +105,14 @@ static sa818_profile_t last_group;
 static int last_volume, last_filters[3];
 static int pin_level[64], pin_mode[64];
 static bool pull_up[64], pull_down[64];
+int64_t esp_timer_get_time(void) { return 0; }
+void bridge_apply(void) {}
+int ptt_get_state(void) { return board_ptt_is_asserted() ? 1 : PTT_IDLE; }
+bool voice_module_squelch_open(void) { return false; }
+bool voice_rf_carrier_present(void) { return false; }
+bool voice_network_busy(void) { return false; }
+int voice_bridge_level(void) { return 0; }
+bool voice_sdr_tail_active(void) { return false; }
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return calloc(1, sizeof(int)); }
 int xSemaphoreTake(SemaphoreHandle_t h, int timeout) {
@@ -175,15 +192,20 @@ esp_err_t sa818_set_tail(bool on, char *out, size_t n) {
 static void frequencies(void) {
     unsigned checked = 0;
     for (int band = SA818_BAND_UHF; band <= SA818_BAND_VHF; ++band) {
-        int low = (int)sa818_band_min(band) * 80, high = (int)sa818_band_max(band) * 80;
+        int low = (int)sa818_band_min(band) * 2000, high = (int)sa818_band_max(band) * 2000;
         for (int unit = low; unit <= high; ++unit) {
-            char text[32]; snprintf(text, sizeof(text), "%.4f", (double)unit / 80);
+            char text[32]; snprintf(text, sizeof(text), "%.4f", (double)unit / 2000);
             float f = -1; assert(sa818_freq_parse(text, &f));
             assert(sa818_freq_pair_valid(band, f, f));
+            char formatted[16]; float again;
+            assert(sa818_freq_format(f, formatted, sizeof(formatted)));
+            assert(sa818_freq_parse(formatted, &again) && f == again);
+            assert(fabs(strtod(formatted, NULL) - strtod(text, NULL)) < 0.00000001);
             assert(!sa818_freq_pair_valid(band == 1 ? 2 : 1, f, f)); ++checked;
         }
     }
     const char *bad[] = {"", "nan", "inf", "438.5junk", "4.385e2", "0x1p8", "438.5001",
+                         "144.7562", "144.7563", "144.75625", "144.75624", "144.75626", "438.50001",
                          "133.9875", "174.0125", "399.9875", "480.0125", "250", "-438.5", "438.5,1"};
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
         float f = -7; assert(!sa818_freq_parse(bad[i], &f) && f == -7);
@@ -262,6 +284,14 @@ int main(int argc, char **argv) {
     assert(sa818_cfg_update(&cfg, log, sizeof(log)) != ESP_OK && !sa818_cfg_tx_ready());
     fail_store = false;
     assert(sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK);
+    sa818_cfg_t stale_refresh = stored, new_channel = stored;
+    new_channel.rx_mhz += .0125f;
+    assert(sa818_cfg_update(&new_channel, log, sizeof(log)) == ESP_OK);
+    sent = commands; writes = blob_writes;
+    assert(apply_profile(&stale_refresh, true, NULL, 0, true) == ESP_ERR_INVALID_STATE);
+    assert(commands == sent && blob_writes == writes && stored.rx_mhz == new_channel.rx_mhz);
+    assert(apply_profile(&new_channel, true, NULL, 0, true) == ESP_OK);
+    assert(sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK);
     writes = blob_writes; sent = commands;
     assert(sa818_cfg_set_band(2) == ESP_OK && !sa818_cfg_tx_ready());
     assert(blob_writes == writes && commands == sent);
@@ -269,6 +299,15 @@ int main(int argc, char **argv) {
     assert(sa818_cfg_apply(&last, log, sizeof(log)) != ESP_OK && commands == sent);
     cfg.tx_mhz = 145.0125f; cfg.rx_mhz = 145.6125f;
     assert(sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK && sa818_cfg_tx_ready());
+    for (int bw = 0; bw <= 1; ++bw) {
+        cfg.bandwidth = bw; cfg.tx_mhz = 145.0025f; cfg.rx_mhz = 145.6010f;
+        assert(sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK);
+        assert(sa818_cfg_load(&last) == ESP_OK);
+        char exact[16]; assert(sa818_freq_format(last.tx_mhz, exact, sizeof(exact)));
+        assert(!strcmp(exact, "145.0025"));
+        assert(sa818_freq_format(last.rx_mhz, exact, sizeof(exact)) && !strcmp(exact, "145.6010"));
+        assert(last_group.tx_mhz == cfg.tx_mhz && last_group.rx_mhz == cfg.rx_mhz);
+    }
     writes = blob_writes;
     assert(sa818_cfg_apply(&cfg, log, sizeof(log)) == ESP_OK && blob_writes == writes);
     assert(sa818_cfg_reset() == ESP_OK && sa818_cfg_band() == 2 && !sa818_cfg_tx_ready());
@@ -289,7 +328,7 @@ def main():
         for name in ('sa818_cfg.c', 'sa818_cfg.h', 'sa818_freq.c', 'sa818_freq.h', 'sa818.h', 'ctcss.c', 'ctcss.h'):
             shutil.copy2(MAIN / name, d / name)
         (d / 'stubs.h').write_text(STUBS)
-        for name in ('esp_err.h', 'esp_log.h', 'nvs.h', 'nvs_flash.h', 'board_hw.h',
+        for name in ('esp_err.h', 'esp_log.h', 'nvs.h', 'nvs_flash.h', 'board_hw.h', 'bridge.h', 'ptt.h', 'voice.h', 'esp_timer.h',
                      'freertos/FreeRTOS.h', 'freertos/semphr.h'):
             (d / name).write_text('#include "stubs.h"\n')
         board = (MAIN / 'board_hw.c').read_text(encoding='utf-8')
@@ -304,6 +343,42 @@ def main():
                         '-lm', '-o', str(exe)], check=True, env=env)
         for scenario in ('fresh', 'legacy', 'vhf'):
             subprocess.run([str(exe), scenario], check=True)
+
+        driver = (MAIN / 'sa818.c').read_text(encoding='utf-8')
+        group = driver[driver.index('esp_err_t sa818_set_group('):driver.index('esp_err_t sa818_set_volume(')]
+        (d / 'driver_test.c').write_text(r'''
+#include "stubs.h"
+#include "sa818.h"
+#include "sa818_freq.h"
+static char sent[128];
+esp_err_t sa818_cmd(const char *cmd, char *reply, size_t n, int timeout) {
+    assert(timeout == 600); snprintf(sent, sizeof(sent), "%s", cmd);
+    snprintf(reply, n, "+DMOSETGROUP:0"); return ESP_OK;
+}
+''' + group + r'''
+int main(void) {
+    sa818_profile_t p = {.tx_mhz=144.8000f,.rx_mhz=144.7525f,.squelch=3};
+    strcpy(p.tx_ctcss,"0008"); strcpy(p.rx_ctcss,"0008");
+    char reply[96];
+    assert(sa818_set_group(&p,reply,sizeof(reply))==ESP_OK);
+    assert(!strcmp(sent,"AT+DMOSETGROUP=0,144.8000,144.7525,0008,3,0008"));
+    p.bandwidth=1;p.tx_mhz=438.5025f;p.rx_mhz=438.5125f;
+    assert(sa818_set_group(&p,reply,sizeof(reply))==ESP_OK);
+    assert(!strcmp(sent,"AT+DMOSETGROUP=1,438.5025,438.5125,0008,3,0008"));
+    p.rx_mhz=438.5010f;p.tx_mhz=438.5050f;
+    assert(sa818_set_group(&p,reply,sizeof(reply))==ESP_OK);
+    assert(!strcmp(sent,"AT+DMOSETGROUP=1,438.5050,438.5010,0008,3,0008"));
+    p.tx_mhz=438.5001f;strcpy(sent,"untouched");
+    assert(sa818_set_group(&p,reply,sizeof(reply))==ESP_ERR_INVALID_ARG && !strcmp(sent,"untouched"));
+    p.tx_mhz=438.50625f;
+    assert(sa818_set_group(&p,reply,sizeof(reply))==ESP_ERR_INVALID_ARG);
+    puts("PASS: actual UART serializer; exact 1/2.5/5k with four decimals, both bands/bandwidths; 6.25k/100Hz never sent");
+}
+''', encoding='utf-8')
+        exe = d / 'driver_test.exe'
+        subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-I',str(d),
+                        str(d/'driver_test.c'),str(d/'sa818_freq.c'),'-lm','-o',str(exe)],check=True,env=env)
+        subprocess.run([str(exe)],check=True)
 
         # Exercise the production serializer at the full bank size, including
         # worst-case names, a cross-band entry and non-finite damaged storage.
@@ -333,6 +408,7 @@ int main(void) {
         strcpy(c->tx_ctcss, "0000"); strcpy(c->rx_ctcss, "0000");
     }
     s_all[97].cfg.rx_mhz = 438.5f; // Deliberately mixed band.
+    s_all[2].cfg.tx_mhz = 438.5025f; s_all[2].cfg.rx_mhz = 438.5010f;
     s_all[98].cfg.tx_mhz = NAN;
     memset(s_all[98].cfg.tx_ctcss, 2, 8); // Deliberately unterminated.
     char *out = malloc(99 * 768 + 4);
@@ -353,6 +429,7 @@ int main(void) {
         assert len(bank) == 99 and [c['i'] for c in bank] == list(range(99))
         assert bank[0]['band'] == 'UHF' and bank[0]['compatible']
         assert bank[1]['band'] == 'VHF' and not bank[1]['compatible']
+        assert bank[2]['tx'] == 438.5025 and bank[2]['rx'] == 438.5010 and bank[2]['compatible']
         assert bank[97]['band'] == 'UNSET' and not bank[97]['compatible']
         assert bank[98]['tx'] is None and not bank[98]['compatible']
         assert bank[98]['txt'] == '\x02' * 8

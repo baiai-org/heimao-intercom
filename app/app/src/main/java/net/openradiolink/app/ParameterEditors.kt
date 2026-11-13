@@ -70,6 +70,7 @@ import kotlinx.coroutines.withContext
     var open by remember(p.id){mutableStateOf(false)}
     SettingRow("收发频率","RX ${RadioUiRules.displayFrequency(s.status.value("freq.rx"))} / TX ${RadioUiRules.displayFrequency(s.status.value("freq.tx"))} MHz",enabled=s.connected&&!s.maintenance){manager.pttUp(p.id);open=true}
     if(open){
+        val gridHz=RadioUiRules.frequencyGridHz(s.radio)
         var tx by remember{mutableStateOf(p.drafts["frequency.tx"] ?: s.status.value("freq.tx"))}
         var rx by remember{mutableStateOf(p.drafts["frequency.rx"] ?: s.status.value("freq.rx"))}
         var same by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};var saving by remember{mutableStateOf(false)}
@@ -77,13 +78,33 @@ import kotlinx.coroutines.withContext
         ModalBottomSheet(sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),onDismissRequest={if(!saving)open=false}) {
             Column(Modifier.fillMaxWidth().padding(bottom=WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()).imePadding().verticalScroll(rememberScrollState()).padding(horizontal=24.dp).padding(bottom=32.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                 Text("收发频率",style=MaterialTheme.typography.headlineSmall)
-                Text("${s.radio.value("band")} · ${s.radio.value("min")}–${s.radio.value("max")} MHz\n12.5 kHz 步进，保存后以手台端读回为准。",color=secondary)
+                Text("${s.radio.value("band")} · ${s.radio.value("min")}–${s.radio.value("max")} MHz\n"+
+                    if(gridHz==500)"支持 1 / 2.5 / 5 kHz 调整；实际载频以综测为准。" else "当前手台支持 12.5 kHz 步进，升级固件后可用小步进。",color=secondary)
                 OutlinedTextField(rx,{rx=it;manager.saveDraft(p.id,"frequency.rx",it);if(same){tx=it;manager.saveDraft(p.id,"frequency.tx",it)};error=""},label={Text("接收 RX · MHz")},singleLine=true,enabled=!saving,modifier=Modifier.fillMaxWidth(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal))
                 OutlinedTextField(tx,{tx=it;manager.saveDraft(p.id,"frequency.tx",it);error=""},label={Text("发射 TX · MHz")},singleLine=true,enabled=!saving&&!same,modifier=Modifier.fillMaxWidth(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal))
                 Row(verticalAlignment=Alignment.CenterVertically){Switch(same,{same=it;if(it){tx=rx;manager.saveDraft(p.id,"frequency.tx",rx)}},enabled=!saving);Text("收发同频",modifier=Modifier.padding(start=12.dp))}
+                if(gridHz==500){
+                    var stepHz by remember{mutableStateOf(1000)}
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                        listOf(1000 to "1k",2500 to "2.5k",5000 to "5k").forEach{(hz,label)->
+                            FilterChip(selected=stepHz==hz,onClick={stepHz=hz},enabled=!saving,label={Text(label)})
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)){
+                        listOf(-1 to "收发 −",1 to "收发 +").forEach{(sign,label)->
+                            OutlinedButton(onClick={
+                                runCatching{RadioUiRules.stepFrequency(tx,sign*stepHz,s.radio.value("min"),s.radio.value("max"),gridHz) to
+                                    RadioUiRules.stepFrequency(rx,sign*stepHz,s.radio.value("min"),s.radio.value("max"),gridHz)}
+                                    .onSuccess{(nextTx,nextRx)->tx=nextTx;rx=nextRx;error="";manager.saveDraft(p.id,"frequency.tx",tx);manager.saveDraft(p.id,"frequency.rx",rx)}
+                                    .onFailure{error=it.message ?: "频率无效"}
+                            },enabled=!saving,modifier=Modifier.weight(1f)){Text(label)}
+                        }
+                    }
+                    Text("加减只修改输入框，点保存后下发。",color=secondary,style=MaterialTheme.typography.bodySmall)
+                }
                 if(error.isNotBlank())Text(error,color=red)
                 Button(onClick={
-                    runCatching{RadioUiRules.frequency(tx,s.radio.value("min"),s.radio.value("max")) to RadioUiRules.frequency(rx,s.radio.value("min"),s.radio.value("max"))}
+                    runCatching{RadioUiRules.frequency(tx,s.radio.value("min"),s.radio.value("max"),gridHz) to RadioUiRules.frequency(rx,s.radio.value("min"),s.radio.value("max"),gridHz)}
                         .onFailure{error=it.message ?: "频率无效"}.onSuccess{(nextTx,nextRx)->
                             saving=true;manager.action(p.id){try{
                                 set("freq_pair","$nextTx,$nextRx");manager.store.clearDraft(p.id,"frequency.tx","frequency.rx")

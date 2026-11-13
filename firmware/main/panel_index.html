@@ -1008,6 +1008,7 @@ button.ok-btn {
   font-size: 11px;
   text-align: center;
 }
+.step-strip.fine { grid-template-columns: repeat(3, 1fr); }
 
 .sec-label {
   font-size: 11px;
@@ -1435,9 +1436,74 @@ button.ok-btn {
     padding: 0 14px;
   }
 }
+/* Six functional views, independent from communication-mode visibility. */
+[hidden]{display:none!important}
+body[data-panel-layout="simple"] .workspace{display:grid;grid-template-columns:180px minmax(0,1fr);gap:24px;max-width:1320px;margin:auto;padding:24px 24px 48px}
+body[data-panel-layout="simple"] .panel-nav{position:sticky;top:112px;align-self:start;display:flex;flex-direction:column;gap:8px}
+body[data-panel-layout="simple"] .panel-nav button{text-align:left;padding:14px 16px;border:0;background:transparent;color:var(--fg-2);font-size:15px;min-height:48px}
+body[data-panel-layout="simple"] .panel-nav button.on,body[data-panel-layout="simple"] .panel-subnav button.on{background:#173344;color:#79e6ed}
+body[data-panel-layout="simple"] .panel-more{display:none}
+body[data-panel-layout="simple"] .panel-page{display:flex;flex-direction:column;gap:18px;min-width:0}
+body[data-panel-layout="simple"] .panel-page>h2{font-size:23px;margin:0 0 4px}
+body[data-panel-layout="simple"] .panel-page h3{font-size:16px;margin:0 0 14px}
+body[data-panel-layout="simple"] .panel-page .card,body[data-panel-layout="simple"] .panel-page .lcd-cockpit,body[data-panel-layout="simple"] .panel-page .mode-stage,body[data-panel-layout="simple"] .panel-page .name-plate{width:100%;min-height:0;box-shadow:none;margin:0;padding:20px;border-radius:14px;overflow:visible}
+body[data-panel-layout="simple"] .panel-page .card-head h2{font-size:16px}
+body[data-panel-layout="simple"] .panel-page .row{gap:10px;margin:12px 0;flex-wrap:wrap}
+body[data-panel-layout="simple"] .panel-page .row label{font-size:14px}
+body[data-panel-layout="simple"] .panel-page input,body[data-panel-layout="simple"] .panel-page select,body[data-panel-layout="simple"] .panel-page button{min-height:42px;font-size:14px}
+body[data-panel-layout="simple"] .panel-page input[type=checkbox]{min-height:0}
+body[data-panel-layout="simple"] .panel-page input[type=range]{min-height:32px}
+body[data-panel-layout="simple"] .panel-page .hint{font-size:13px!important;line-height:1.65}
+body[data-panel-layout="simple"] .panel-page .sec-label{font-size:13px;letter-spacing:0}
+body[data-panel-layout="simple"] .panel-page .tx{box-shadow:none}
+body[data-panel-layout="simple"] .panel-page .card:hover{border-color:var(--line)}
+body[data-panel-layout="simple"] .panel-draft{padding:12px;background:#40351b;border-radius:8px;color:#ffdc8a;margin-bottom:12px;font-size:14px}
+body[data-panel-layout="simple"] .panel-subnav{display:flex;gap:8px;flex-wrap:wrap}
+body[data-panel-layout="simple"] .panel-subnav button{padding:10px 18px;min-height:44px}
+body[data-panel-layout="simple"] .panel-page details{border-top:1px solid var(--line);padding-top:12px;margin-top:14px}
+body[data-panel-layout="simple"] .panel-page summary{cursor:pointer;font-size:14px;padding:6px 0;color:var(--fg-2)}
+body[data-panel-layout="simple"] .panel-page .ch-list{height:auto;max-height:60vh}
+body[data-panel-layout="simple"] .panel-page .np2p-peerrow{padding:10px 0;gap:10px}
+body[data-panel-layout="simple"] .panel-page .np2p-peerrow button{min-height:40px}
+body[data-panel-layout="simple"] .panel-page .brand-ver,body[data-panel-layout="simple"] .panel-page .m-code{display:none}
+body[data-panel-layout="simple"] .telemetry-strip #upPill,body[data-panel-layout="simple"] .telemetry-strip #rssiPill{display:none}
+body[data-panel-layout="simple"] #panelNotice:empty{display:none}
+body[data-panel-layout="simple"] #panelNotice{color:var(--amber);padding:12px;border:1px solid var(--amber);border-radius:8px}
+body[data-panel-layout="simple"] .panel-page .kv-matrix{margin-top:10px}
+body[data-panel-layout="simple"] .panel-page .vfo-summary-bar{display:none}
+@media(max-width:760px){body[data-panel-layout="simple"] .workspace{display:block;padding:16px 12px 100px}
+body[data-panel-layout="simple"] .panel-page{gap:14px}
+body[data-panel-layout="simple"] .panel-page>h2{font-size:21px}
+body[data-panel-layout="simple"] .panel-nav{position:fixed;inset:auto 0 0;z-index:1000;background:#101b2a;border-top:1px solid #2b3c50;padding:8px 4px calc(8px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(5,1fr);gap:2px}
+body[data-panel-layout="simple"] .panel-nav button{padding:8px 2px;text-align:center;font-size:12px;min-height:48px;border-radius:8px}
+body[data-panel-layout="simple"] .panel-nav [data-page=audio],body[data-panel-layout="simple"] .panel-nav [data-page=device]{display:none}
+body[data-panel-layout="simple"] .panel-more{display:block}
+body[data-panel-layout="simple"] .panel-nav.more-open [data-page=audio],body[data-panel-layout="simple"] .panel-nav.more-open [data-page=device]{display:block;background:#213247;grid-row:1;grid-column:span 2}
+body[data-panel-layout="simple"] .panel-nav.more-open .panel-more{grid-row:2;grid-column:5}
+body[data-panel-layout="simple"] .panel-page .card,body[data-panel-layout="simple"] .panel-page .lcd-cockpit,body[data-panel-layout="simple"] .panel-page .mode-stage,body[data-panel-layout="simple"] .panel-page .name-plate{padding:16px;border-radius:12px}
+body[data-panel-layout="simple"] .panel-page .row>input[type=text],body[data-panel-layout="simple"] .panel-page .row>input[type=password]{min-width:120px}
+body[data-panel-layout="simple"] .panel-page .vfo-digits{font-size:clamp(22px,6.4vw,32px)}
+body[data-panel-layout="simple"] .panel-page .np2p-ip{font-size:20px}
+body[data-panel-layout="simple"] .panel-page button,body[data-panel-layout="simple"] .panel-page select{min-height:44px}
+body[data-panel-layout="simple"] .panel-page .ptt-main-row{flex-wrap:wrap}
+body[data-panel-layout="simple"] .panel-page .ptt-main-row .tx{flex-basis:100%}
+body[data-panel-layout="simple"] .panel-page .eq-fader-bank{overflow-x:auto}
+body[data-panel-layout="simple"] .topbar{position:relative}
+body[data-panel-layout="simple"] .telemetry-strip{flex-wrap:wrap}
+body[data-panel-layout="simple"] .telemetry-strip #lanPill{display:none}
+}
+
+
+#panelLayoutToggle{min-width:150px;min-height:48px;padding:10px 18px;font-size:16px;font-weight:700;white-space:nowrap;background:#173344;color:#79e6ed;border:1px solid #377582;border-radius:10px;cursor:pointer}
+#panelLayoutToggle:focus-visible{outline:2px solid #79e6ed;outline-offset:3px}
+.panel-messages{max-width:1320px;margin:auto;padding:0 24px}
+.panel-messages .panel-draft{padding:12px;background:#40351b;border-radius:8px;color:#ffdc8a;margin:12px 0;font-size:14px}
+.panel-messages #panelNotice:empty{display:none}.panel-messages #panelNotice{color:var(--amber);padding:12px;border:1px solid var(--amber);border-radius:8px}
+body[data-panel-layout="detail"] .panel-nav{display:none}
+@media(max-width:760px){.telemetry-strip{flex-wrap:wrap;overflow:visible}#panelLayoutToggle{flex-basis:100%;width:100%;margin-bottom:4px}.panel-messages{padding:0 12px}}
 </style>
 </head>
-<body>
+<body data-panel-layout="simple">
 
 <!-- ==================== TOP COMMAND BAR ==================== -->
 <header class="topbar">
@@ -1451,6 +1517,7 @@ button.ok-btn {
       </div>
     </div>
     <div class="telemetry-strip">
+      <button type="button" id="panelLayoutToggle" aria-pressed="false">切换到详细版</button>
       <span class="pill" id="wifiPill">WiFi ...</span>
       <span class="pill" id="lanPill">LAN -</span>
       <span class="pill cyan" id="modePill">-</span>
@@ -1630,6 +1697,7 @@ button.ok-btn {
             <select id="brChan2"><option value="0">选择预设频道…</option></select>
           </div>
         </div>
+        <div id="rxGuard2" class="subcard"><div class="subcard-head">发射后接收抑制 · 固定时间</div><p data-rg-placeholder>正在读取设置…</p></div>
       </div>
 
       <!-- Contextual Mode Panel: Mode 1 (NET-P2P public STUN hole-punching) -->
@@ -1639,7 +1707,7 @@ button.ok-btn {
           <span id="npHubOffBadge" class="np2p-huboff" style="display:none">枢纽离线</span>
         </div>
         <div class="np2p-pub">
-          <span class="np2p-ip" id="npPub">0.0.0.0:0</span>
+          <span class="np2p-ip" id="npPub">等待公网地址探测</span>
           <span class="np2p-nat" id="npNat" style="flex:1;text-align:right">-</span>
         </div>
         <!-- 本机 IPv6：与上面 IPv4 同一个方框样式，可直接当对端地址用 -->
@@ -1660,17 +1728,23 @@ button.ok-btn {
           <label>对端列表</label>
         </div>
         <div id="npPeerList"></div>
+        <div id="npAccessBox" style="display:none;margin-top:8px">
+          <div id="npAccessHint" class="hint"></div>
+          <button type="button" id="npDeniedLoad">管理已拒绝设备</button>
+          <div id="npDeniedList"></div>
+        </div>
         <div class="row" style="margin:3px 0">
           <input type="text" id="npPeerName" maxlength="7" placeholder="名称" style="width:86px;flex:none">
           <input type="text" id="npPeerAddr" placeholder="公网 ip:port" style="flex:1">
           <button id="npPeerAdd" class="pri">添加对端</button>
         </div>
         <div class="row" style="margin:3px 0">
-          <label>hub 星型群聊</label>
-          <button id="npHubT" class="pri" style="flex:none">开启 hub</button>
+          <label>群聊枢纽</label>
+          <button id="npHubT" class="pri" style="flex:none">作为群聊枢纽</button>
           <span id="npState1" style="flex:1;font-family:var(--mono);font-size:11px;color:var(--fg-2)">-</span>
         </div>
         <div style="font-family:var(--mono);font-size:11px;color:var(--amber);margin:-2px 0 2px" id="npDiag1">-</div>
+        <div class="hint" style="margin:4px 0 8px;color:var(--fg-2);line-height:1.6">一组只开启一台枢纽，其他成员关闭此开关并连接枢纽，房间号与密钥须一致。开关只控制转发，不会自动添加对端；转发成员的地址不会作为直连地址显示。</div>
         <div class="subcard">
           <div class="subcard-head">
             <span>⇄ 模拟电台 ⇔ 公网直连双向桥接</span>
@@ -1681,6 +1755,7 @@ button.ok-btn {
             <select id="brChan1"><option value="0">选择预设频道…</option></select>
           </div>
         </div>
+        <div id="rxGuard1" class="subcard"><div class="subcard-head">发射后接收抑制 · 固定时间</div><p data-rg-placeholder>正在读取设置…</p></div>
       </div>
     </div>
 
@@ -1755,6 +1830,14 @@ button.ok-btn {
         <span class="val">MHz</span>
       </div>
 
+      <div class="step-strip fine">
+        <button type="button" data-fstep="-0.005">-5k</button>
+        <button type="button" data-fstep="-0.0025">-2.5k</button>
+        <button type="button" data-fstep="-0.001">-1k</button>
+        <button type="button" data-fstep="0.005">+5k</button>
+        <button type="button" data-fstep="0.0025">+2.5k</button>
+        <button type="button" data-fstep="0.001">+1k</button>
+      </div>
       <div class="step-strip">
         <button type="button" data-fstep="-0.025">-25k</button>
         <button type="button" data-fstep="-0.0125">-12.5k</button>
@@ -1762,6 +1845,7 @@ button.ok-btn {
         <button type="button" data-fstep="0.0125">+12.5k</button>
         <button type="button" data-fstep="0.025">+25k</button>
       </div>
+      <div id="rfStepHint" style="font-size:11px;color:var(--dim);line-height:1.6;margin-bottom:10px"></div>
 
       <div class="row" style="margin-bottom:12px">
         <button id="fset" class="pri" style="flex:1;padding:8px 12px">立即下发收发频率至电台模块</button>
@@ -1834,6 +1918,7 @@ button.ok-btn {
           <option value="I">反相 I</option>
         </select>
       </div>
+      <p id="toneApplyState" role="status" style="font-size:12px;color:var(--dim)"></p>
     </div>
 
     <!-- Column 2: Audio DSP Gain Matrix & Roger Beep Studio -->
@@ -2092,6 +2177,7 @@ button.ok-btn {
 </div>
 
 <script src="/app-control.js"></script>
+<script src="/rx-guard.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
@@ -2153,11 +2239,27 @@ $('logClr').onclick = () => { $('log').innerHTML = ''; };
 const PANEL_READ_PATHS = new Set(['/api/status', '/api/radio', '/api/live',
   '/api/ctcss', '/api/dcs', '/api/channels']);
 const PANEL_TABLE_PATHS = new Set(['/api/ctcss', '/api/dcs', '/api/channels']);
-async function panelReadJson(path) {
+const panelReadPending = new Map(), panelReadWaiters = [];
+let panelReadActive = 0;
+async function panelReadSlot() {
+  if (panelReadActive < 2) { panelReadActive++; return; }
+  await new Promise(resolve => panelReadWaiters.push(resolve));
+}
+function panelReadRelease() {
+  const next = panelReadWaiters.shift();
+  if (next) next(); else panelReadActive--;
+}
+function panelReadJson(path) {
+  if (panelReadPending.has(path)) return panelReadPending.get(path);
+  const pending = panelReadJsonImpl(path).finally(() => panelReadPending.delete(path));
+  panelReadPending.set(path, pending); return pending;
+}
+async function panelReadJsonImpl(path) {
   if (!PANEL_READ_PATHS.has(path)) throw new Error('不是面板只读接口');
   const table = PANEL_TABLE_PATHS.has(path), attempts = table ? 3 : 1;
   let error;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    await panelReadSlot();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
     try {
@@ -2167,12 +2269,48 @@ async function panelReadJson(path) {
       if (table && !Array.isArray(data)) throw new Error('列表格式错误');
       return data;
     } catch (e) { error = e; }
-    finally { clearTimeout(timer); }
+    finally { clearTimeout(timer); panelReadRelease(); }
     if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
   }
   throw new Error(path + ': ' + ((error && error.message) || error));
 }
 let panelRefreshBusy = false, panelOnline = false;
+let panelMeterBusy = false, panelLastSeen = 0, panelStatusAt = 0, panelRadioAt = 0;
+const panelStartedAt = Date.now();
+const panelReadState = document.createElement('span');
+panelReadState.style.cssText='font-size:12px;color:var(--amber);max-width:100%;white-space:normal';
+panelReadState.id = 'panelReadState'; panelReadState.setAttribute('role', 'status');
+$('wifiPill').after(panelReadState);
+function panelSeen() {
+  panelLastSeen = Date.now();
+  if (!panelOnline) { panelOnline = true; log('黑猫控制面板已连接', 'good'); loadPanelLists(); }
+}
+function panelReadProblem(message, renderError = false) {
+  const offline = !renderError && Date.now() - (panelLastSeen || panelStartedAt) >= 10000;
+  panelReadState.textContent = message + (panelStatusAt ? ' · 上次状态 ' + Math.floor((Date.now()-panelStatusAt)/1000) + ' 秒前' : '');
+  if (offline) {
+    panelOnline = false;
+    $('wifiPill').textContent = '面板连接断开'; $('wifiPill').className = 'pill down';
+    $('hbDot').style.background = 'var(--rose)'; $('hbDot').title = '控制面板离线';
+  }
+}
+const diagButton = document.createElement('button'); diagButton.textContent = '导出连接与通联诊断';
+$('logClr').after(diagButton);
+diagButton.onclick = async () => {
+  diagButton.disabled = true;
+  try {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5000);
+    let data;
+    try { const r = await fetch('/api/diagnostics', {cache:'no-store', signal:controller.signal});
+      if (!r.ok) throw Error('HTTP ' + r.status); data = await r.json(); }
+    finally { clearTimeout(timer); }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)], {type:'application/json'}));
+    const link = document.createElement('a'); link.href=url; link.download='heimao-diagnostics.json'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) { log('诊断导出失败：' + e.message, 'err'); }
+  finally { diagButton.disabled = false; }
+};
+
 
 /*
  * Factory reset: two-step confirm (no window.confirm -- it is clumsy on a
@@ -2863,7 +3001,8 @@ function sdrPttUp(notify = true) {
         if (ws) { try { ws.close(); } catch (e) {} }
         sdrHttpStart();
       }
-      await sdrHttpPtt(false, tx, sid); return true;
+      if (!await sdrHttpPtt(false, tx, sid)) throw new Error('手台端未确认松开 PTT');
+      return true;
     }).catch(e => { log('松开 PTT 请求失败: ' + e, 'err'); return false; });
     sdrRxClear();
   }
@@ -3057,16 +3196,33 @@ for (let i = 0; i < 4; i++) {
   });
 }
 
+const panelDirty = new Map();
+function panelEditing(el) { return document.activeElement === el || panelDirty.has(el.id); }
+const panelFields={freq_pair:['ftx','frx'],np2p_stun:['npStun'],ix_room:['ixRoom1'],ix_broker:['ixBroker2'],ix_auth:['ixUser2','ixPass2']};
+document.addEventListener('input',e=>{if(['ftx','frx','npStun','ixRoom1','ixBroker2','ixUser2','ixPass2'].includes(e.target.id)){panelDirty.set(e.target.id,e.target.value);e.target.setAttribute('aria-description','未保存');}});
+
+let channelCommandPending = false;
 async function cmd(k, v) {
+  if (/^(freq_|ctcss_|bw$|sq$|vol$|power$|bridge_chan$|radio_band$|rf_)/.test(k)) panelRadioAt = 0;
+  const submitted=(panelFields[k]||[]).map(id=>[id,$(id).value]);
+  const channelChange = k === 'bridge_chan' || k === 'ix_mode' || k === 'ix_room';
+  if (channelChange && channelCommandPending) { log('正在切换，请等待结果', 'err'); return {ok:false}; }
+  if (channelChange) { channelCommandPending = true; }
+  const controller = channelChange ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 12000) : null;
   try {
-    const r = await fetch('/api/set?k=' + encodeURIComponent(k) + '&v=' + encodeURIComponent(v));
+    const r = await fetch('/api/set?k=' + encodeURIComponent(k) + '&v=' + encodeURIComponent(v),
+      controller ? {signal:controller.signal} : undefined);
     const j = await r.json();
+    if(j.ok)for(const [id,value] of submitted){if($(id).value===value){panelDirty.delete(id);$(id).removeAttribute('aria-description');}}
     log(k + ' = ' + v + (j.ok ? '  [OK]' : '  [失败: ' + (j.err || '未知') + ']'), j.ok ? 'good' : 'err');
-    last = '';
-    setTimeout(refresh, 60);
+    if (!channelChange) { last = ''; setTimeout(refresh, 60); }
     return j;
   } catch (e) {
-    log(k + ' 请求异常: ' + e, 'err');
+    log(e.name === 'AbortError' ? '切换请求超时，请刷新确认手台实际状态后重试' : k + ' 请求异常: ' + e, 'err');
+  } finally {
+    if (controller) { clearTimeout(timeout); }
+    if (channelChange) { channelCommandPending = false; last = ''; setTimeout(refresh, 60); }
   }
 }
 
@@ -3107,6 +3263,8 @@ async function credSet() {
       if (!j.ok) { log('密码保存失败: ' + (j.err || '未知'), 'err'); return; }
       $('ixPass2').value = '';
     }
+    if($('ixUser2').value.trim()===u)panelDirty.delete('ixUser2');
+    if($('ixPass2').value==='')panelDirty.delete('ixPass2');
     log('EMQX 凭据已保存（' + (u ? '用户 ' + u : '匿名连接') + '）', 'good');
     last = '';
     setTimeout(refresh, 60);
@@ -3177,17 +3335,25 @@ $('mToggleMob').onclick = () => {
 $('pwrT').onclick = () => cmd('power', (window._st && window._st.freq && window._st.freq.power) ? 0 : 1);
 $('bw').onchange = () => cmd('bw', $('bw').value);
 
+function radioGridHz() {
+  return window._radio && window._radio.freq_grid_hz === 500 ? 500 : 12500;
+}
+
+function radioDisplayFrequency(value) {
+  return Number(value).toFixed(4);
+}
+
 function radioFrequency(text) {
   const r = window._radio;
   if (!r || !r.min || !/^\d+(?:\.\d*)?$/.test(String(text).trim())) return null;
   const v = Number(text);
   return Number.isFinite(v) && v >= r.min && v <= r.max &&
-    Math.abs(v * 80 - Math.round(v * 80)) < 0.0000001 ? v : null;
+    Math.abs(v * 1000000 / radioGridHz() - Math.round(v * 1000000 / radioGridHz())) < 0.000001 ? v : null;
 }
 
 function radioFrequencyError() {
   const r = window._radio;
-  log(r && r.min ? ('收发频率须在 ' + r.min + '–' + r.max + ' MHz 内，步进 12.5 kHz') :
+  log(r && r.min ? ('收发频率须在 ' + r.min + '–' + r.max + ' MHz 内，设置分辨率 ' + radioGridHz() / 1000 + ' kHz') :
     '请先确认实际安装的模块频段', 'err');
 }
 
@@ -3209,6 +3375,13 @@ function renderRadio(r) {
   const old = window._radio;
   window._radio = r;
   const selected = !!r.min;
+  const grid = radioGridHz();
+  $('rfStepHint').textContent = grid === 500 ?
+    '1 / 2.5 / 5 kHz 按钮同时调整收发频率。实际载频以综测为准。' :
+    '当前固件支持 12.5 kHz 步进；升级手台固件后可用小步进。';
+  document.querySelectorAll('[data-fstep]').forEach(b => {
+    b.disabled = !selected || Math.abs(Number(b.dataset.fstep) * 1000000 / grid - Math.round(Number(b.dataset.fstep) * 1000000 / grid)) > 0.000001;
+  });
   $('rfVfoBand').textContent = selected ? r.band + ' ' + r.min + '–' + r.max + ' MHz · TRANSCEIVER VFO' : '模块频段待确认';
   $('rfRange').textContent = selected ? r.min + '–' + r.max + ' MHz' : '模块频段待确认';
   $('rfModeCode').textContent = 'MODE 00 · ' + (selected ? r.band : 'RF');
@@ -3228,6 +3401,7 @@ function renderRadio(r) {
     const el = $(id);
     el.min = selected ? r.min : '';
     el.max = selected ? r.max : '';
+    el.step = String(grid / 1000000);
     el.placeholder = selected ? r.min + '–' + r.max + ' MHz' : '先确认模块频段';
     if ((!old || old.band !== r.band) && !r.compatible) el.value = '';
   }
@@ -3253,9 +3427,9 @@ document.querySelectorAll('[data-fstep]').forEach(b => {
     const nrx = radioFrequency((rx + step).toFixed(4));
     if (ntx === null || nrx === null) { radioFrequencyError(); return; }
     touchInput();
-    $('ftx').value = ntx.toFixed(4);
-    $('frx').value = nrx.toFixed(4);
-    cmd('freq_pair', ntx.toFixed(4) + ',' + nrx.toFixed(4));
+    $('ftx').value = radioDisplayFrequency(ntx);
+    $('frx').value = radioDisplayFrequency(nrx);
+    cmd('freq_pair', radioDisplayFrequency(ntx) + ',' + radioDisplayFrequency(nrx));
   };
 });
 
@@ -3315,7 +3489,7 @@ function showSub() {
  * used to send 0000, which the board stored as off and the next status poll
  * pushed back into the type select ("it jumps back").  Choose a real tone first
  * and ignore status-driven type changes until the write has been acknowledged. */
-let subPendingUntil = 0;
+let subPendingUntil = 0, subWrites = 0;
 function firstToneOf(sel) {
   for (const opt of sel.options) {
     if (opt.value && opt.value !== '0000') return opt.value;
@@ -3328,12 +3502,12 @@ function toneToSendTx() {
   if (t === 'off') return '0000';
   if (t === 'ctcss') {
     const v = $('atx').value;
-    if (!v || v === '0000') { $('atx').value = firstToneOf($('atx')) || '0001'; }
+    if (!v || v === '0000') { const first = firstToneOf($('atx')); if (!first) throw Error('模拟亚音列表尚未就绪，请稍后再试'); $('atx').value = first; }
     return $('atx').value;
   }
   if (t === 'dcs') {
     const v = $('dtx').value;
-    if (!v) { $('dtx').value = firstToneOf($('dtx')) || '023'; }
+    if (!v) { const first = firstToneOf($('dtx')); if (!first) throw Error('数字亚音列表尚未就绪，请稍后再试'); $('dtx').value = first; }
     return $('dtx').value + $('dtxp').value;
   }
   return null;
@@ -3344,29 +3518,54 @@ function toneToSendRx() {
   if (t === 'off') return '0000';
   if (t === 'ctcss') {
     const v = $('arx').value;
-    if (!v || v === '0000') { $('arx').value = firstToneOf($('arx')) || '0001'; }
+    if (!v || v === '0000') { const first = firstToneOf($('arx')); if (!first) throw Error('模拟亚音列表尚未就绪，请稍后再试'); $('arx').value = first; }
     return $('arx').value;
   }
   if (t === 'dcs') {
     const v = $('drx').value;
-    if (!v) { $('drx').value = firstToneOf($('drx')) || '023'; }
+    if (!v) { const first = firstToneOf($('drx')); if (!first) throw Error('数字亚音列表尚未就绪，请稍后再试'); $('drx').value = first; }
     return $('drx').value + $('drxp').value;
   }
   return null;
 }
 
-function pushTx() {
-  const value = toneToSendTx();
+function toneFeedback(direction, message, bad = false) {
+  const node = $('toneApplyState'); if (!node) return;
+  const state = toneFeedback.state || (toneFeedback.state = {});
+  state[direction] = {message, bad};
+  node.textContent = Object.entries(state).map(([key,item]) => (key==='tx'?'发射':'接收')+'亚音：'+item.message).join('；');
+  node.style.color = Object.values(state).some(item=>item.bad) ? 'var(--rose)' : 'var(--dim)';
+}
+async function pushTx() {
+  let value;
+  try { value = toneToSendTx(); }
+  catch (e) { toneFeedback('tx', '未应用 · '+e.message, true); return {ok:false,err:e.message}; }
   if (value === null) return;
-  subPendingUntil = Date.now() + 1500;
-  return cmd('ctcss_tx', value);
+  subWrites++; subPendingUntil = Infinity; toneFeedback('tx', '正在应用…');
+  try {
+    const result = await cmd('ctcss_tx', value);
+    const state = result && result.rf_config;
+    const confirmed = result && result.ok && (!state || (state.ready && state.revision===state.applied_revision));
+    toneFeedback('tx', confirmed ? (state ? '手台已确认并保存' : '设置请求已接受') :
+      '未确认 · '+(result && result.err || '请查看手台当前状态'), !confirmed);
+    return result;
+  } finally { if (--subWrites === 0) { subPendingUntil = 0; last = ''; setTimeout(refresh, 0); } }
 }
 
-function pushRx() {
-  const value = toneToSendRx();
+async function pushRx() {
+  let value;
+  try { value = toneToSendRx(); }
+  catch (e) { toneFeedback('rx', '未应用 · '+e.message, true); return {ok:false,err:e.message}; }
   if (value === null) return;
-  subPendingUntil = Date.now() + 1500;
-  return cmd('ctcss_rx', value);
+  subWrites++; subPendingUntil = Infinity; toneFeedback('rx', '正在应用…');
+  try {
+    const result = await cmd('ctcss_rx', value);
+    const state = result && result.rf_config;
+    const confirmed = result && result.ok && (!state || (state.ready && state.revision===state.applied_revision));
+    toneFeedback('rx', confirmed ? (state ? '手台已确认并保存' : '设置请求已接受') :
+      '未确认 · '+(result && result.err || '请查看手台当前状态'), !confirmed);
+    return result;
+  } finally { if (--subWrites === 0) { subPendingUntil = 0; last = ''; setTimeout(refresh, 0); } }
 }
 
 $('ttx').onchange = () => { showSub(); pushTx(); };
@@ -3383,22 +3582,51 @@ function renderBridgeChans(a) {
   const h = '<option value="0">选择预设频道…</option>' +
     a.map(c => '<option value="' + (c.i + 1) + '"' + (c.compatible ? '' : ' disabled') + '>#' + (c.i + 1) + ' ' + escHtml(c.name) +
       ' · ' + escHtml(c.band) + (c.compatible ? '' : ' 不适用') +
-      ' · RX ' + Number(c.rx).toFixed(4) + ' / TX ' + Number(c.tx).toFixed(4) + '</option>').join('');
+      ' · RX ' + radioDisplayFrequency(c.rx) + ' / TX ' + radioDisplayFrequency(c.tx) + '</option>').join('');
   if ($('brChan1')) $('brChan1').innerHTML = h;
   if ($('brChan2')) $('brChan2').innerHTML = h;
   if (window._st) syncBridge(window._st);
 }
 
+const rxGuardViews = [];
+let rxGuardLoading = false, rxGuardAttempts = 0, rxGuardNext = 0;
+function ensureRxGuardViews() {
+  if (rxGuardViews.length) return;
+  if (window.ORLRxGuard) {
+    [1,2].forEach(mode => rxGuardViews.push(window.ORLRxGuard.mount($('rxGuard'+mode), mode, cmd)));
+    if (window._st) rxGuardViews.forEach(view => view.sync(window._st));
+    return;
+  }
+  [1,2].forEach(mode => { const hint=$('rxGuard'+mode).querySelector('[data-rg-placeholder]');
+    if (hint) hint.textContent='设置组件加载失败，正在等待恢复'; });
+  if (rxGuardLoading || rxGuardAttempts >= 3 || Date.now() < rxGuardNext) return;
+  rxGuardLoading=true; rxGuardAttempts++;
+  const script=document.createElement('script');script.src='/rx-guard.js';
+  let done=false;
+  const finish=() => { if(done)return;done=true;clearTimeout(timer);rxGuardLoading=false;
+    rxGuardNext=Date.now()+[1000,3000,10000][rxGuardAttempts-1];script.remove();
+    if(window.ORLRxGuard)ensureRxGuardViews();
+    else if(rxGuardAttempts>=3)[1,2].forEach(mode=>{const hint=$('rxGuard'+mode).querySelector('[data-rg-placeholder]');
+      if(hint){hint.textContent='设置组件暂不可用；点击这里重试';hint.tabIndex=0;
+        hint.onclick=()=>{rxGuardAttempts=0;rxGuardNext=0;ensureRxGuardViews();};
+        hint.onkeydown=e=>{if(e.key==='Enter')hint.click();};}});
+  };
+  const timer=setTimeout(finish,5000);script.onload=finish;script.onerror=finish;document.head.append(script);
+}
+ensureRxGuardViews();
 function syncBridge(st) {
+  ensureRxGuardViews();
+  rxGuardViews.forEach(view => view.sync(st));
   const b = (st && st.bridge) || { en: 0, chan: 0, active: 0, keyed: 0, chan_name: '' };
   for (const p of ['1', '2']) {
     const t = $('brT' + p), c = $('brChan' + p), s = $('brS' + p);
     if (!t || !c || !s) continue;
     t.textContent = b.en ? '停用桥接' : '启用桥接';
     t.className = b.en ? 'ok-btn' : 'pri';
-    if (document.activeElement !== c && String(c.value) !== String(b.chan)) {
+    if (!channelCommandPending && String(c.value) !== String(b.chan)) {
       c.value = String(b.chan);
     }
+    c.disabled = t.disabled = channelCommandPending;
     let txt = '已关闭';
     let col = 'var(--dim)';
     if (b.en) {
@@ -3409,8 +3637,12 @@ function syncBridge(st) {
         if (b.keyed) {
           txt = '发射中：网络语音 → 电台 TX';
           col = 'var(--rose)';
+        } else if (st.rx_guard && st.rx_guard.blocked && st.intercom.mode === Number(p)) {
+          txt = '接收保护中 · 剩余约 ' + (st.rx_guard.remaining_ms / 1000).toFixed(3) + ' 秒';
+          col = 'var(--amber)';
         } else {
-          txt = '双向转发中：' + (b.chan_name ? ('#' + b.chan + ' ' + b.chan_name) : ('频道 #' + b.chan));
+          const f = st.freq || {};
+          txt = '双向转发中 · RX ' + radioDisplayFrequency(f.rx) + ' / TX ' + radioDisplayFrequency(f.tx) + ' MHz';
           col = 'var(--emerald)';
         }
       } else {
@@ -3433,7 +3665,9 @@ $('npPeerAdd').onclick = () => {
   const name = $('npPeerName').value.trim();
   const addr = $('npPeerAddr').value.trim();
   if (!name || !addr) { log('请填写对端名称与 ip:port', 'err'); return; }
-  cmd('np2p_peer_add', name + ',' + addr);
+  const policy = window._st && window._st.np2p && window._st.np2p.access_version >= 1;
+  if (policy && !confirm('添加此对端？如果此地址曾被拒绝，将解除对应拒绝并恢复连接。')) return;
+  cmd(policy ? 'np2p_peer_restore' : 'np2p_peer_add', name + ',' + addr);
 };
 $('npHubT').onclick = () => {
   const hub = !!(window._st && window._st.np2p && window._st.np2p.hub);
@@ -3441,13 +3675,53 @@ $('npHubT').onclick = () => {
 };
 $('npStunSet').onclick = () => cmd('np2p_stun', $('npStun').value.trim());
 
+async function loadNpDenied() {
+  const list = $('npDeniedList');
+  try {
+    const r = await fetch('/api/np2p/denied', {cache:'no-store'});
+    if (!r.ok) throw new Error('读取失败');
+    const data = await r.json();
+    if (!data.ready || !Array.isArray(data.entries) || data.entries.length !== data.count) throw new Error('拒绝记录不可用，请重试');
+    list.replaceChildren();
+    const note = document.createElement('div');
+    note.textContent = '已拒绝 ' + data.count + '/' + data.limit + '；解除后，对方可再次主动连接。';
+    list.append(note);
+    data.entries.forEach(p => {
+      const row = document.createElement('div'); row.className = 'np2p-peerrow';
+      const text = document.createElement('span');
+      const addr = p.ip ? (p.ip.includes(':') ? '[' + p.ip + ']' : p.ip) + ':' + p.port : '经枢纽发现';
+      text.textContent = p.name + ' · ' + addr + ' · ' + (p.identity ? '按设备身份拒绝' : '仅按完整地址拒绝，地址变化后需重新识别');
+      const button = document.createElement('button'); button.textContent = '解除拒绝';
+      button.onclick = async () => {
+        if (!confirm('允许「' + p.name + '」重新连接？')) return;
+        button.disabled = true;
+        const result = await cmd('np2p_unblock', p.id);
+        if (result && result.ok) await loadNpDenied(); else button.disabled = false;
+      };
+      row.append(text, button); list.append(row);
+    });
+  } catch (e) { list.textContent = '读取拒绝列表失败：' + e.message; }
+}
+$('npDeniedLoad').onclick = loadNpDenied;
 function renderNp2p(s) {
   const np = s.np2p;
-  if (!np) return;
+  $('npAccessBox').style.display = np && np.access_version >= 1 ? '' : 'none';
+  if (np && np.access_version >= 1) {
+    $('npAccessHint').textContent = np.access_ready === false ? '拒绝记录读取异常，已停止接受连接，请检查或重启后重试。' :
+      '删除后持续拒绝，断电保留；已拒绝 ' + np.denied_count + '/' + np.denied_limit + '。只有本机主动解除才能恢复。';
+  }
+  if (!np) {
+    $('npPub').textContent = '公网直连状态暂不可用';
+    $('npPeerList').textContent = '本轮未取得对端列表，请刷新重试';
+    $('npState1').textContent = '等待手台状态';
+    return;
+  }
   /* "222.182.14.49:7959" as ONE text node: no line break on copy, and it
    * selects like normal text.  Only rewrite when the value really changed,
    * otherwise the once-per-second refresh wipes the user's selection. */
-  const pubTxt = (np.pub || '0.0.0.0') + ':' + (np.port || 0);
+  const ready = np.pub && np.pub !== '0.0.0.0' && Number(np.port) > 0;
+  const pubTxt = ready ? np.pub + ':' + np.port
+    : (s.wifi && s.wifi.connected ? '尚未取得公网 IPv4' : '网络未连接');
   if ($('npPub').textContent !== pubTxt) {
     $('npPub').textContent = pubTxt;
   }
@@ -3467,6 +3741,7 @@ function renderNp2p(s) {
   if (np.nat === 'port-preserving') { natTxt = '端口保持 NAT'; natCls = 'np2p-nat'; }
   else if (np.nat === 'not-port-preserving') { natTxt = '非端口保持 NAT'; natCls = 'np2p-nat warn'; }
   const age = np.stun_age_s;
+  if (!ready) { natTxt += ' · 可重新探测；已有直连或 IPv6 仍可使用'; }
   if (age >= 0 && age > 30) { natTxt += ' · 地址可能过期(' + age + 's)'; natCls = 'np2p-nat bad'; }
   else if (age >= 0) { natTxt += ' · 刷新 ' + age + 's 前'; }
   const eNat = $('npNat');
@@ -3480,15 +3755,19 @@ function renderNp2p(s) {
    * longer needs to hint at expiry; the audio age is shown next to it. */
   const stMap = { linked: '已连通', knocking: '敲击中', expired: '已过期' };
   const rows = (np.peers || []).map((p, i) => {
-    const st = stMap[p.state] || p.state;
+    const indirect = p.route === 'hub';
+    const st = indirect ? (p.state === 'linked' ? '最近收到语音' : '等待新语音') : (stMap[p.state] || p.state);
+    const address = indirect ? '经 ' + (p.via || '枢纽') + ' 转发 · 无直连地址'
+      : (!p.ip || p.ip === '0.0.0.0' || p.ip === '::' || !p.port ? '等待握手取得地址'
+      : (String(p.ip).includes(':') ? '[' + p.ip + ']' : p.ip) + ':' + p.port);
     const stCls = p.state === 'linked' ? 'linked' : (p.state === 'knocking' ? 'knocking' : '');
     return '<div class="np2p-peerrow">' +
-      '<span class="np-name">' + escHtml(p.name || ('#' + i)) + '</span>' +
-      '<span class="np-addr">' + escHtml(p.ip) + ':' + p.port + '</span>' +
+      '<span class="np-name">' + escHtml(p.name || ('#' + i)) + (p.hub ? ' · 枢纽' : '') + '</span>' +
+      '<span class="np-addr">' + escHtml(address) + '</span>' +
       '<span class="np-st ' + stCls + '">' + st + '</span>' +
       '<span class="np-meta">rtt ' + (p.rtt_ms >= 0 ? p.rtt_ms + 'ms' : '-') +
         ' · rx ' + p.rx + ' / tx ' + p.tx + ' / 丢 ' + p.drop + '</span>' +
-      '<button type="button" class="pri" data-np-knock="' + i + '" style="padding:2px 8px;font-size:11px">重敲</button>' +
+      (indirect ? '' : '<button type="button" class="pri" data-np-knock="' + i + '" style="padding:2px 8px;font-size:11px">重连</button>') +
       '<button type="button" data-np-del="' + i + '" style="padding:2px 8px;font-size:11px">删除</button>' +
       '</div>';
   });
@@ -3505,24 +3784,35 @@ function renderNp2p(s) {
       const kb = e.target.closest('[data-np-knock]');
       const db = e.target.closest('[data-np-del]');
       if (kb) cmd('np2p_knock', kb.dataset.npKnock);
-      else if (db) cmd('np2p_peer_del', db.dataset.npDel);
+      else if (db) {
+        const persistent = window._st && window._st.np2p && window._st.np2p.access_version >= 1;
+        if (confirm(persistent ? '删除并持续拒绝此对端？断电后仍有效，只有本机解除才能恢复。' : '删除此对端？')) {
+          cmd('np2p_peer_del', db.dataset.npDel).then(j => { if (j && j.ok && persistent) loadNpDenied(); });
+        }
+      }
     });
   }
   const hub = np.hub;
   const ht = $('npHubT');
-  ht.textContent = hub ? '关闭 hub' : '开启 hub';
+  ht.textContent = hub ? '停止作为枢纽' : '作为群聊枢纽';
   ht.className = hub ? 'ok-btn' : 'pri';
   const npSm = { linked: '已连通', knocking: '敲击中', expired: '地址过期', empty: '-' };
-  const linked = (np.peers || []).filter(p => p.state === 'linked').length;
-  $('npState1').textContent = 'hub ' + (hub ? '开' : '关') +
-    ' · 连通 ' + linked + '/' + (np.peers || []).length +
+  const directPeers = (np.peers || []).filter(p => p.route !== 'hub');
+  const linked = directPeers.filter(p => p.state === 'linked').length;
+  const indirectCount = (np.peers || []).length - directPeers.length;
+  const stored = np.peer_count === undefined ? (np.peers || []).length : np.peer_count;
+  const capacity = np.peer_limit || 4;
+  const role = hub ? '本机是群聊枢纽' : np.hub_role === 'member' ? '本机连接群聊枢纽' : '点对点直连';
+  $('npState1').textContent = role +
+    ' · 直连 ' + linked + '/' + directPeers.length + ' · 转发成员 ' + indirectCount + ' · 名额 ' + stored + '/' + capacity +
     ' · RTT ' + (np.rtt_ms >= 0 ? np.rtt_ms + 'ms' : '-') +
     ' · STUN ' + escHtml(np.stun || '(内置列表)') + (np.stun ? '' : '');
-  $('npDiag1').textContent = s.intercom && s.intercom.diag
+  $('npDiag1').textContent = np.hub_conflict ? '检测到其他枢纽，请只保留一台；枢纽之间不继续转发语音。' : s.intercom && s.intercom.diag
     ? ('诊断: ' + s.intercom.diag)
-    : (linked === 0 && (np.peers || []).length > 0 ? '敲击中' : '状态正常');
-  if (document.activeElement !== $('npStun')) $('npStun').value = np.stun || '';
-  if (document.activeElement !== $('ixRoom1')) $('ixRoom1').value = s.intercom.room;
+    : ((np.peers || []).length < stored ? '对端列表未完整返回，请刷新' :
+       (linked === 0 && (np.peers || []).length > 0 ? '敲击中' : '状态正常'));
+  if (!panelEditing($('npStun'))) $('npStun').value = np.stun || '';
+  if (!panelEditing($('ixRoom1'))) $('ixRoom1').value = s.intercom.room;
 }
 
 const CH_MAX = 99;
@@ -3543,8 +3833,8 @@ async function loadChannels() {
  * search box must not hit the radio. */
 function renderChannels() {
   const q = (($('chSearch') && $('chSearch').value) || '').trim().toLowerCase();
-  const fx = c => Number(c.rx).toFixed(4);
-  const ft = c => Number(c.tx).toFixed(4);
+  const fx = c => radioDisplayFrequency(c.rx);
+  const ft = c => radioDisplayFrequency(c.tx);
   const a = !q ? _chAll : _chAll.filter(function(c) {
     return (c.name || '').toLowerCase().indexOf(q) >= 0 ||
            fx(c).indexOf(q) >= 0 || ft(c).indexOf(q) >= 0;
@@ -3641,7 +3931,7 @@ $('chList').onclick = async (ev) => {
 $('fset').onclick = () => {
   const a = radioFrequency($('ftx').value), b = radioFrequency($('frx').value);
   if (a === null || b === null) { radioFrequencyError(); return; }
-  cmd('freq_pair', a.toFixed(4) + ',' + b.toFixed(4));
+  cmd('freq_pair', radioDisplayFrequency(a) + ',' + radioDisplayFrequency(b));
 };
 $('fSync').onclick = () => {
   if ($('ftx').value) {
@@ -3737,8 +4027,11 @@ function pttText(s, isTx) {
 }
 
 async function refreshMeter() {
+  if (panelMeterBusy) return; panelMeterBusy = true;
   try {
     const s = await panelReadJson('/api/live');
+    if (!s || typeof s.ptt !== 'string') throw Error('实时状态格式错误');
+    panelSeen();
     const isTx = s.ptt !== 'IDLE';
 
     $('hbDot').style.background = isTx ? 'var(--rose)' : 'var(--emerald)';
@@ -3799,25 +4092,38 @@ async function refreshMeter() {
         : '';
     });
   } catch (e) {
-    /* the 3 s refresh owns the "disconnected" indication */
-  }
+    panelReadProblem('实时状态更新延迟');
+  } finally { panelMeterBusy = false; }
 }
 
 async function refresh() {
   if (panelRefreshBusy) return false;
   panelRefreshBusy = true;
+  let readSucceeded = false;
   try {
-    const [s, radio] = await Promise.all(['/api/status', '/api/radio'].map(panelReadJson));
+    const s = await panelReadJson('/api/status');
+    if (!s || typeof s.ptt !== 'string' || !s.wifi || !s.intercom) throw Error('手台状态格式错误');
+    if (window.ORLControl && ORLControl.device && s.device_id && ORLControl.device !== s.device_id) throw Error('设备身份变化，请重新打开面板');
+    readSucceeded = true; panelSeen(); panelStatusAt = Date.now();
+    panelReadState.textContent = '';
+    let radio = window._radio;
+    if (window._st?.rf_config?.ready !== s.rf_config?.ready) panelRadioAt = 0;
+    if (!radio || Date.now() - panelRadioAt >= 30000) {
+      try { const candidate = await panelReadJson('/api/radio');
+        if (!candidate || typeof candidate.compatible !== 'boolean' || typeof candidate.ready !== 'boolean') throw Error('射频信息格式错误');
+        radio = candidate; panelRadioAt = Date.now(); }
+      catch (e) { panelReadState.textContent = '射频信息暂不可读，保留上次结果';
+        if (!radio) radio={band:'UNSET',model:'读取中',compatible:false,ready:false,min:0,max:0,reason:'等待射频信息'}; }
+    }
+    if (s.rf_config && !s.rf_config.ready) {
+      radio = {...radio, ready:false, reason:'射频配置未确认，请检查应用结果'};
+      panelReadState.textContent = '射频配置未确认 · 请检查设置结果';
+    }
     const bandChanged = window._radio && window._radio.band !== radio.band;
     renderRadio(radio);
     if (bandChanged) { loadChannels(); loadBridgeChans(); }
     window._st = s;
     if (window.HMDeviceName) window.HMDeviceName.accept(s);
-    if (!panelOnline) {
-      panelOnline = true;
-      log('黑猫控制面板已连接', 'good');
-      loadPanelLists();
-    }
     if (s.audio_rate) SDR.wire = s.audio_rate;
 
     const isTx = s.ptt !== 'IDLE';
@@ -3850,14 +4156,14 @@ async function refresh() {
     const sub = v => v === '0000' ? '关' : v;
     const subtx = sub(s.freq.ctcss_tx), subrx = sub(s.freq.ctcss_rx);
 
-    $('vfoRxBig').textContent = radio.compatible ? s.freq.rx.toFixed(4) : '—';
-    $('vfoTxBig').textContent = radio.compatible ? s.freq.tx.toFixed(4) : '—';
+    $('vfoRxBig').textContent = radio.compatible ? radioDisplayFrequency(s.freq.rx) : '—';
+    $('vfoTxBig').textContent = radio.compatible ? radioDisplayFrequency(s.freq.tx) : '—';
     $('vfoRxTone').textContent = 'RX 亚音: ' + subrx;
     $('vfoTxTone').textContent = 'TX 亚音: ' + subtx;
     $('vfoRxCell').className = 'vfo-cell' + (s.mod_sq && !isTx ? ' active-rx' : '');
     $('vfoTxCell').className = 'vfo-cell' + (isTx ? ' active-tx' : '');
 
-    $('vfoFreq').textContent = radio.compatible ? 'TX ' + s.freq.tx.toFixed(4) + ' / RX ' + s.freq.rx.toFixed(4) + ' MHz' : '射频待设置';
+    $('vfoFreq').textContent = radio.compatible ? 'TX ' + radioDisplayFrequency(s.freq.tx) + ' / RX ' + radioDisplayFrequency(s.freq.rx) + ' MHz' : '射频待设置';
     $('vfoSub').textContent = (s.freq.bw === 1 ? '25 kHz 宽带' : '12.5 kHz 窄带') +
       ' · 静噪 SQ ' + s.freq.sq + ' · ' + (s.freq.power ? '高功率 1W' : '低功率 0.5W');
 
@@ -4039,24 +4345,19 @@ async function refresh() {
         $('drx').value = rx.slice(0, 3);
         $('drxp').value = rx.slice(3);
       }
-      if (document.activeElement !== $('ixRoom1')) $('ixRoom1').value = s.intercom.room;
-      if (document.activeElement !== $('ixBroker2')) $('ixBroker2').value = s.intercom.broker;
-      if (document.activeElement !== $('ixUser2')) $('ixUser2').value = s.intercom.user || '';
+      if (!panelEditing($('ixRoom1'))) $('ixRoom1').value = s.intercom.room;
+      if (!panelEditing($('ixBroker2'))) $('ixBroker2').value = s.intercom.broker;
+      if (!panelEditing($('ixUser2'))) $('ixUser2').value = s.intercom.user || '';
       $('ixPass2').placeholder = s.intercom.pass ? '密码已设置（留空不改）' : '密码（可空）';
-      if (document.activeElement !== $('ftx')) $('ftx').value = radio.compatible ? s.freq.tx.toFixed(4) : '';
-      if (document.activeElement !== $('frx')) $('frx').value = radio.compatible ? s.freq.rx.toFixed(4) : '';
+      if (!panelEditing($('ftx'))) $('ftx').value = radio.compatible ? radioDisplayFrequency(s.freq.tx) : '';
+      if (!panelEditing($('frx'))) $('frx').value = radio.compatible ? radioDisplayFrequency(s.freq.rx) : '';
     }
     return true;
   } catch (e) {
-    if (panelOnline) channelsReady = false;
-    panelOnline = false;
     window._lastErr = String((e && (e.stack || e.message)) || e);
-    $('wifiPill').textContent = '面板连接断开';
-    $('wifiPill').className = 'pill down';
-    /* 控制面板离线：左上角品牌灯变红 */
-    $('hbDot').style.background = 'var(--rose)';
-    $('hbDot').style.boxShadow = '0 0 12px var(--rose)';
-    $('hbDot').title = '控制面板离线';
+    if (!readSucceeded && typeof rxGuardViews !== 'undefined') rxGuardViews.forEach(view => view.sync({}));
+    panelReadProblem(readSucceeded ? '页面显示异常，请查看日志' : '手台状态更新延迟', readSucceeded);
+    log((readSucceeded ? '页面显示异常：' : '状态读取失败：') + e.message, 'err');
     return false;
   } finally { panelRefreshBusy = false; }
 }
@@ -4070,5 +4371,129 @@ log('黑猫控制面板正在连接手台…');
 refresh();
 </script>
 <script src="/device-name.js"></script>
+<script>
+/* Views move existing controls once; their IDs, sessions and handlers remain alive. */
+(() => {
+  const main=document.querySelector('main.workspace');
+  // Keep only structural edges changed by the layout, never rebuild live control contents.
+  const originalTree=[main,...main.querySelectorAll('*')].map(el=>({el,nodes:[...el.childNodes],hidden:el.hidden}));
+  const originalSet=new Set(originalTree.map(x=>x.el));
+  const old=[...main.children];
+  const names={talk:'对讲',network:'网络互联',bridge:'模拟桥接',radio:'射频与信道',audio:'音频调校',device:'设备与维护'};
+  const nav=document.createElement('nav');nav.className='panel-nav';nav.setAttribute('aria-label','功能导航');
+  const content=document.createElement('div');content.className='panel-content';
+  const pages={};
+  for(const [id,title] of Object.entries(names)) {
+    const b=document.createElement('button');b.textContent=title;b.dataset.page=id;nav.append(b);
+    const section=document.createElement('section');section.className='panel-page';section.dataset.pageView=id;section.hidden=true;
+    const h=document.createElement('h2');h.textContent=title;section.append(h);pages[id]=section;content.append(section);
+  }
+  const more=document.createElement('button');more.textContent='更多';more.className='panel-more';nav.append(more);
+  more.onclick=()=>nav.classList.toggle('more-open');
+  main.prepend(nav,content);
+  const move=(el,page)=>{if(el)pages[page].append(el);};
+  const card=(title)=>{const e=document.createElement('div');e.className='card';const h=document.createElement('h3');h.textContent=title;e.append(h);return e;};
+  move(document.querySelector('.name-plate'),'device');
+  const lcd=document.querySelector('.lcd-cockpit');
+  const telemetry=document.createElement('details');telemetry.innerHTML='<summary>详细运行状态</summary>';
+  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);move(lcd,'talk');
+  move(document.getElementById('ixSeg').parentElement,'network');
+  const handheld=card('手台麦克风');handheld.append(document.querySelector('.ptt-console'));pages.talk.append(handheld);
+  move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
+  const browser=document.getElementById('sdrBtn').closest('.card');browser.querySelector('h2').textContent='浏览器麦克风与收听';move(browser,'talk');
+  const source=document.createElement('div');source.className='panel-subnav';source.innerHTML='<button data-source="handheld" class="on">手台麦克风</button><button data-source="browser">浏览器麦克风</button>';
+  pages.talk.insertBefore(source,handheld);browser.hidden=true;
+  for(const mode of [1,2]) {
+    const stage=document.querySelector('.mode-stage[data-modes="'+mode+'"]');
+    const bridge=card(mode===1?'公网直连桥接':'网络中继桥接');bridge.dataset.modes=String(mode);
+    bridge.append(document.getElementById('brT'+mode).closest('.subcard'),document.getElementById('rxGuard'+mode));
+    pages.bridge.append(bridge);move(stage,'network');
+  }
+  const local=card('本地模式');local.dataset.modes='0';local.textContent='当前为本地模拟模式。启用网络桥接，请在“网络互联”选择公网直连或网络中继。';pages.bridge.append(local);
+  const advanced=document.createElement('details');advanced.innerHTML='<summary>高级：STUN 与网络诊断</summary>';
+  advanced.append(document.getElementById('npStun').closest('.row'),document.getElementById('npDiag1'));
+  document.getElementById('npPub').closest('.mode-stage').append(advanced);
+  const rf=document.querySelector('[data-mob-sec="rf"]'),ch=document.querySelector('[data-mob-sec="ch"]');move(rf,'radio');move(ch,'radio');
+  const audio=document.querySelector('[data-mob-sec="audio"]'),eq=document.getElementById('eqReset').closest('.card');
+  const keys=card('实体按键');const first=document.getElementById('fpk0').closest('.row');keys.append(first.previousElementSibling);
+  for(let i=0;i<4;i++)keys.append(document.getElementById('fpk'+i).closest('.row'));pages.device.append(keys);
+  const volume=card('手台音量');const vr=document.getElementById('spkVol').closest('.row');volume.append(vr.previousElementSibling,vr);pages.talk.append(volume);
+  const tail=card('尾音');let start=document.getElementById('ixTailSel').closest('.row').previousElementSibling;
+  const end=document.getElementById('ixTailInfo').closest('.row');
+  while(start){const next=start.nextElementSibling;tail.append(start);if(start===end)break;start=next;}
+  audio.querySelector('h2').textContent='音频增益';eq.querySelector('h2').textContent='均衡器';rf.querySelector('h2').textContent='射频参数';ch.querySelector('h2').textContent='预设信道';
+  move(audio,'audio');move(tail,'audio');move(eq,'audio');
+  const maintenance=document.getElementById('log').closest('.card');maintenance.querySelector('h2').textContent='日志、升级与恢复';move(maintenance,'device');
+  const link=card('网络管理');link.innerHTML='<h3>网络管理</h3><a href="/setup">打开 Wi-Fi 与网络设置</a>';pages.device.append(link);
+  function subnav(page,items){const tabs=document.createElement('div');tabs.className='panel-subnav';pages[page].children[0].after(tabs);items.forEach(([title,el],i)=>{const b=document.createElement('button');b.textContent=title;b.classList.toggle('on',i===0);tabs.append(b);el.hidden=i!==0;b.onclick=()=>{for(const [,node] of items)node.hidden=node!==el;for(const button of tabs.children)button.classList.toggle('on',button===b);};});}
+  subnav('radio',[['射频参数',rf],['预设信道',ch]]);subnav('audio',[['增益',audio],['尾音',tail],['均衡器',eq]]);
+  // Empty legacy wrappers are hidden only after all existing nodes have been moved.
+  old.forEach(el=>el.hidden=true);
+  document.querySelector('.mobile-ptt')?.setAttribute('hidden','');
+  document.getElementById('txBtnMob').parentElement.hidden=true;
+  const messages=document.createElement('div');messages.className='panel-messages';main.before(messages);
+  const notice=document.createElement('div');notice.id='panelNotice';notice.setAttribute('role','status');messages.append(notice);
+  const draft=document.createElement('div');draft.className='panel-draft';draft.hidden=true;messages.append(draft);
+  setInterval(()=>{draft.hidden=!panelDirty.size;draft.textContent=panelDirty.size?'有未保存输入，切页会保留；请回对应页面保存。':'';},300);
+  const retry=document.createElement('button');retry.textContent='重试停止浏览器发射';retry.hidden=true;notice.after(retry);
+  retry.onclick=async()=>{if(busy)return;busy=true;try{if(!await sdrHttpPtt(false,SDR.activeTx,SDR.sid))throw new Error('手台端未确认松开 PTT');SDR.releasePending=Promise.resolve(true);retry.hidden=true;notice.textContent='已确认停止，可以切换页面。';}catch(e){notice.textContent='停止尚未确认：'+e.message;}finally{busy=false;}};
+  let current='talk',busy=false;const scroll={};
+  async function release(){
+    if(talkBusy){notice.textContent='发话请求处理中，请稍后再切换。';return false;}
+    if(txOn){
+      const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),3000);let j;
+      try{const r=await fetch('/api/talk?on=0&tx='+talkToken,{signal:controller.signal,cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);j=await r.json();}finally{clearTimeout(timer);}
+      if(!j.ok){notice.textContent='未确认停止发射，请先点击停止发射再切换。';return false;}
+      txOn=false;txLive=false;await refresh();
+    }
+    if(SDR.ptt||SDR.keyed||SDR.keyPending)sdrPttUp();
+    if(SDR.releasePending && await SDR.releasePending===false){notice.textContent='未确认停止浏览器发射，请重试停止。';retry.hidden=false;return false;}
+    return true;
+  }
+  async function change(id){if(busy||!pages[id]||(id===current&&!pages[id].hidden))return;busy=true;try{if(!await release())return;scroll[current]=window.scrollY;current=id;for(const [key,p] of Object.entries(pages))p.hidden=key!==id;for(const b of nav.querySelectorAll('[data-page]')){b.classList.toggle('on',b.dataset.page===id);b.setAttribute('aria-current',b.dataset.page===id?'page':'false');}nav.classList.remove('more-open');window.scrollTo(0,scroll[id]||0);notice.textContent='';}catch(e){notice.textContent='停止发射未确认：'+e.message;log(notice.textContent,'err');}finally{busy=false;}}
+  nav.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>change(b.dataset.page));
+  source.querySelectorAll('button').forEach(b=>b.onclick=async()=>{if(busy||b.classList.contains('on'))return;busy=true;try{if(!await release())return;const useBrowser=b.dataset.source==='browser';handheld.hidden=useBrowser;browser.hidden=!useBrowser;source.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));}catch(e){notice.textContent='切换音源失败：'+e.message;}finally{busy=false;}});
+  const summary=card('通联概况');const summaryText=document.createElement('p');summary.append(summaryText);pages.talk.append(summary);
+  function status(){const s=window._st;if(!s)return;const mode=s.intercom?.mode;const peers=mode===1?s.np2p?.links:mode===2?s.intercom?.peers:0;summaryText.textContent='当前模式：'+(['本地模拟','公网直连','网络中继'][mode]||'读取中')+' · 对端 '+(peers??0)+' · 桥接'+(s.bridge?.en?'已开启':'已关闭')+' · 网页收听'+(SDR.on?'已开启':'已关闭');}
+  const changedEdges=originalTree.filter(x=>x.nodes.length!==x.el.childNodes.length||x.nodes.some((n,i)=>x.el.childNodes[i]!==n));
+  const hiddenChanges=originalTree.filter(x=>x.hidden!==x.el.hidden);
+  const parents=new Set(changedEdges.map(x=>x.el));
+  for(const el of main.querySelectorAll('*'))if(!originalSet.has(el)&&[...el.childNodes].some(n=>originalSet.has(n)))parents.add(el);
+  let simpleTree=[],simpleHidden=[],layout='simple',preferenceKey='',manualChoice=false;
+  const toggle=document.getElementById('panelLayoutToggle');
+  const dock=document.getElementById('txBtnMob').parentElement;
+  function applyLayout(next){
+    if(next===layout)return;
+    if(next==='detail'){
+      simpleTree=[...parents].map(el=>({el,nodes:[...el.childNodes]}));
+      simpleHidden=hiddenChanges.map(x=>({el:x.el,hidden:x.el.hidden}));
+      for(const x of changedEdges)x.el.replaceChildren(...x.nodes);
+      for(const x of hiddenChanges)x.el.hidden=x.hidden;
+      document.querySelectorAll('#mobNav button').forEach(b=>b.classList.toggle('on',b.dataset.secTab==='all'));
+      dock.hidden=false;
+    }else{
+      // Legacy mobile filters may have hidden a module; six-page navigation owns visibility here.
+      document.querySelectorAll('[data-mob-sec]').forEach(el=>el.style.display='');
+      for(const x of simpleTree)x.el.replaceChildren(...x.nodes);
+      for(const x of simpleHidden)x.el.hidden=x.hidden;
+      dock.hidden=true;
+    }
+    layout=next;document.body.dataset.panelLayout=layout;
+    toggle.textContent=layout==='simple'?'切换到详细版':'切换到简洁版';
+    toggle.setAttribute('aria-pressed',String(layout==='detail'));
+    window.scrollTo(0,0);
+  }
+  toggle.onclick=async()=>{if(busy)return;busy=true;try{if(!await release())return;applyLayout(layout==='simple'?'detail':'simple');manualChoice=true;
+    if(preferenceKey)try{localStorage.setItem(preferenceKey,layout);}catch(e){}notice.textContent='';
+  }catch(e){notice.textContent='停止发射未确认：'+e.message;}finally{busy=false;}};
+  async function loadPreference(){const id=window._st?.device_id;if(!id||preferenceKey||busy)return;preferenceKey='heimao.panel.layout.v1.'+id;
+    let saved='simple';try{if(manualChoice)localStorage.setItem(preferenceKey,layout);else saved=localStorage.getItem(preferenceKey);}catch(e){}
+    if(saved==='detail'){busy=true;try{if(await release())applyLayout('detail');}catch(e){notice.textContent='停止发射未确认：'+e.message;}finally{busy=false;}}
+  }
+  setInterval(()=>{status();loadPreference();},1000);status();change('talk').then(loadPreference);
+})();
+
+</script>
 </body>
 </html>
+

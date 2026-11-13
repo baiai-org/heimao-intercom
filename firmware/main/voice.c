@@ -18,6 +18,7 @@
 #include "audio_i2s.h"
 #include "adc_audio_clock.h"
 #include "bridge.h"
+#include "rx_guard.h"
 #include "eq6.h"
 #include "rx_band.h"
 #include "netcom.h"
@@ -296,6 +297,11 @@ static volatile uint32_t s_gate_guard_ms;
 #define MOD_SQ_OFF_BLOCKS   8     /* 128 ms of ~0V before amp off       */
 
 static bool s_mod_sq_open;        /* module squelch: audio + bias, see below */
+static int16_t s_rf_prefix[OUT_MAX];
+static size_t s_rf_prefix_n;
+static uint8_t s_rf_prefix_blocked;
+static uint8_t s_rf_prefix_mode;
+static int64_t s_rf_prefix_us;
 
 /* RF -> network level (1/16x).  The stream used to be tapped before the speaker
  * gain, so it inherited whatever the ADC produced and had no control of its own. */
@@ -353,6 +359,10 @@ static volatile bool s_inject_silent;
 static volatile bool s_inject_tx_processed;
 static uint32_t s_inject_token;
 static ptt_owner_t s_inject_owner;
+static bool s_net_feeding, s_net_rf_required, s_net_rf_keyed, s_net_write_pending;
+static int64_t s_net_ready_us, s_net_close_us;
+#define NET_TX_LEAD_US 300000LL
+#define NET_DRAIN_LIMIT_US 2000000LL
 /* Set by voice_bridge_play() for the block it just returned. */
 static volatile bool s_last_bridge_tx_processed;
 /* SDR release tail: the monitor consumes the selected tone on its sample
@@ -1034,6 +1044,37 @@ int voice_take_meter_out(void)
     return v;
 }
 
+/* The speaker pop mute must never erase audio sent to the network/phone.
+ * One hardware-COS confirmation block may be replayed only after valid COS,
+ * with both capture-time and current receive-guard masks applied. */
+static void rf_forward_one(const int16_t *pcm, size_t n, bool open, uint8_t blocked)
+{
+    if (blocked & RX_GUARD_OUT_NET) { bridge_rx_inhibit(); }
+    else { bridge_rx_tap(pcm, n, open, open); }
+    int16_t phone[OUT_MAX];
+    memcpy(phone, pcm, n * sizeof(*pcm));
+    (void)gain_mul(phone, n, s_net_rx_gain);
+    sdr_rx_push(phone, n, open && !(blocked & RX_GUARD_OUT_SDR));
+}
+
+static void rf_forward_block(const int16_t *pcm, size_t n, bool rf_audio,
+                             uint8_t blocked, int64_t block_start)
+{
+    const bool open = rf_audio && s_mod_sq_open;
+    const uint8_t mode = netcom_mode();
+    if (s_rf_prefix_n && open && block_start >= s_rf_prefix_us &&
+        block_start - s_rf_prefix_us <= 64000 && mode == s_rf_prefix_mode) {
+        rf_forward_one(s_rf_prefix, s_rf_prefix_n, true, blocked | s_rf_prefix_blocked);
+    }
+    s_rf_prefix_n = 0;
+    rf_forward_one(pcm, n, open, blocked);
+    if (rf_audio && !s_mod_sq_open && s_sq_gpio >= 0 && s_sq_gpio_run == 1 && n <= OUT_MAX) {
+        memcpy(s_rf_prefix, pcm, n * sizeof(*pcm));
+        s_rf_prefix_n = n; s_rf_prefix_blocked = blocked; s_rf_prefix_us = block_start;
+        s_rf_prefix_mode = mode;
+    }
+}
+
 static void monitor_task(void *arg)
 {
     (void)arg;
@@ -1203,6 +1244,8 @@ static void monitor_task(void *arg)
                 }
                 if (want != s_mod_sq_open) {
                     s_mod_sq_open = want;
+                    ptt_trace_note(want ? PTT_TRACE_COS_ON : PTT_TRACE_COS_OFF,
+                                   (unsigned)netcom_mode(), (uint32_t)s_sq_gpio, 0);
                     if (!want) { sa818_cfg_arm_refresh(); }   /* an over just ended */
                     board_amp_enable(want);
                     s_amp_settle = AMP_SETTLE_SAMPLES;
@@ -1455,13 +1498,8 @@ static void monitor_task(void *arg)
                 --s_rx_fade_left;
             }
 
-            if (s_amp_settle > 0) {
-                /*
-                 * Enable-time pop protection: the amplifier was just switched
-                 * on at monitor start; hold the output at digital silence
-                 * until the LM4871 has settled.
-                 */
-                memset(out, 0, sizeof(int16_t) * (size_t)m);
+            const bool speaker_settling = s_amp_settle > 0;
+            if (speaker_settling) {
                 s_amp_settle -= m;
                 if (s_amp_settle < 0) { s_amp_settle = 0; }
             } else if (s_amp_noise_test) {
@@ -1495,8 +1533,13 @@ static void monitor_task(void *arg)
              * from the room is still draining (half-duplex: the room does not
              * need to hear itself coming back).
              */
-            bridge_rx_tap(out, (size_t)m, s_mod_sq_open,
-                          !previewing && !sdr_tailing && !s_bridge_inj_amp);
+            /* Fixed-time RX inhibition affects only RF-origin blocks. Network
+             * playout, local previews and the transmitter's own tail continue.
+             * Keep raw COS/meters intact for diagnosis. Do not buffer mute data. */
+            const uint8_t rx_blocked = rx_guard_blocked_at(block_start);
+            const bool rf_audio = !previewing && !sdr_tailing && !injected &&
+                                  !s_bridge_inj_amp && !ptt_bridge_keyed();
+            rf_forward_block(out, (size_t)m, rf_audio, rx_blocked, block_start);
 
             /*
              * SDR mode: follow the same module squelch state as RF -> network.
@@ -1505,12 +1548,6 @@ static void monitor_task(void *arg)
              * make the browser play a continuous hiss.  This is an explicit
              * module-state gate, never an amplitude/RSSI gate.
              */
-            int16_t net_rx[OUT_MAX];
-            memcpy(net_rx, out, (size_t)m * sizeof(int16_t));
-            (void)gain_mul(net_rx, (size_t)m, s_net_rx_gain);
-            sdr_rx_push(net_rx, (size_t)m,
-                        s_mod_sq_open && !previewing && !s_bridge_inj_amp &&
-                        !voice_sdr_tail_active());
 
             /*
              * Speaker volume, applied to the copy that goes to the DAC.
@@ -1527,6 +1564,9 @@ static void monitor_task(void *arg)
             if (!ptt_bridge_keyed()) {
                 voice_speaker_apply(out, (size_t)m);
             }
+            if (rf_audio && (speaker_settling || (rx_blocked & RX_GUARD_OUT_SPK))) {
+                memset(out, 0, (size_t)m * sizeof(int16_t));
+            }
             const bool diag_receive = s_mod_sq_open && !previewing &&
                 !injected && !sdr_tailing && ptt_owner() == PTT_OWNER_NONE;
             audio_i2s_diag_receive(diag_receive);
@@ -1535,6 +1575,7 @@ static void monitor_task(void *arg)
 
             const int64_t write_start = esp_timer_get_time();
             const esp_err_t write_err = audio_i2s_write(out, (size_t)m);
+            voice_bridge_network_written();
             if (write_err == ESP_OK) {
                 ++s_stats.blocks;
                 voice_sdr_tail_block_commit();
@@ -2132,6 +2173,7 @@ static esp_err_t voice_start_locked(voice_mode_t mode)
     s_sq_hold = 0;
     s_rx_fade_left = 0;
     s_mod_sq_open = false;
+    s_rf_prefix_n = 0;
     s_mod_sq_on_run = 0;
     s_mod_sq_off_run = 0;
     s_sq_quiet_ms = 0;
@@ -2448,8 +2490,79 @@ void voice_inject_reset(void)
     s_inject_owner = PTT_OWNER_NONE; s_inject_token = 0;
     s_inject_tx_processed = false;
     s_last_bridge_tx_processed = false;
+    s_net_feeding = s_net_rf_required = s_net_rf_keyed = s_net_write_pending = false;
+    s_net_ready_us = s_net_close_us = 0;
     portEXIT_CRITICAL(&s_bridge_inj_mux);
     ptt_control_unlock();
+}
+
+void voice_bridge_network_state(bool feeding, bool rf_required)
+{
+    ptt_control_lock();
+    s_net_rf_required = rf_required;
+    if (feeding) { s_net_close_us = 0; }
+    else if (!s_net_close_us && s_inject_owner == PTT_OWNER_NETWORK) {
+        s_net_close_us = esp_timer_get_time();
+    }
+    s_net_feeding = feeding;
+    ptt_control_unlock();
+}
+
+void voice_bridge_network_keyed(bool keyed)
+{
+    ptt_control_lock();
+    if (keyed && !s_net_rf_keyed) { s_net_ready_us = esp_timer_get_time() + NET_TX_LEAD_US; }
+    if (!keyed && s_net_rf_keyed && s_inject_owner == PTT_OWNER_NETWORK &&
+        !voice_bridge_level() && !s_net_write_pending) { voice_inject_reset(); }
+    s_net_rf_keyed = keyed;
+    ptt_control_unlock();
+}
+
+bool voice_bridge_network_pending(void)
+{
+    ptt_control_lock();
+    bool pending = s_inject_owner == PTT_OWNER_NETWORK &&
+                   (voice_bridge_level() != 0 || s_net_write_pending);
+    /* A failed/stopped DAC cannot keep a completed network over keyed forever. */
+    if (pending && !s_net_feeding && s_net_close_us &&
+        esp_timer_get_time() - s_net_close_us > NET_DRAIN_LIMIT_US) {
+        ESP_LOGW(TAG, "network PCM drain timed out; discarding stalled audio");
+        voice_inject_reset(); pending = false;
+    }
+    ptt_control_unlock();
+    return pending;
+}
+
+bool voice_bridge_network_ready(void)
+{
+    ptt_control_lock();
+    const bool ready = !s_net_rf_required || (s_net_rf_keyed &&
+        ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() &&
+        esp_timer_get_time() >= s_net_ready_us);
+    ptt_control_unlock();
+    return ready;
+}
+
+void voice_bridge_network_written(void)
+{
+    ptt_control_lock();
+    s_net_write_pending = false;
+    ptt_control_unlock();
+}
+
+void voice_bridge_network_cancel(void)
+{
+    ptt_control_lock();
+    if (s_inject_owner == PTT_OWNER_NETWORK) { voice_inject_reset(); }
+    ptt_control_unlock();
+}
+
+size_t voice_bridge_room(void)
+{
+    portENTER_CRITICAL(&s_bridge_inj_mux);
+    const size_t room = BRIDGE_INJ_SAMPLES - (s_bridge_inj_head - s_bridge_inj_tail);
+    portEXIT_CRITICAL(&s_bridge_inj_mux);
+    return room;
 }
 
 void voice_bridge_inject(const int16_t *pcm, size_t n)
@@ -2458,7 +2571,13 @@ void voice_bridge_inject(const int16_t *pcm, size_t n)
     if (ptt_local_audio_active()) { ptt_control_unlock(); return; }
     const ptt_owner_t owner = ptt_owner();
     if (owner == PTT_OWNER_NONE || owner == PTT_OWNER_NETWORK) {
-        if (s_inject_owner != PTT_OWNER_NETWORK) { voice_inject_reset(); }
+        if (s_inject_owner != PTT_OWNER_NETWORK) {
+            const bool feeding = s_net_feeding, rf = s_net_rf_required, keyed = s_net_rf_keyed;
+            const int64_t ready = s_net_ready_us, closing = s_net_close_us;
+            voice_inject_reset();
+            s_net_feeding = feeding; s_net_rf_required = rf; s_net_rf_keyed = keyed;
+            s_net_ready_us = ready; s_net_close_us = closing;
+        }
         s_inject_owner = PTT_OWNER_NETWORK; s_inject_token = 1;
         s_inject_tx_processed = false;
         s_inject_silent = false;
@@ -2721,8 +2840,21 @@ size_t voice_bridge_play(int16_t *out, size_t n)
 {
     ptt_control_lock();
     const bool browser = ptt_owner() == PTT_OWNER_SDR;
+    const bool network = s_inject_owner == PTT_OWNER_NETWORK;
     s_last_bridge_tx_processed = false;
     const size_t lvl = voice_bridge_level();
+    if (network && !voice_bridge_network_ready()) {
+        ptt_control_unlock(); return 0;
+    }
+    if (network && lvl < 2) { s_inj_primed = false; }
+    /* The last interpolation point is real audio, not disposable padding.
+     * Drain it exactly once after input ends, then the next over must prefill. */
+    if (network && !s_net_feeding && lvl > 0 && lvl < 2) {
+        const size_t got = voice_bridge_take(out, n);
+        s_net_write_pending = got != 0;
+        ptt_control_unlock(); return got;
+    }
+    if (network && !s_net_feeding && lvl >= 2) { s_inj_primed = true; }
     if (!s_inj_primed && lvl >= 4800) {
         s_inj_primed = true;
     } else if (s_inj_primed && (browser ? lvl < 2 : lvl == 0)) {
@@ -2735,6 +2867,7 @@ size_t voice_bridge_play(int16_t *out, size_t n)
         got = voice_bridge_take_resampled(out, n, ratio);
         if (got > 0) {
             s_last_bridge_tx_processed = browser && s_inject_tx_processed;
+            if (network) { s_net_write_pending = true; }
         }
         if (lvl > 7400 || lvl < 3600) { ++s_bridge_trim; }
         if (got < n && browser) {
@@ -2961,6 +3094,21 @@ void voice_set_sq_gpio(int gpio)
 int voice_get_sq_gpio(void) { return s_sq_gpio; }
 
 bool voice_module_squelch_open(void) { return s_mod_sq_open; }
+
+bool voice_rf_carrier_present(void)
+{
+    return s_mod_sq_open || (s_sq_gpio >= 0 && gpio_get_level((gpio_num_t)s_sq_gpio) == 0);
+}
+
+bool voice_network_busy(void)
+{
+    ptt_control_lock();
+    const bool busy = s_net_feeding || s_net_write_pending ||
+        (s_inject_owner == PTT_OWNER_NETWORK && voice_bridge_level() != 0);
+    ptt_control_unlock();
+    return busy;
+}
+
 
 int voice_get_bias(void) { return s_bias_raw; }
 

@@ -111,6 +111,16 @@ void voice_inject_reset(void);
 size_t voice_bridge_play(int16_t *out, size_t n);
 bool voice_bridge_last_injection_preprocessed(void);
 void   voice_bridge_inject(const int16_t *pcm, size_t n);
+/* Network producers report whether input/decoder data is still pending.
+ * Physical-key notification starts a separate 300ms TX lead; no audio is
+ * consumed during that lead. Pending includes the final I2S write. */
+void voice_bridge_network_state(bool feeding, bool rf_required);
+void voice_bridge_network_keyed(bool keyed);
+bool voice_bridge_network_ready(void);
+bool voice_bridge_network_pending(void);
+void voice_bridge_network_written(void);
+void voice_bridge_network_cancel(void);
+size_t voice_bridge_room(void);
 size_t voice_bridge_take(int16_t *out, size_t cap);
 /* Fractional read with a slow ratio adaptation (elastic playback). */
 size_t voice_bridge_take_resampled(int16_t *out, size_t n, float ratio);
@@ -150,6 +160,9 @@ bool voice_dac_held_by_talk(void);
 void voice_set_sq_gpio(int gpio);
 int voice_get_sq_gpio(void);
 bool voice_module_squelch_open(void);
+/* Read-only busy checks for idle RF maintenance. */
+bool voice_rf_carrier_present(void);
+bool voice_network_busy(void);
 
 /* RF -> network level (1/16x) and the transmit pre-emphasis switch. */
 void voice_set_net_rx_gain(int g);

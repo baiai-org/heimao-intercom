@@ -80,9 +80,29 @@ jobs:
         run: |
           $version = (Get-Content firmware/VERSION).Trim()
           $env:ORL_FLASHER_FIXTURE = "dist\heimao-full-$version.bin"
+          $env:HM_FLASHER_APP = "dist\heimao-app-OTA-$version.bin"
           python flasher/test_flasher.py
-      - name: Build public EXE (no embedded firmware)
-        run: powershell -ExecutionPolicy Bypass -File flasher/build.ps1 -Python python -OutputDirectory dist/flasher -SkipTests
+      - name: Build and audit public EXE (no embedded firmware)
+        shell: pwsh
+        run: |
+          $version = (Get-Content firmware/VERSION).Trim()
+          ./flasher/build.ps1 -Python python -OutputDirectory dist/flasher -SkipTests -FixtureBin "dist/heimao-full-$version.bin" -AppBin "dist/heimao-app-OTA-$version.bin"
+      - name: Diagnose without and with an external image
+        shell: pwsh
+        run: |
+          $version = (Get-Content firmware/VERSION).Trim()
+          $brand = Get-Content flasher/brand.json -Raw | ConvertFrom-Json
+          $exe = "dist/flasher/$($brand.exe_name).exe"
+          & $exe --diagnose dist/flasher/empty.json
+          if ($LASTEXITCODE -ne 0) { throw 'Empty diagnosis failed' }
+          & $exe --firmware "dist/heimao-full-$version.bin" --diagnose dist/flasher/external.json
+          if ($LASTEXITCODE -ne 0) { throw 'External diagnosis failed' }
+          $empty = Get-Content dist/flasher/empty.json -Raw | ConvertFrom-Json
+          $external = Get-Content dist/flasher/external.json -Raw | ConvertFrom-Json
+          if ($empty.firmware_source -ne 'none' -or $external.firmware_version -ne $version) { throw 'Wrong image selection' }
+          foreach ($report in @($empty,$external)) {
+            if ($report.embedded_firmware -or $report.bundled_firmware_files.Count -or $report.serial_opened -or $report.flash_requested) { throw 'Unsafe public flasher artifact' }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: flasher-exe

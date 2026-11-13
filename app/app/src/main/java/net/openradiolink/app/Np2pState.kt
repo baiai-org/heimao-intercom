@@ -15,8 +15,13 @@ internal data class PeerInfo(
     val rx: Int,
     val tx: Int,
     val drop: Int,
+    val viaHub: Boolean = false,
+    val hubName: String = "",
+    val isHub: Boolean = false,
 ) {
-    val stateText: String get() = when (state) {
+    val stateText: String get() = if(viaHub) {
+        if(state=="linked") "最近收到语音" else "等待新语音"
+    } else when (state) {
         "linked" -> "已连通"
         "knocking" -> "敲击中"
         "expired" -> "已过期"
@@ -49,12 +54,23 @@ internal data class Np2pState(
     val hubOffline: Boolean,
     val hubQuietSeconds: Long,
     val peers: List<PeerInfo>,
+    val peerLimit: Int = 4,
+    val storedCount: Int = peers.size,
+    val hubRole: String = if(hub) "hub" else "direct",
+    val hubConflict: Boolean = false,
+    val accessVersion: Int = 0,
+    val accessReady: Boolean = true,
+    val deniedCount: Int = 0,
+    val deniedLimit: Int = 0,
 ) {
-    val linkedCount: Int get() = peers.count { it.state == "linked" }
+    val linkedCount: Int get() = peers.count { !it.viaHub && it.state == "linked" }
     val peerCount: Int get() = peers.size
+    val directCount: Int get() = peers.count { !it.viaHub }
+    val indirectCount: Int get() = peers.count { it.viaHub }
+    val roleText: String get() = when(hubRole) { "hub"->"本机是群聊枢纽"; "member"->"本机连接群聊枢纽"; else->"本机使用点对点直连" }
 
     /** The section header line, in the panel's "连通 n/m" spirit. */
-    fun onlineCount(): String = "$linkedCount/$peerCount"
+    fun onlineCount(): String = "$linkedCount/$directCount"
 
     companion object {
         const val STALE_AFTER_SECONDS = 30L
@@ -75,7 +91,7 @@ internal data class Np2pState(
             }
             val pub = np.optString("pub")
             val port = np.optInt("port", 0)
-            val ready = pub.isNotEmpty() && pub != "0.0.0.0" && port != 0
+            val ready = pub.isNotEmpty() && pub != "0.0.0.0" && port in 1..65535
             val v6 = wifi.optString("ip6").trim()
             val natText = when (np.optString("nat", "unknown")) {
                 "port-preserving" -> "端口保持 NAT"
@@ -89,8 +105,15 @@ internal data class Np2pState(
                     val n = list.optJSONObject(i) ?: continue
                     val ip = n.optString("ip")
                     val p = n.optInt("port", V6_PORT)
+                    val viaHub=n.optString("route")=="hub"
+                    val hubName=n.optString("via")
                     // IPv6 literals need brackets so the text stays one paste-ready run.
-                    val address = if (ip.indexOf(':') > 0) "[$ip]:$p" else "$ip:$p"
+                    val address = when {
+                        viaHub->"经 ${hubName.ifBlank{"枢纽"}} 转发 · 无直连地址"
+                        ip.isBlank() || ip=="0.0.0.0" || ip=="::" || p !in 1..65535->"等待握手取得地址"
+                        ip.indexOf(':') > 0->"[$ip]:$p"
+                        else->"$ip:$p"
+                    }
                     add(PeerInfo(
                         name = n.optString("name").ifBlank { "未命名" },
                         address = address,
@@ -99,6 +122,7 @@ internal data class Np2pState(
                         rx = n.optInt("rx", 0),
                         tx = n.optInt("tx", 0),
                         drop = n.optInt("drop", 0),
+                        viaHub = viaHub, hubName = hubName, isHub = n.optBoolean("hub",false),
                     ))
                 }
             }
@@ -115,7 +139,27 @@ internal data class Np2pState(
                 hubOffline = np.optBoolean("hub_offline", false),
                 hubQuietSeconds = np.optLong("hub_quiet_s", 0),
                 peers = peers,
+                peerLimit = np.optInt("peer_limit",4),
+                storedCount = np.optInt("peer_count",peers.size),
+                hubRole = np.optString("hub_role").ifBlank{if(np.optBoolean("hub")) "hub" else "direct"},
+                hubConflict = np.optBoolean("hub_conflict",false),
+                accessVersion = np.optInt("access_version",0),
+                accessReady = np.optBoolean("access_ready",true),
+                deniedCount = np.optInt("denied_count",0),
+                deniedLimit = np.optInt("denied_limit",0),
             )
         }
+    }
+}
+
+internal data class DeniedPeer(val id:String,val name:String,val address:String,val identity:Boolean)
+internal fun parseDeniedPeers(data:JSONObject):List<DeniedPeer> {
+    check(data.optBoolean("ready")) { "拒绝记录不可用，请重试" }
+    val rows=data.getJSONArray("entries")
+    check(rows.length()==data.getInt("count")) { "拒绝列表不完整，请刷新" }
+    return List(rows.length()) { i ->
+        val row=rows.getJSONObject(i); val ip=row.optString("ip"); val port=row.optInt("port")
+        val address=if(ip.isBlank()) "经枢纽发现" else if(ip.contains(':')) "[$ip]:$port" else "$ip:$port"
+        DeniedPeer(row.getString("id"),row.getString("name"),address,row.optBoolean("identity"))
     }
 }

@@ -32,10 +32,10 @@ const context = vm.createContext({
   readChannels: async () => channels,
   escHtml: v => String(v).replace(/[&<>"']/g, '_'),
 });
-vm.runInContext(part('function radioFrequency(', "document.querySelectorAll('[data-sec]')"), context);
+vm.runInContext(part('function radioGridHz(', "document.querySelectorAll('[data-sec]')"), context);
 vm.runInContext(part('/* Atomic dual-frequency step', 'let tonesReady'), context);
 vm.runInContext(part("$('fset').onclick", "$('fSync').onclick"), context);
-vm.runInContext(part('async function loadBridgeChans()', 'function syncBridge('), context);
+vm.runInContext(part('async function loadBridgeChans()', 'const rxGuardViews'), context);
 vm.runInContext('const CH_MAX = 99; let _chAll = [];\n' + part('function renderChannels()', "if ($('chSearch'))"), context);
 const uhf = {band:'UHF', model:'SA818S-U', min:400, max:480, compatible:true, ready:true, power_applied:0};
 context.renderRadio(uhf);
@@ -69,6 +69,24 @@ elements.get('fset').onclick();
 assert.deepEqual(calls.pop(), {k:'freq_pair', v:'145.0125,145.6125'});
 elements.get('ftx').value = '145.0001'; elements.get('fset').onclick();
 assert.equal(calls.length, 0);
+// Capability negotiation keeps old firmware at 12.5 kHz. Only the requested
+// 1/2.5/5 kHz fine-step buttons are present; 6.25 kHz is rejected.
+assert.equal(steps.find(b=>b.dataset.fstep==='0.00625'),undefined);
+const fineUp = steps.find(b => b.dataset.fstep === '0.001');
+assert.equal(fineUp.disabled, true);
+context.renderRadio({...vhf, compatible:true, ready:true, freq_grid_hz:500, freq_decimals:4});
+assert.equal(fineUp.disabled, false);
+for(const [delta, tx, rx] of [['0.001','145.0010','145.6010'],['0.0025','145.0025','145.6025'],
+  ['0.005','145.0050','145.6050']]){
+  elements.get('ftx').value='145.0000';elements.get('frx').value='145.6000';
+  steps.find(b=>b.dataset.fstep===delta).onclick();
+  assert.deepEqual(calls.pop(),{k:'freq_pair',v:tx+','+rx});
+  assert.equal(elements.get('ftx').value,tx);
+}
+for(const text of ['145.0001','145.00625','145.0062','145.0063'])assert.equal(context.radioFrequency(text),null,text);
+assert.equal(context.radioDisplayFrequency(145.0050),'145.0050');
+assert.equal(context.radioDisplayFrequency(145.0125),'145.0125');
+elements.get('fset').onclick();assert.deepEqual(calls.pop(),{k:'freq_pair',v:'145.0050,145.6050'});
 context.renderRadio({...vhf, compatible:true, ready:true, power_pending:true});
 assert.equal(elements.get('pwrT').disabled, false);
 assert.match(elements.get('pwrV').textContent, /待松开 PTT/);

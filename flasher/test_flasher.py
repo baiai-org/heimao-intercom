@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+import app as flasher_app
 
 from firmware import (APP_OFFSET, DEFAULT_BIN, FLASH_SIZE, Firmware, PARTITIONS,
                       digest, flash_steps)
@@ -21,6 +23,33 @@ FIXTURE = Path(os.environ.get('ORL_FLASHER_FIXTURE', str(REPO / '.tmp/portable-f
 FIXTURE_AVAILABLE = FIXTURE.exists()
 APP_BIN = Path(os.environ.get('HM_FLASHER_APP', str(REPO / 'firmware/build/openradiolink.bin')))
 SKIP_FIXTURE = 'set ORL_FLASHER_FIXTURE to a full merged BIN'
+
+
+class ExternalFirmwareTests(unittest.TestCase):
+    def test_ignores_internal_firmware(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);home=root/'home';assets=root/'resources/assets'
+            home.mkdir();assets.mkdir(parents=True);(assets/DEFAULT_BIN).write_bytes(b'stale')
+            with patch.object(flasher_app,'home_directory',return_value=home), patch.object(flasher_app,'resource_root',return_value=assets.parent):
+                self.assertIsNone(flasher_app.default_firmware())
+                self.assertEqual(len(flasher_app.bundled_firmware_files()),1)
+
+    def test_external_image_does_not_hide_bundled_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);home=root/'home';assets=root/'resources/assets'
+            home.mkdir();assets.mkdir(parents=True)
+            external=home/DEFAULT_BIN;external.write_bytes(b'external')
+            (assets/'older.bin').write_bytes(b'internal')
+            with patch.object(flasher_app,'home_directory',return_value=home), patch.object(flasher_app,'resource_root',return_value=assets.parent):
+                self.assertEqual(flasher_app.default_firmware(),external)
+                self.assertEqual(Path(flasher_app.bundled_firmware_files()[0]).name,'older.bin')
+
+    def test_missing_or_directory_is_not_a_firmware_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);(home/DEFAULT_BIN).mkdir()
+            with patch.object(flasher_app,'home_directory',return_value=home), patch.object(flasher_app,'resource_root',return_value=home/'missing'):
+                self.assertIsNone(flasher_app.default_firmware())
+                self.assertEqual(flasher_app.bundled_firmware_files(),[])
 
 
 class ParserTests(unittest.TestCase):

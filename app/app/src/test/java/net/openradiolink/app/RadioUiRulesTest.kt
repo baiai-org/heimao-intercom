@@ -17,6 +17,21 @@ class RadioUiRulesTest {
         assertEquals("—.————",RadioUiRules.displayFrequency(""))
         assertEquals("145.5000",RadioUiRules.displayFrequency("145.5"))
     }
+    @Test fun negotiatedFineStepsPreserveRequestedValuesAndRejectSixPointTwoFive() {
+        assertEquals(12500,RadioUiRules.frequencyGridHz(JSONObject()))
+        assertEquals(12500,RadioUiRules.frequencyGridHz(JSONObject().put("freq_grid_hz",1)))
+        assertEquals(500,RadioUiRules.frequencyGridHz(JSONObject().put("freq_grid_hz",500)))
+        for((hz,expected) in listOf(1000 to "145.0010",2500 to "145.0025",5000 to "145.0050")){
+            assertEquals(expected,RadioUiRules.stepFrequency("145.0000",hz,"134","174",500))
+            assertEquals("145.0000",RadioUiRules.stepFrequency(expected,-hz,"134","174",500))
+        }
+        assertEquals("438.5025",RadioUiRules.frequency("438.5025","400","480",500))
+        listOf("145.00625","145.0062","145.0063","145.0001","145.00624","1.45e2").forEach{
+            assertThrows(Exception::class.java){RadioUiRules.frequency(it,"134","174",500)}
+        }
+        assertThrows(Exception::class.java){RadioUiRules.frequency("145.00625","134","174")}
+        assertThrows(Exception::class.java){RadioUiRules.stepFrequency("174.0000",1000,"134","174",500)}
+    }
     @Test fun channelNamesUseFirmwareByteLimit() {
         assertNull(RadioUiRules.nameError("测试信道12345678901"))
         assertNotNull(RadioUiRules.nameError("测试信道123456789012"))

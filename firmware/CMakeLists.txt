@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 # Firmware version reported in esp_app_desc and the boot log.  Keep it in
 # firmware/VERSION so a clean clone builds a reproducible version string
 # instead of "unknown" (git describe is not available in a source archive).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_LIST_DIR}/VERSION")
 file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/VERSION" PROJECT_VER LIMIT_COUNT 1)
 
 # OpenRadioLink-v0.3  --  ESP32-S3-WROOM-1-N16R8

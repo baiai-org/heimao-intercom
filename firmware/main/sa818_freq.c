@@ -2,6 +2,8 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 const char *sa818_band_name(sa818_band_t band)
@@ -30,7 +32,7 @@ static bool freq_valid(sa818_band_t band, float mhz)
     }
     /* Existing files store float MHz: allow its < 16 Hz quantization error. */
     const double hz = (double)mhz * 1000000.0;
-    return fabs(hz - round(hz / 12500.0) * 12500.0) < 20.0;
+    return fabs(hz - round(hz / SA818_FREQ_GRID_HZ) * SA818_FREQ_GRID_HZ) < 20.0;
 }
 
 bool sa818_freq_pair_valid(sa818_band_t band, float tx, float rx)
@@ -60,10 +62,26 @@ bool sa818_freq_parse(const char *text, float *mhz)
     const double value = strtod(text, NULL);
     if (!isfinite(value) || value <= 0.0 || value > 480.0) { return false; }
     const double hz = value * 1000000.0;
-    if (fabs(hz - round(hz / 12500.0) * 12500.0) > 0.001) { return false; }
+    if (fabs(hz - round(hz / SA818_FREQ_GRID_HZ) * SA818_FREQ_GRID_HZ) > 0.001) { return false; }
     const float f = (float)value;
     if (!sa818_freq_pair_valid(SA818_BAND_UHF, f, f) &&
         !sa818_freq_pair_valid(SA818_BAND_VHF, f, f)) { return false; }
     *mhz = f;
     return true;
+}
+
+bool sa818_freq_format(float mhz, char *out, size_t out_len)
+{
+    if (!out || !out_len) { return false; }
+    out[0] = '\0';
+    if (!freq_valid(SA818_BAND_UHF, mhz) && !freq_valid(SA818_BAND_VHF, mhz)) {
+        return false;
+    }
+    /* Float MHz loses up to 16 Hz in UHF; recover the validated grid first. */
+    const uint32_t hz = (uint32_t)llround((double)mhz * 1000000.0 / SA818_FREQ_GRID_HZ)
+        * SA818_FREQ_GRID_HZ;
+    const unsigned whole = (unsigned)(hz / 1000000);
+    const unsigned fraction = (unsigned)(hz % 1000000);
+    const int n = snprintf(out, out_len, "%u.%04u", whole, fraction / 100);
+    return n >= 0 && (size_t)n < out_len;
 }

@@ -45,6 +45,8 @@ void bridge_apply(void);
 /* Panel/console setters: persist and re-evaluate. */
 esp_err_t bridge_set_en(bool en);
 esp_err_t bridge_set_chan(int index);   /* 0 = none, else 1-based channel index */
+/* Internal: channel_control calls this only after a successful module ACK. */
+esp_err_t bridge_channel_selected(int index, bool bind_bridge);
 /* Preserve the same bound entry when the channel list is compacted; no tuning. */
 void bridge_channel_deleted(int index); /* deleted 0-based slot */
 
@@ -63,6 +65,8 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
 
 /* End the RF -> network stream before monitor capture stops. Idempotent. */
 void bridge_rx_end(void);
+/* Close a suppressed receive stream without generating a new courtesy tone. */
+void bridge_rx_inhibit(void);
 
 /* Read-only stream-edge diagnostics; timestamps are local uptime in ms. */
 typedef struct {

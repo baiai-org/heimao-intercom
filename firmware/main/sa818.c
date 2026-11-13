@@ -2,6 +2,7 @@
  * SA818S-U / SA818S-V UART/AT driver -- implementation.
  */
 #include "sa818.h"
+#include "sa818_freq.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -258,8 +259,11 @@ esp_err_t sa818_set_group(const sa818_profile_t *p, char *reply, size_t reply_le
     }
     char cmd[128];
     /* NOTE the field order: ...Tx_CTCSS,SQ,Rx_CTCSS -- squelch is 5th, NOT last. */
-    snprintf(cmd, sizeof(cmd), "AT+DMOSETGROUP=%d,%.4f,%.4f,%s,%d,%s",
-             p->bandwidth, p->tx_mhz, p->rx_mhz,
+    char tx[16], rx[16];
+    if (!sa818_freq_format(p->tx_mhz, tx, sizeof(tx)) ||
+        !sa818_freq_format(p->rx_mhz, rx, sizeof(rx))) { return ESP_ERR_INVALID_ARG; }
+    snprintf(cmd, sizeof(cmd), "AT+DMOSETGROUP=%d,%s,%s,%s,%d,%s",
+             p->bandwidth, tx, rx,
              p->tx_ctcss[0] ? p->tx_ctcss : "0000",
              p->squelch,
              p->rx_ctcss[0] ? p->rx_ctcss : "0000");

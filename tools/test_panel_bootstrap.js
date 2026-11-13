@@ -18,9 +18,9 @@ function deferred() {
   return {promise, resolve};
 }
 function runtime() {
-  const state = {requests: [], logs: [], timers: new Map(), id: 0, renders: 0};
+  const state = {now:1000,requests: [], logs: [], timers: new Map(), id: 0, renders: 0};
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m =>
-    [m[1], {value: '', style: {}, textContent: '', innerHTML: '', className: ''}]));
+    [m[1], {value: '', style: {}, textContent: '', innerHTML: '', className: '',after(){},setAttribute(){}}]));
   state.status = {ptt: 'IDLE', wifi: {connected: true, rssi: -50, ssid: 'test', ip: '192.0.2.178', host: 'orl2'},
     mode: 'monitor', uptime: 10, heap: 100000, psram: 1000000, freq: {tx: 435, rx: 435, sq: 8, vol: 8, bw: 1},
     intercom: {mode: 0, state: 'idle', peers: 0, tx: 0, rx: 0}, bridge: {}, gain: 80,
@@ -32,7 +32,7 @@ function runtime() {
   state.response = url => ({ok: true, status: 200, json: async () => state.values[url]});
   state.fetch = async url => state.response(url);
   const context = vm.createContext({AbortController, Set, window: {},
-    document: {activeElement: null},
+    Date:{now:()=>state.now}, document: {activeElement: null,createElement:()=>({setAttribute(){},style:{},after(){}})},
     $: id => {assert(elements.has(id), id); return elements.get(id);},
     escHtml: text => String(text ?? '').replace(/[&<>"']/g, '_'),
     log: (...args) => state.logs.push(args), wifiIcon: () => '', setSegMeter() {},
@@ -43,9 +43,10 @@ function runtime() {
     setTimeout: (fn, ms) => {const id = ++state.id; state.timers.set(id, {fn, ms}); return id;},
     clearTimeout: id => state.timers.delete(id),
   });
-  vm.runInContext(part('const PANEL_READ_PATHS', '/*\n * Factory reset:') +
+  vm.runInContext(part('function radioDisplayFrequency(', 'function radioFrequency(') +
+    part('const PANEL_READ_PATHS', '/*\n * Factory reset:') +
     part('let tonesReady', 'function showSub()') +
-    part('async function loadBridgeChans()', 'function syncBridge(') +
+    part('async function loadBridgeChans()', 'const rxGuardViews') +
     part('const CH_MAX = 99;', '/* Filtered client-side:') +
     part('async function refresh() {', 'setInterval(refreshMeter,') +
     '\nglobalThis.api = {panelReadJson, loadPanelLists, loadChannels, loadBridgeChans, refresh,' +
@@ -74,12 +75,12 @@ function runtime() {
   const initial = r.refresh(); await flush();
   assert.equal(r.logs.length, 0, 'no connected claim before a response');
   assert.equal(await r.refresh(), false, 'slow refreshes cannot overlap');
-  assert.equal(r.requests.length, 2);
+  assert.equal(r.requests.length, 1);
   status.resolve(r.response('/api/status')); await flush();
-  assert.equal(r.logs.length, 0, 'radio response is still required');
+  assert.equal(r.logs.filter(x=>x[0].includes('已连接')).length, 1, 'a valid status establishes reachability independently of radio');
   radio.resolve(r.response('/api/radio')); assert.equal(await initial, true, r.window._lastErr);
   await r.finish(r.loadPanelLists());
-  assert.deepEqual(r.requests.map(x => x.url), ['/api/status', '/api/radio', '/api/ctcss', '/api/dcs', '/api/channels']);
+  for(const url of ['/api/status','/api/radio','/api/ctcss','/api/dcs','/api/channels']) assert.equal(r.requests.filter(x=>x.url===url).length,1,url);
   assert(r.flags().tonesReady && r.flags().dcsReady && r.flags().channelsReady);
   assert.match(r.elements.get('brChan1').innerHTML, /saved/);
   assert.match(r.elements.get('brChan2').innerHTML, /saved/);
@@ -130,17 +131,18 @@ function runtime() {
 
   r = runtime(); r.fetch = async () => {throw new TypeError('offline');};
   assert.equal(await r.refresh(), false); assert.equal(r.flags().panelOnline, false);
-  assert.equal(r.logs.length, 0);
+  assert(r.logs.some(x=>x[0].includes('状态读取失败')));
   r.fetch = async url => r.response(url);
   assert.equal(await r.refresh(), true); await r.finish(r.loadPanelLists());
   assert.equal(await r.refresh(), true);
   assert.equal(r.logs.filter(x => x[0].includes('已连接')).length, 1);
   r.fetch = async () => {throw new TypeError('offline');};
-  assert.equal(await r.refresh(), false);
+  assert.equal(await r.refresh(), false); assert.equal(r.flags().panelOnline,true,'one failed status does not erase recent health');
+  r.now+=11000; assert.equal(await r.refresh(),false); assert.equal(r.flags().panelOnline,false);
   r.fetch = async url => r.response(url);
   assert.equal(await r.refresh(), true); await r.finish(r.loadPanelLists());
   assert.equal(r.logs.filter(x => x[0].includes('已连接')).length, 2);
-  assert.equal(r.requests.filter(x => x.url === '/api/channels').length, 2);
+  assert.equal(r.requests.filter(x => x.url === '/api/channels').length, 1);
   assert.equal(r.requests.filter(x => x.url === '/api/ctcss').length, 1);
   console.log('PASS: truthful connection, serial table startup, bounded retries/body timeout, shared channel read, reconnect recovery and no PTT/write replay');
 })().catch(error => {console.error(error); process.exitCode = 1;});

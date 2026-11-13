@@ -10,8 +10,8 @@
  * NVS, so any key can carry channel step, volume, squelch, RF power, monitor,
  * mode or the analog bridge.  The defaults match the built v0.4 panel:
  *
- *   index 0  VOL+  GPIO38   -> 音量 +
- *   index 1  VOL-  GPIO39   -> 音量 -
+ *   index 0  VOL+  GPIO39   -> 音量 +
+ *   index 1  VOL-  GPIO38   -> 音量 -
  *   index 2  CH+   GPIO15   -> 频道 +（切换并应用已存频道）
  *   index 3  CH-   GPIO16   -> 频道 -
  *
@@ -41,7 +41,7 @@ typedef enum {
     FP_ACT_OFF = 0,     /* 无功能 */
     FP_ACT_CH_UP,       /* 频道 + （应用已存频道） */
     FP_ACT_CH_DN,       /* 频道 - */
-    FP_ACT_VOL_UP,      /* 全局音量 + (0..100) */
+    FP_ACT_VOL_UP,      /* 喇叭音量 + (0..4) */
     FP_ACT_VOL_DN,      /* 全局音量 - */
     FP_ACT_SQL_UP,      /* 静噪 + (0..8) */
     FP_ACT_SQL_DN,      /* 静噪 - */

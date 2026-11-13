@@ -94,6 +94,7 @@ static void console_run_line(char *line)
 
     sa818_cfg_t cfg;
     sa818_cfg_load(&cfg);
+    uint32_t edit_fields = 0;
 
     bool changed = true;
     if (!strcmp(argv[0], "set")) {
@@ -105,21 +106,23 @@ static void console_run_line(char *line)
         if (!sa818_freq_parse(argv[1], &tx) ||
             !sa818_freq_parse(argc >= 3 ? argv[2] : argv[1], &rx) ||
             !sa818_freq_pair_valid(sa818_cfg_band(), tx, rx)) {
-            printf("  %s: TX/RX must be %.1f-%.1f MHz, 12.5k grid\n",
+            printf("  %s: TX/RX must be %.1f-%.1f MHz, 0.5k setting grid\n",
                    sa818_band_name(sa818_cfg_band()), sa818_band_min(sa818_cfg_band()),
                    sa818_band_max(sa818_cfg_band()));
             return;
         }
         cfg.tx_mhz = tx;
         cfg.rx_mhz = rx;
+        edit_fields = SA818_EDIT_TX | SA818_EDIT_RX;
     } else if (!strcmp(argv[0], "bw")) {
         if (argc < 2) { printf("  usage: bw 0 (12.5k) | bw 1 (25k)\n"); return; }
         cfg.bandwidth = atoi(argv[1]) ? 1 : 0;
+        edit_fields = SA818_EDIT_BW;
     } else if (!strcmp(argv[0], "ctcss")) {
         /*
          * Sub-audible tone.  The module does the encoding and decoding; this
          * only translates between the tone people know ("88.5") and the code
-         * the AT command wants ("0009"), and keeps TX and RX separate because a
+         * the AT command wants ("0008"), and keeps TX and RX separate because a
          * repeater normally needs a different one in each direction.
          */
         sa818_cfg_t cfg;
@@ -168,7 +171,7 @@ static void console_run_line(char *line)
             }
         }
         char slog[160];
-        if (sa818_cfg_update(&cfg, slog, sizeof(slog)) == ESP_OK) {
+        if (sa818_cfg_update_fields(&cfg, SA818_EDIT_TXT | SA818_EDIT_RXT, slog, sizeof(slog)) == ESP_OK) {
             printf("  ctcss -> %s\n", slog);
         } else {
             printf("  ctcss: the module rejected the profile\n");
@@ -178,9 +181,11 @@ static void console_run_line(char *line)
     } else if (!strcmp(argv[0], "vol")) {
         if (argc < 2) { printf("  usage: vol 1-8   (module AF volume)\n"); return; }
         cfg.volume = atoi(argv[1]);
+        edit_fields = SA818_EDIT_VOLUME;
     } else if (!strcmp(argv[0], "sq")) {
         if (argc < 2) { printf("  usage: sq 0-8   (0 = monitor)\n"); return; }
         cfg.squelch = atoi(argv[1]);
+        edit_fields = SA818_EDIT_SQ;
     } else if (!strcmp(argv[0], "pd")) {
         if (argc < 2) { printf("  usage: pd 0|1   (drive the module's PD pin manually)\n"); return; }
         board_sa818_pd_raw(atoi(argv[1]));
@@ -665,7 +670,7 @@ static void console_run_line(char *line)
 
     if (changed) {
         char summary[80];
-        esp_err_t err = sa818_cfg_update(&cfg, summary, sizeof(summary));
+        esp_err_t err = sa818_cfg_update_fields(&cfg, edit_fields, summary, sizeof(summary));
         bridge_apply();
         printf("  %s -> %s\n", esp_err_to_name(err), summary);
         printf("  (press g to show, or t then y to transmit on this frequency)\n");
@@ -1967,8 +1972,7 @@ void app_main(void)
     if (board_safe_state_init() != ESP_OK) {
         ESP_LOGE(TAG, "FATAL: could not set the safe state -- halting");
         for (;;) {
-            sa818_cfg_refresh_tick();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
@@ -2110,8 +2114,9 @@ void app_main(void)
         ESP_LOGW(TAG, "front panel init failed (LEDs/keys unavailable)");
     }
 
-    /* 4. idle: the console and the heartbeat tasks own the rest */
+    /* Maintenance only after the full station has remained idle. */
     for (;;) {
+        sa818_cfg_refresh_tick();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

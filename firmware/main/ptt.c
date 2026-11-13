@@ -15,6 +15,7 @@
 
 #include "board_hw.h"
 #include "sa818_cfg.h"
+#include "rx_guard.h"
 
 static const char *TAG = "ptt";
 
@@ -37,6 +38,37 @@ static portMUX_TYPE s_lock_init = portMUX_INITIALIZER_UNLOCKED;
 static ptt_owner_t s_owner;
 static uint32_t s_owner_token;
 static bool s_local_audio;
+#define PTT_TRACE_CAPACITY 64
+static ptt_trace_event_t s_trace[PTT_TRACE_CAPACITY];
+static uint32_t s_trace_sequence;
+static size_t s_trace_used;
+static portMUX_TYPE s_trace_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_traced_pad;
+
+void ptt_trace_note(unsigned kind, unsigned source, uint32_t a, uint32_t b)
+{
+    const uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000);
+    taskENTER_CRITICAL(&s_trace_mux);
+    const uint32_t sequence = ++s_trace_sequence;
+    s_trace[(sequence - 1) % PTT_TRACE_CAPACITY] = (ptt_trace_event_t){ms, sequence,
+        (uint16_t)kind, (uint16_t)source, a, b};
+    if (s_trace_used < PTT_TRACE_CAPACITY) { ++s_trace_used; }
+    taskEXIT_CRITICAL(&s_trace_mux);
+}
+
+size_t ptt_trace_snapshot(ptt_trace_event_t *out, size_t capacity, uint32_t *sequence)
+{
+    if (!out || !capacity) { return 0; }
+    taskENTER_CRITICAL(&s_trace_mux);
+    const size_t n = capacity < s_trace_used ? capacity : s_trace_used;
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = s_trace[(s_trace_sequence - n + i) % PTT_TRACE_CAPACITY];
+    }
+    if (sequence) { *sequence = s_trace_sequence; }
+    taskEXIT_CRITICAL(&s_trace_mux);
+    return n;
+}
+
 
 void ptt_control_lock(void)
 {
@@ -86,7 +118,18 @@ static void pad_apply(void)
         return;
     }
     const bool machine = (s_state == PTT_TX) && s_rf_keying;
-    board_ptt_assert(machine || s_bridge_keyed);
+    const bool keyed = machine || s_bridge_keyed;
+    board_ptt_assert(keyed);
+    if (keyed != s_traced_pad) {
+        s_traced_pad = keyed;
+        ptt_trace_note(keyed ? PTT_TRACE_RF_ON : PTT_TRACE_RF_OFF, (unsigned)s_owner,
+                       s_owner_token, machine ? 1 : 2);
+    }
+    /* Observe the OR of both domains, never a logical/network-only TX or an
+     * OFF request that did not actually release the physical transmitter. */
+    const uint8_t source = machine ? RX_GUARD_TALK :
+        (s_owner == PTT_OWNER_SDR ? RX_GUARD_SDR : RX_GUARD_NETWORK);
+    rx_guard_rf_state(keyed, source);
 }
 
 /* The one and only place the machine keys the radio. */

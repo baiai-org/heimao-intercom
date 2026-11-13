@@ -14,6 +14,8 @@
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "voice_tail.h"
+#include <stdatomic.h>
+#include "freertos/idf_additions.h"
 #include "audio_i2s.h"   /* RATE follows the stream rate */
 #include "g711.h"
 #include "minimp3.h"
@@ -76,8 +78,7 @@ static size_t s_custom_off = 0;
 static size_t s_custom_win = 0;
 static size_t s_nvs_len = 0;
 static uint32_t s_stored_rate;   /* rate the file was converted to, 0 = unknown */
-static volatile bool s_storing = false;
-static SemaphoreHandle_t s_store_sem = NULL;
+static atomic_bool s_storing;
 
 /* ------------------------------------------------------- built-in synth */
 
@@ -580,9 +581,6 @@ void voice_tail_init(void)
     spiffs_up();
     nvs_load();
     custom_load();                    /* cache the uploaded tone in PSRAM */
-    if (!s_store_sem) {
-        s_store_sem = xSemaphoreCreateBinary();
-    }
     if (s_sel == TAIL_CUSTOM && s_custom_win == 0) {
         /* Selected a custom tone that is no longer on flash (wiped?). */
         ESP_LOGW(TAG, "custom tail selected but not available -- falling back");
@@ -791,7 +789,7 @@ static esp_err_t wav_store(const uint8_t *w, size_t len)
         return ESP_ERR_INVALID_SIZE;     /* shorter than 0.2 s */
     }
 
-    int16_t *pcm = malloc(CUSTOM_MAX_STORED * sizeof(int16_t));
+    int16_t *pcm = heap_caps_malloc(CUSTOM_MAX_STORED * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!pcm) {
         return ESP_ERR_NO_MEM;
     }
@@ -883,14 +881,30 @@ typedef struct {
     uint8_t *data;      /* owned by the task */
     size_t len;
     esp_err_t err;
+    int16_t *pcm;
+    size_t samples;
+    SemaphoreHandle_t done;
+    atomic_uint refs;
+    atomic_bool cancelled;
 } mp3_job_t;
+
+/* The worker never writes Flash. The last owner reclaims timed-out jobs. */
+static void mp3_job_release(mp3_job_t *job)
+{
+    if (atomic_fetch_sub(&job->refs, 1) != 1) { return; }
+    free(job->data);
+    free(job->pcm);
+    vSemaphoreDelete(job->done);
+    free(job);
+    atomic_store(&s_storing, false);
+}
 
 static void mp3_conv_task(void *arg)
 {
     mp3_job_t *job = (mp3_job_t *)arg;
     esp_err_t err = ESP_ERR_INVALID_ARG;
 
-    int16_t *pcm = malloc(CUSTOM_MAX_STORED * sizeof(int16_t));
+    int16_t *pcm = heap_caps_malloc(CUSTOM_MAX_STORED * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     size_t out_n = 0;
     if (pcm) {
         /*
@@ -898,7 +912,7 @@ static void mp3_conv_task(void *arg)
          * so keep everything else off the task stack: the decoder state
          * and the frame buffer are heap objects.
          */
-        mp3dec_t *dec = (mp3dec_t *)malloc(sizeof(mp3dec_t));
+        mp3dec_t *dec = heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_SPIRAM);
         int16_t *frame = (int16_t *)heap_caps_malloc(
                              2 * MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t),
                              MALLOC_CAP_SPIRAM);
@@ -909,11 +923,12 @@ static void mp3_conv_task(void *arg)
         size_t pos = 0;
         int frames = 0;
         bool ok = (dec != NULL && frame != NULL);
+        if (!ok) { err = ESP_ERR_NO_MEM; }
         if (ok) {
             mp3dec_init(dec);
         }
 
-        while (pos < job->len && ok) {
+        while (pos < job->len && ok && !atomic_load(&job->cancelled)) {
             const int got = mp3dec_decode_frame(dec, job->data + pos,
                                                 (int)(job->len - pos),
                                                 frame, &info);
@@ -938,6 +953,7 @@ static void mp3_conv_task(void *arg)
                 mono = (int16_t *)heap_caps_malloc(mono_cap * sizeof(int16_t),
                                                   MALLOC_CAP_SPIRAM);
                 if (!mono) {
+                    err = ESP_ERR_NO_MEM;
                     ok = false;
                     break;
                 }
@@ -967,9 +983,9 @@ static void mp3_conv_task(void *arg)
         free(mono);
         free(frame);
         free(dec);
-        if (ok) {
-            err = custom_store_finish(pcm, out_n);
-            pcm = NULL;
+        if (ok && !atomic_load(&job->cancelled) && out_n >= RATE / 5) {
+            job->pcm = pcm; job->samples = out_n;
+            err = ESP_OK; pcm = NULL;
         }
     } else {
         err = ESP_ERR_NO_MEM;
@@ -977,67 +993,53 @@ static void mp3_conv_task(void *arg)
     if (pcm) {
         free(pcm);
     }
+    if (atomic_load(&job->cancelled)) { err = ESP_ERR_TIMEOUT; }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "mp3: store failed: %s", esp_err_to_name(err));
     }
     job->err = err;
     free(job->data);
     job->data = NULL;
-    s_storing = false;
-    xSemaphoreGive(s_store_sem);
-    vTaskDelete(NULL);
+    xSemaphoreGive(job->done);
+    mp3_job_release(job);
+    vTaskDeleteWithCaps(NULL);
 }
 
-/*
- * The decoder's scratch is ~16 KB of stack (mp3dec_decode_frame).  Task
- * stacks must come from contiguous internal DRAM, and the ~36 KB of free
- * DRAM at runtime is too tight for that (fragmentation -- a 26 KB create
- * failed on a boot where the same size worked on the previous one), so
- * this short-lived task runs on a static PSRAM stack instead.
- */
-#define MP3_TASK_STACK  24576
-static uint8_t s_mp3_stack[MP3_TASK_STACK] __attribute__((aligned(16)));
-static StaticTask_t s_mp3_tcb;
-
+#define MP3_TASK_STACK 24576
 static esp_err_t mp3_store(const uint8_t *w, size_t len)
 {
-    if (s_storing) {
-        return ESP_ERR_INVALID_STATE;   /* a conversion is already running */
-    }
-    if (!s_store_sem) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&s_storing, &expected, true)) { return ESP_ERR_INVALID_STATE; }
+    mp3_job_t *job = calloc(1, sizeof(*job));
+    if (!job) { atomic_store(&s_storing, false); return ESP_ERR_NO_MEM; }
+    job->done = xSemaphoreCreateBinary();
+    job->data = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!job->done || !job->data) {
+        if (job->done) { vSemaphoreDelete(job->done); }
+        free(job->data); free(job); atomic_store(&s_storing, false);
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "mp3: %u bytes; free DRAM %u PSRAM %u", (unsigned)len,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    uint8_t *copy = malloc(len);
-    if (!copy) {
-        return ESP_ERR_NO_MEM;
+    memcpy(job->data, w, len); job->len = len; job->err = ESP_ERR_INVALID_ARG;
+    atomic_init(&job->refs, 2); atomic_init(&job->cancelled, false);
+    TaskHandle_t task = NULL;
+    if (xTaskCreateWithCaps(mp3_conv_task, "mp3conv", MP3_TASK_STACK, job, 10, &task,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        atomic_store(&job->refs, 1); mp3_job_release(job); return ESP_ERR_NO_MEM;
     }
-    memcpy(copy, w, len);
-    s_storing = true;
-
-    static mp3_job_t job;               /* the handler waits for completion */
-    job.data = copy;
-    job.len = len;
-    job.err = ESP_ERR_INVALID_ARG;
-
-    TaskHandle_t t = xTaskCreateStatic(mp3_conv_task, "mp3conv",
-                                       MP3_TASK_STACK, &job, 10,
-                                       s_mp3_stack, &s_mp3_tcb);
-    if (!t) {
-        ESP_LOGW(TAG, "mp3: task create failed");
-        free(copy);
-        s_storing = false;
-        return ESP_ERR_NO_MEM;
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    if (xSemaphoreTake(job->done, pdMS_TO_TICKS(30000)) == pdTRUE) {
+        err = job->err;
+        if (err == ESP_OK) {
+            /* HTTP/console callers have INTERNAL stacks: persistence stays here. */
+            int16_t *pcm = job->pcm; job->pcm = NULL;
+            err = custom_store_finish(pcm, job->samples);
+        }
+    } else {
+        atomic_store(&job->cancelled, true);
+        ESP_LOGW(TAG, "mp3 conversion timed out; no background persistence");
     }
-    if (xSemaphoreTake(s_store_sem, pdMS_TO_TICKS(30000)) != pdTRUE) {
-        /* The task is still converting; it clears s_storing on exit, and a
-         * second upload meanwhile simply gets "already running". */
-        ESP_LOGW(TAG, "mp3 conversion slow -- still finishing in background");
-        return ESP_OK;
-    }
-    return job.err;
+    mp3_job_release(job);
+    return err;
 }
 
 esp_err_t tail_custom_store(const uint8_t *w, size_t len)
@@ -1046,7 +1048,11 @@ esp_err_t tail_custom_store(const uint8_t *w, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
     if (len >= 44 && memcmp(w, "RIFF", 4) == 0 && memcmp(w + 8, "WAVE", 4) == 0) {
-        return wav_store(w, len);
+        bool expected = false;
+        if (!atomic_compare_exchange_strong(&s_storing, &expected, true)) { return ESP_ERR_INVALID_STATE; }
+        const esp_err_t err = wav_store(w, len);
+        atomic_store(&s_storing, false);
+        return err;
     }
     if ((w[0] == 0xFF && (w[1] & 0xE0) == 0xE0) ||
         (len >= 3 && w[0] == 'I' && w[1] == 'D' && w[2] == '3')) {

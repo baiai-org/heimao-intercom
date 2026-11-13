@@ -21,7 +21,7 @@ git push -u origin main
 ## 日常发布
 
 1. 更新版本：
-   - 固件：修改 `firmware/VERSION`（如 `r11-84`），并把 `flasher/brand.json` 的 `default_bin` 同步为 `heimao-full-r11-84.bin`；
+   - 固件：修改 `firmware/VERSION`（如 `r11-93`），并把 `flasher/brand.json` 的 `default_bin` 同步为 `heimao-full-r11-93.bin`；
    - APP：修改 `app/app/build.gradle.kts` 的 `versionCode` / `versionName`；
    - 刷机工具：修改 `flasher/brand.json` 的 `version` 与 `flasher/version_info.txt`；
    - 更新 `CHANGELOG.md`。
@@ -52,10 +52,12 @@ git push origin main --tags
 > **v1.0.0 首次发布**建议手工上传已验证的交付二进制（`3ede0b50…` full.bin、`f34ed6cc…` OTA、`6e498669…` APK），它们与源码提交 `c9d20b4` / `63ab6d3` 对应；Actions 重建的产物哈希不同（编译器、时间戳、证书与签名环境差异），不要混用。后续版本再以 Actions 产物为准。
 
 5. 发布前人工核对 Release：
-   - 三个二进制与 `SHA256SUMS.txt` 都在；
+   - 四个二进制（APK、full、OTA、EXE）与 `SHA256SUMS.txt` 都在；
    - APK 的 versionCode 与 CHANGELOG 一致；
-   - 刷机工具 `--diagnose` 报告 `embedded_firmware=false`、`serial_opened=false`；
+   - 刷机工具 `--diagnose` 报告 `embedded_firmware=false`、`bundled_firmware_files=[]`、`serial_opened=false`；
    - 固件版本串是 `firmware/VERSION` 的值。
+
+工具构建入口已移除内嵌选项；必须使用隔离资源目录并检查最终EXE。正式交付包包含本地交接资料时，不要直接把整包当成GitHub资产：使用单独整理的GitHub发布文件及源码ZIP。
 
 ## 安全与合规检查
 

@@ -88,6 +88,25 @@ static atomic_int s_band = SA818_BAND_UNSET;
 static atomic_bool s_ready;
 static atomic_bool s_configuring;
 static SemaphoreHandle_t s_apply_mutex;
+static atomic_uint s_cfg_revision = 1, s_applied_revision, s_apply_stage, s_apply_attempts;
+static atomic_int s_apply_error;
+static atomic_bool s_recovery_pending;
+static atomic_uint s_refresh_generation, s_refresh_done;
+static bool station_busy(void);
+
+void sa818_cfg_status(sa818_cfg_status_t *out)
+{
+    if (!out) { return; }
+    out->revision = atomic_load(&s_cfg_revision);
+    out->applied_revision = atomic_load(&s_applied_revision);
+    out->stage = atomic_load(&s_apply_stage);
+    out->error = atomic_load(&s_apply_error);
+    out->attempts = atomic_load(&s_apply_attempts);
+    out->ready = sa818_cfg_tx_ready();
+    out->recovery_pending = atomic_load(&s_recovery_pending);
+    out->maintenance_pending = atomic_load(&s_refresh_generation) != atomic_load(&s_refresh_done);
+}
+
 
 /* Keep the legacy profile blob layout while allowing one-time migrations to
  * rewrite only the filter flags. */
@@ -174,6 +193,10 @@ esp_err_t sa818_cfg_set_band(sa818_band_t band)
         if (e == ESP_OK && band != sa818_cfg_band()) {
             atomic_store(&s_ready, false);
             atomic_store(&s_band, band);
+            atomic_fetch_add(&s_cfg_revision, 1);
+            atomic_store(&s_applied_revision, 0);
+            atomic_store(&s_recovery_pending, false);
+            atomic_store(&s_refresh_done, atomic_load(&s_refresh_generation));
             ESP_LOGI(TAG, "module band -> %s; waiting for panel profile", sa818_band_name(band));
         }
     }
@@ -190,7 +213,7 @@ esp_err_t sa818_cfg_validate(const sa818_cfg_t *cfg, char *log, size_t log_len)
     else if (band == SA818_BAND_UNSET) { why = "select installed module band in panel first"; }
     else if (!sa818_freq_pair_valid(band, cfg->tx_mhz, cfg->rx_mhz)) {
         if (log && log_len) {
-            snprintf(log, log_len, "%s TX/RX must be %.4f-%.4f MHz on 12.5k grid",
+            snprintf(log, log_len, "%s TX/RX must be %.4f-%.4f MHz on 0.5k setting grid",
                      sa818_band_name(band), sa818_band_min(band), sa818_band_max(band));
         }
         return ESP_ERR_INVALID_ARG;
@@ -260,7 +283,17 @@ static bool ack_ok(const char *reply, const char *tag)
     return !strcmp(suffix, ":0");
 }
 
-static esp_err_t apply_profile(const sa818_cfg_t *cfg, bool persist, char *log, size_t log_len)
+static bool profile_equal(const sa818_cfg_t *a, const sa818_cfg_t *b)
+{
+    return a->bandwidth == b->bandwidth && a->tx_mhz == b->tx_mhz && a->rx_mhz == b->rx_mhz
+        && !strcmp(a->tx_ctcss, b->tx_ctcss) && !strcmp(a->rx_ctcss, b->rx_ctcss)
+        && a->squelch == b->squelch && a->volume == b->volume && a->high_power == b->high_power
+        && a->tail == b->tail && a->filter_pre_deemph == b->filter_pre_deemph
+        && a->filter_highpass == b->filter_highpass && a->filter_lowpass == b->filter_lowpass;
+}
+
+static esp_err_t apply_profile_locked(const sa818_cfg_t *cfg, bool persist, char *log, size_t log_len,
+                               bool current_only)
 {
     esp_err_t e = sa818_cfg_validate(cfg, log, log_len);
     if (e != ESP_OK) { return e; }
@@ -268,19 +301,39 @@ static esp_err_t apply_profile(const sa818_cfg_t *cfg, bool persist, char *log, 
     sa818_cfg_t effective = *cfg;
     effective.filter_highpass = 1;
     cfg = &effective;
-    if (!s_apply_mutex || xSemaphoreTake(s_apply_mutex, pdMS_TO_TICKS(2500)) != pdTRUE) {
-        if (log && log_len) { snprintf(log, log_len, "radio configuration busy"); }
-        return ESP_ERR_INVALID_STATE;
+    e = sa818_cfg_validate(cfg, log, log_len); /* validate the normalized effective profile under the same lock */
+    if (e != ESP_OK) { return e; }
+    if (current_only) {
+        sa818_cfg_t latest;
+        /* The idle worker may have loaded its snapshot before an operator's
+         * channel change acquired this mutex. Never re-apply that stale snapshot. */
+        if (station_busy() || sa818_cfg_load(&latest) != ESP_OK
+            || !profile_equal(cfg, &latest)) {
+            return ESP_ERR_INVALID_STATE;
+        }
     }
-    e = sa818_cfg_validate(cfg, log, log_len); /* band may have changed while waiting */
-    if (e != ESP_OK) { xSemaphoreGive(s_apply_mutex); return e; }
+    atomic_fetch_add(&s_apply_attempts, 1);
+    atomic_store(&s_apply_error, 0);
+    atomic_store(&s_apply_stage, SA818_APPLY_BUSY);
+#ifdef ESP_PLATFORM
+    ptt_control_lock();
+#endif
     atomic_store(&s_configuring, true);
-    if (board_ptt_is_asserted()) {
-        if (log && log_len) { snprintf(log, log_len, "release PTT before tuning"); }
+    if (board_ptt_is_asserted() || ptt_get_state() != PTT_IDLE || (current_only && station_busy())
+#ifdef ESP_PLATFORM
+        || ptt_owner() != PTT_OWNER_NONE
+#endif
+       ) {
+        if (log && log_len) { snprintf(log, log_len, "发射或尾音尚未结束，请松开 PTT 后重试"); }
         atomic_store(&s_configuring, false);
-        xSemaphoreGive(s_apply_mutex);
+#ifdef ESP_PLATFORM
+        ptt_control_unlock();
+#endif
         return ESP_ERR_INVALID_STATE;
     }
+#ifdef ESP_PLATFORM
+    ptt_control_unlock();
+#endif
     atomic_store(&s_ready, false);
     char reply[96];
     sa818_profile_t p = {
@@ -291,46 +344,130 @@ static esp_err_t apply_profile(const sa818_cfg_t *cfg, bool persist, char *log, 
     memcpy(p.tx_ctcss, cfg->tx_ctcss, sizeof(p.tx_ctcss));
     memcpy(p.rx_ctcss, cfg->rx_ctcss, sizeof(p.rx_ctcss));
     const char *failed = NULL;
+    atomic_store(&s_apply_stage, SA818_APPLY_GROUP);
     if (sa818_set_group(&p, reply, sizeof(reply)) != ESP_OK ||
-        !ack_ok(reply, "+DMOSETGROUP")) { failed = "DMOSETGROUP rejected or timed out"; }
-    else if (sa818_set_volume(cfg->volume, reply, sizeof(reply)) != ESP_OK ||
-             !ack_ok(reply, "+DMOSETVOLUME")) { failed = "DMOSETVOLUME rejected or timed out"; }
-    else if (sa818_set_filter(cfg->filter_pre_deemph, cfg->filter_highpass,
-                             cfg->filter_lowpass, reply, sizeof(reply)) != ESP_OK ||
-             !ack_ok(reply, "+DMOSETFILTER")) { failed = "SETFILTER rejected or timed out"; }
-    else if (sa818_set_tail(false, reply, sizeof(reply)) != ESP_OK ||
-             !ack_ok(reply, "+DMOSETTAIL")) { failed = "SETTAIL rejected or timed out"; }
-    if (!failed && persist && store_profile(cfg) != ESP_OK) {
-        failed = "profile applied but storage failed";
+        !ack_ok(reply, "+DMOSETGROUP")) { failed = "模块拒绝频率或响应超时，请重新提交可用频率"; }
+    if (!failed) {
+        atomic_store(&s_apply_stage, SA818_APPLY_VOLUME);
+        if (sa818_set_volume(cfg->volume, reply, sizeof(reply)) != ESP_OK ||
+            !ack_ok(reply, "+DMOSETVOLUME")) { failed = "DMOSETVOLUME rejected or timed out"; }
+    }
+    if (!failed) {
+        atomic_store(&s_apply_stage, SA818_APPLY_FILTER);
+        if (sa818_set_filter(cfg->filter_pre_deemph, cfg->filter_highpass,
+                            cfg->filter_lowpass, reply, sizeof(reply)) != ESP_OK ||
+            !ack_ok(reply, "+DMOSETFILTER")) { failed = "SETFILTER rejected or timed out"; }
+    }
+    if (!failed) {
+        atomic_store(&s_apply_stage, SA818_APPLY_TAIL);
+        if (sa818_set_tail(false, reply, sizeof(reply)) != ESP_OK ||
+            !ack_ok(reply, "+DMOSETTAIL")) { failed = "SETTAIL rejected or timed out"; }
+    }
+    if (!failed && persist) {
+        atomic_store(&s_apply_stage, SA818_APPLY_STORAGE);
+        if (store_profile(cfg) != ESP_OK) { failed = "profile applied but storage failed"; }
+        else { atomic_fetch_add(&s_cfg_revision, 1); }
     }
     if (!failed) {
         board_sa818_high_power(cfg->high_power != 0);
+        sa818_cfg_t saved;
+        const bool matches = sa818_cfg_load(&saved) == ESP_OK && profile_equal(cfg, &saved);
+        atomic_store(&s_applied_revision, matches ? atomic_load(&s_cfg_revision) : 0);
+        atomic_store(&s_recovery_pending, false);
+        atomic_store(&s_apply_stage, SA818_APPLY_READY);
         atomic_store(&s_ready, true);
-        ESP_LOGI(TAG, "module filters acknowledged: pre/de=%d highpass=%d lowpass=%d (0=on)",
-                 cfg->filter_pre_deemph, cfg->filter_highpass, cfg->filter_lowpass);
+    } else {
+        atomic_store(&s_applied_revision, 0);
+        atomic_store(&s_apply_error, ESP_FAIL);
+        atomic_store(&s_recovery_pending, true);
+        if (!current_only) { atomic_fetch_add(&s_refresh_generation, 1); }
     }
     if (log && log_len) {
         if (failed) { snprintf(log, log_len, "%s; RF blocked", failed); }
         else {
-            snprintf(log, log_len, "%s %.4f/%.4f MHz bw=%s sq=%d vol=%d pwr=%s",
-                     sa818_band_name(sa818_cfg_band()), cfg->tx_mhz, cfg->rx_mhz,
+            char tx[16], rx[16];
+            sa818_freq_format(cfg->tx_mhz, tx, sizeof(tx));
+            sa818_freq_format(cfg->rx_mhz, rx, sizeof(rx));
+            snprintf(log, log_len, "%s %s/%s MHz bw=%s sq=%d vol=%d pwr=%s",
+                     sa818_band_name(sa818_cfg_band()), tx, rx,
                      cfg->bandwidth ? "25k" : "12.5k", cfg->squelch, cfg->volume,
                      cfg->high_power ? "high (H/L released)" : "low (H/L grounded)");
         }
     }
+#ifdef ESP_PLATFORM
+    ptt_trace_note(failed ? PTT_TRACE_CFG_FAIL : PTT_TRACE_CFG_OK, current_only ? 1 : 0,
+                   atomic_load(&s_apply_stage), atomic_load(&s_cfg_revision));
+#endif
     atomic_store(&s_configuring, false);
-    xSemaphoreGive(s_apply_mutex);
     return failed ? ESP_FAIL : ESP_OK;
+}
+
+static esp_err_t apply_profile(const sa818_cfg_t *cfg, bool persist, char *log, size_t log_len,
+                               bool current_only)
+{
+    if (!s_apply_mutex || xSemaphoreTake(s_apply_mutex, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        if (log && log_len) { snprintf(log, log_len, "模块正在配置，请稍后重试"); }
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t err = apply_profile_locked(cfg, persist, log, log_len, current_only);
+    xSemaphoreGive(s_apply_mutex);
+    return err;
+}
+
+/* Merge only edited fields into the newest persisted profile while holding
+ * the same lock through UART ACKs and NVS commit. Full channel loads still
+ * deliberately replace all fields via sa818_cfg_update(). */
+static esp_err_t update_edit(const sa818_cfg_t *before, const sa818_cfg_t *after, uint32_t fields,
+                              char *log, size_t log_len)
+{
+    if (!before || !after) { return ESP_ERR_INVALID_ARG; }
+    if (!s_apply_mutex || xSemaphoreTake(s_apply_mutex, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        if (log && log_len) { snprintf(log, log_len, "模块正在配置，请稍后重试"); }
+        return ESP_ERR_INVALID_STATE;
+    }
+    sa818_cfg_t latest;
+    esp_err_t err = sa818_cfg_load(&latest);
+    if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+#define MERGE(field, bit) if ((fields & (bit)) || (!fields && before->field != after->field)) { latest.field = after->field; }
+        MERGE(bandwidth, SA818_EDIT_BW); MERGE(tx_mhz, SA818_EDIT_TX); MERGE(rx_mhz, SA818_EDIT_RX);
+        MERGE(squelch, SA818_EDIT_SQ); MERGE(volume, SA818_EDIT_VOLUME);
+        MERGE(high_power, SA818_EDIT_POWER); MERGE(tail, SA818_EDIT_TAIL);
+        MERGE(filter_pre_deemph, SA818_EDIT_FILTER_PRE); MERGE(filter_highpass, SA818_EDIT_FILTER_HP);
+        MERGE(filter_lowpass, SA818_EDIT_FILTER_LP);
+#undef MERGE
+        if ((fields & SA818_EDIT_TXT) || (!fields && memcmp(before->tx_ctcss, after->tx_ctcss, sizeof(latest.tx_ctcss)))) {
+            memcpy(latest.tx_ctcss, after->tx_ctcss, sizeof(latest.tx_ctcss));
+        }
+        if ((fields & SA818_EDIT_RXT) || (!fields && memcmp(before->rx_ctcss, after->rx_ctcss, sizeof(latest.rx_ctcss)))) {
+            memcpy(latest.rx_ctcss, after->rx_ctcss, sizeof(latest.rx_ctcss));
+        }
+        err = apply_profile_locked(&latest, true, log, log_len, false);
+    } else if (log && log_len) { snprintf(log, log_len, "当前配置读取失败，未下发修改"); }
+    xSemaphoreGive(s_apply_mutex);
+    return err;
+}
+
+esp_err_t sa818_cfg_update_changed(const sa818_cfg_t *before, const sa818_cfg_t *after,
+                                  char *log, size_t log_len)
+{
+    return update_edit(before, after, 0, log, log_len);
+}
+
+esp_err_t sa818_cfg_update_fields(const sa818_cfg_t *values, uint32_t fields,
+                                 char *log, size_t log_len)
+{
+    if (!fields || (fields & ~4095u)) { return ESP_ERR_INVALID_ARG; }
+    return update_edit(values, values, fields, log, log_len);
 }
 
 esp_err_t sa818_cfg_apply(const sa818_cfg_t *cfg, char *log, size_t log_len)
 {
-    return apply_profile(cfg, false, log, log_len);
+    return apply_profile(cfg, false, log, log_len, false);
 }
 
 esp_err_t sa818_cfg_update(const sa818_cfg_t *cfg, char *log, size_t log_len)
 {
-    return apply_profile(cfg, true, log, log_len);
+    return apply_profile(cfg, true, log, log_len, false);
 }
 
 esp_err_t sa818_cfg_reset(void)
@@ -350,6 +487,11 @@ esp_err_t sa818_cfg_reset(void)
             if (e == ESP_ERR_NVS_NOT_FOUND) { e = ESP_OK; }
             if (e == ESP_OK) { e = nvs_commit(h); }
             nvs_close(h);
+            if (e == ESP_OK) {
+                atomic_fetch_add(&s_cfg_revision, 1); atomic_store(&s_applied_revision, 0);
+                atomic_store(&s_recovery_pending, false);
+                atomic_store(&s_refresh_done, atomic_load(&s_refresh_generation));
+            }
         }
     }
     atomic_store(&s_configuring, false);
@@ -369,7 +511,11 @@ esp_err_t sa818_cfg_set_power(bool high, char *log, size_t log_len)
     if (e == ESP_OK) {
         cfg.high_power = high ? 1 : 0;
         e = store_profile(&cfg);
-        if (e == ESP_OK) { board_sa818_high_power(high); }
+        if (e == ESP_OK) {
+            atomic_fetch_add(&s_cfg_revision, 1);
+            board_sa818_high_power(high);
+            atomic_store(&s_applied_revision, board_sa818_power_pending() ? 0 : atomic_load(&s_cfg_revision));
+        }
     }
     if (log && log_len) {
         snprintf(log, log_len, "%s", e != ESP_OK ? "configure radio before changing power" :
@@ -386,7 +532,7 @@ esp_err_t sa818_cfg_set_squelch(int squelch, char *log, size_t log_len)
     sa818_cfg_t cfg;
     if (sa818_cfg_load(&cfg) != ESP_OK) { return ESP_ERR_INVALID_STATE; }
     cfg.squelch = squelch;
-    return sa818_cfg_update(&cfg, log, log_len);
+    return sa818_cfg_update_fields(&cfg, SA818_EDIT_SQ, log, log_len);
 }
 
 void sa818_cfg_print(const sa818_cfg_t *cfg)
@@ -394,8 +540,11 @@ void sa818_cfg_print(const sa818_cfg_t *cfg)
     if (!cfg) {
         return;
     }
-    printf("  TX           : %.4f MHz\n", cfg->tx_mhz);
-    printf("  RX           : %.4f MHz%s\n", cfg->rx_mhz,
+    char tx[16], rx[16];
+    if (!sa818_freq_format(cfg->tx_mhz, tx, sizeof(tx))) { strcpy(tx, "unset/invalid"); }
+    if (!sa818_freq_format(cfg->rx_mhz, rx, sizeof(rx))) { strcpy(rx, "unset/invalid"); }
+    printf("  TX           : %s MHz\n", tx);
+    printf("  RX           : %s MHz%s\n", rx,
            (cfg->tx_mhz != cfg->rx_mhz) ? "   (split / repeater)" : "");
     printf("  bandwidth    : %s\n", cfg->bandwidth ? "25 kHz" : "12.5 kHz");
     printf("  TX CTCSS     : %s%s\n", cfg->tx_ctcss,
@@ -418,50 +567,56 @@ void sa818_cfg_print(const sa818_cfg_t *cfg)
  * seconds more.  A retune mutes the receiver, so it must never land inside a
  * call.  This path deliberately logs nothing.
  */
-static bool s_refresh_pending;
-static int64_t s_idle_since_us;
-static int64_t s_refresh_due_us;
+static int64_t s_idle_since_us, s_refresh_due_us;
+static unsigned s_refresh_seen, s_refresh_tries;
 
 void sa818_cfg_arm_refresh(void)
 {
-    s_refresh_pending = true;
-    s_idle_since_us = 0;
-    s_refresh_due_us = 0;
+    atomic_fetch_add(&s_refresh_generation, 1);
 }
 
 static bool station_busy(void)
 {
-    if (ptt_get_state() != PTT_IDLE) { return true; }
-    if (voice_module_squelch_open()) { return true; }
-    if (voice_bridge_level() > 0) { return true; }
-    if (voice_sdr_tail_active()) { return true; }
-    return false;
+    return ptt_get_state() != PTT_IDLE || board_ptt_is_asserted() ||
+           voice_rf_carrier_present() || voice_network_busy() ||
+           voice_bridge_level() > 0 || voice_sdr_tail_active();
 }
 
 void sa818_cfg_refresh_tick(void)
 {
-    if (!s_refresh_pending) { return; }
-    const int64_t now = esp_timer_get_time();
-    if (station_busy()) {
-        s_idle_since_us = 0;            /* the window starts over when it clears */
-        s_refresh_due_us = 0;
+    const unsigned generation = atomic_load(&s_refresh_generation);
+    if (generation == atomic_load(&s_refresh_done)) { return; }
+    /* A healthy acknowledged profile needs no periodic retune. Reapplying it
+     * after every over can mute the beginning of a new call arriving mid-AT.
+     * Only uncertain/failed configuration enters idle recovery. */
+    if (!atomic_load(&s_recovery_pending) && sa818_cfg_tx_ready()) {
+        atomic_store(&s_refresh_done, generation);
         return;
     }
-    if (s_idle_since_us == 0) { s_idle_since_us = now; return; }
-    if (s_refresh_due_us == 0) {
+    if (generation != s_refresh_seen) {
+        s_refresh_seen = generation; s_refresh_tries = 0;
+        s_idle_since_us = s_refresh_due_us = 0;
+    }
+    const int64_t now = esp_timer_get_time();
+    if (station_busy()) { s_idle_since_us = s_refresh_due_us = 0; return; }
+    if (!s_idle_since_us) { s_idle_since_us = now; return; }
+    if (!s_refresh_due_us) {
         if (now - s_idle_since_us < 1000000LL) { return; }
-        s_refresh_due_us = now + 10000000LL;  /* one second confirmed, ten more to go */
+        s_refresh_due_us = now + 10000000LL;
         return;
     }
     if (now < s_refresh_due_us) { return; }
     sa818_cfg_t cfg;
-    if (sa818_cfg_load(&cfg) == ESP_OK) {
+    esp_err_t err = sa818_cfg_load(&cfg);
+    if (err == ESP_OK) {
         s_quiet_apply = true;
-        (void)apply_profile(&cfg, true, NULL, 0);
-        bridge_apply();
+        err = apply_profile(&cfg, false, NULL, 0, true); /* never rewrites NVS */
         s_quiet_apply = false;
+        bridge_apply();
     }
-    s_refresh_pending = false;
-    s_idle_since_us = 0;
-    s_refresh_due_us = 0;
+    ++s_refresh_tries;
+    if (err == ESP_OK || s_refresh_tries >= 3) {
+        atomic_store(&s_refresh_done, generation);
+    }
+    s_idle_since_us = s_refresh_due_us = 0;
 }

@@ -38,10 +38,13 @@ def worker_command():
 
 def default_firmware():
     external = home_directory() / DEFAULT_BIN
-    if external.exists():
-        return external
-    internal = resource_root() / 'assets' / DEFAULT_BIN
-    return internal if internal.exists() else None
+    return external if external.is_file() else None
+
+
+def bundled_firmware_files():
+    """Inspect the bundle independently of any externally selected image."""
+    assets = resource_root() / 'assets'
+    return sorted(str(p.relative_to(resource_root())) for p in assets.rglob('*') if p.is_file() and p.suffix.lower() == '.bin') if assets.is_dir() else []
 
 
 class ESPFlasherApp:
@@ -394,7 +397,9 @@ def main():
                   'firmware_sha256': firmware.sha256 if firmware else None,
                   'app_sha256': firmware.app_sha256 if firmware else None,
                   'elf_sha256': firmware.elf_sha256 if firmware else None,
-                  'embedded_firmware': firmware is not None and Path(firmware_path).parent == resource_root() / 'assets',
+                  'embedded_firmware': bool(bundled_firmware_files()),
+                  'bundled_firmware_files': bundled_firmware_files(),
+                  'firmware_source': 'external' if firmware is not None else 'none',
                   'ports': [port.device for port in serial.tools.list_ports.comports()],
                   'tcl_version': tk.Tcl().eval('info patchlevel'), 'frozen': bool(getattr(sys, 'frozen', False)),
                   's3_stub_bytes': len(stub.text),

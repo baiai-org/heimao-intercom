@@ -317,9 +317,11 @@ import java.util.Date
         }
         Section("模拟桥接") {
             Parameter(manager,p,s,"bridge_en","模拟电台与网络桥接",s.status.value("bridge.en"),yesNo)
-            val channels=listOf("0" to "不选择信道")+(0 until s.channels.length()).map{val c=s.channels.getJSONObject(it);(c.optInt("i",it)+1).toString() to c.optString("name")}
+            val channels=listOf("0" to "不选择信道")+(0 until s.channels.length()).map{s.channels.getJSONObject(it)}.filter{it.optBoolean("compatible",true)}.map{c->(c.optInt("i")+1).toString() to c.optString("name")}
             Parameter(manager,p,s,"bridge_chan","桥接使用信道",s.status.value("bridge.chan"),channels)
+            Text("当前射频：RX ${RadioUiRules.displayFrequency(s.status.value("freq.rx"))} / TX ${RadioUiRules.displayFrequency(s.status.value("freq.tx"))} MHz。选择信道会立即应用；桥接开启时，信道库与实体切信道会同步桥接选择。",color=secondary,style=MaterialTheme.typography.bodySmall)
         }
+        RxGuardEditor(manager,p,s,active)
     }
 }
 
@@ -334,14 +336,14 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
     val context=LocalContext.current
     fun copy(text:String){copyToClipboard(context,text);manager.message("已复制 $text")}
     val hint=when{
-        !np.ready->"等待 STUN 结果"
+        !np.ready->"尚未取得公网 IPv4 · 可在高级设置重新探测；已有直连或 IPv6 仍可使用"
         np.stale->"地址可能过期（${np.stunAgeSeconds} s）· 点击重新探测"
         else->"STUN ${np.stunAgeSeconds} s 前刷新"
     }
     Section("本机公网地址") {
         Row(verticalAlignment=Alignment.CenterVertically) {
             Text("发给对方，填到对方控制面板的地址栏",color=secondary,style=MaterialTheme.typography.bodySmall,modifier=Modifier.weight(1f))
-            IconButton(onClick={copy(np.ipv4Text)},enabled=enabled&&np.ready){
+            IconButton(onClick={copy(np.ipv4Text)},enabled=enabled&&np.ready&&!np.stale){
                 Icon(Icons.Default.ContentCopy,"复制公网地址",tint=if(np.ready)violet else secondary)
             }
         }
@@ -353,7 +355,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
             SelectionContainer {
                 Text(np.ipv4Text.ifEmpty{"—"},fontFamily=FontFamily.Monospace,fontSize=24.sp,fontWeight=FontWeight.ExtraBold,
                     color=if(!np.ready)secondary else if(np.stale)amber else violet,
-                    modifier=Modifier.clickable(enabled=enabled&&np.ready){copy(np.ipv4Text)})
+                    modifier=Modifier.clickable(enabled=enabled&&np.ready&&!np.stale){copy(np.ipv4Text)})
             }
         }
         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)) {
@@ -383,24 +385,46 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
 @Composable private fun Np2pPeerSection(manager:DeviceManager,p:DeviceProfile,s:SessionView,np:Np2pState,confirm:(String,()->Unit)->Unit) {
     val enabled=s.connected&&!s.maintenance
     var adding by remember(p.id){mutableStateOf(false)}
-    Section("在线用户 ${np.onlineCount()}") {
+    var denied by remember(p.id){mutableStateOf<List<DeniedPeer>?>(null)}
+    var deniedLoading by remember(p.id){mutableStateOf(false)}
+    Section("直连对端 ${np.onlineCount()} · 转发成员 ${np.indirectCount}") {
         Row(verticalAlignment=Alignment.CenterVertically) {
-            Text("hub 星型群聊",style=MaterialTheme.typography.bodyLarge,modifier=Modifier.weight(1f))
+            Text("作为群聊枢纽（Hub）",style=MaterialTheme.typography.bodyLarge,modifier=Modifier.weight(1f))
             if(np.hubOffline)Surface(color=MaterialTheme.colorScheme.errorContainer,shape=RoundedCornerShape(8.dp)) {
                 Text("枢纽离线 ${np.hubQuietSeconds} s",color=red,fontSize=12.sp,modifier=Modifier.padding(horizontal=8.dp,vertical=2.dp))
             }
             Switch(checked=np.hub,onCheckedChange={on->manager.action(p.id){set("np2p_hub",if(on)"1" else "0")}},enabled=enabled)
         }
-        if(np.rttMs>=0)Text("连通 ${np.linkedCount}/${np.peerCount} · RTT ${np.rttMs} ms",color=secondary,style=MaterialTheme.typography.bodySmall)
+        Text(np.roleText,color=secondary,style=MaterialTheme.typography.bodySmall)
+        Text("一组只开启一台枢纽，其他成员关闭此开关并连接枢纽；房间号与密钥须一致。开关只控制转发，不会自动添加对端。",color=secondary,style=MaterialTheme.typography.bodySmall)
+        if(np.hubConflict)Text("检测到其他枢纽，请只保留一台；枢纽之间不继续转发语音。",color=red)
+        if(np.rttMs>=0)Text("直连 ${np.onlineCount()} · 本机探测 RTT ${np.rttMs} ms",color=secondary,style=MaterialTheme.typography.bodySmall)
+        Text("对端名额 ${np.storedCount}/${np.peerLimit}（不含本机）",color=secondary,style=MaterialTheme.typography.bodySmall)
+        if(np.peers.size<np.storedCount)Text("对端列表未完整返回，请刷新后再操作。",color=amber)
         if(np.peers.isEmpty())Text("还没有对端。把上方地址发给对方填写，或点下面按钮添加对方的公网地址。",color=secondary,style=MaterialTheme.typography.bodySmall)
         repeat(np.peers.size){i->
             val peer=np.peers[i]
             if(i>0)HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant)
-            Np2pPeerRow(manager,p,s,peer,i,enabled,confirm)
+            Np2pPeerRow(manager,p,s,peer,i,enabled && np.peers.size==np.storedCount,confirm)
         }
         OutlinedButton(onClick={adding=true},enabled=enabled){Text("添加对端")}
         Text("这是手台的语音业务对端，与 App 保存的设备档案分别管理。",color=secondary,style=MaterialTheme.typography.bodySmall)
-        if(adding)AddPeerSheet(manager,p,s,{adding=false})
+        if(np.accessVersion>=1) {
+            Text(if(np.accessReady) "删除后持续拒绝，断电保留；已拒绝 ${np.deniedCount}/${np.deniedLimit}。只有本机解除才能恢复。" else
+                "拒绝记录读取异常，已停止接受连接，请检查或重启后重试。",color=if(np.accessReady)secondary else red,style=MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick={deniedLoading=true;manager.action(p.id){try{denied=deniedPeers()}finally{deniedLoading=false}}},enabled=enabled&&!deniedLoading){Text(if(deniedLoading)"读取中…" else "管理已拒绝设备")}
+            denied?.let { rows ->
+                if(rows.isEmpty())Text("暂无已拒绝设备",color=secondary)
+                rows.forEach { row ->
+                    Column {
+                        Text("${row.name} · ${row.address}",fontSize=13.sp)
+                        Text(if(row.identity)"按设备身份拒绝" else "仅按完整地址拒绝，地址变化后需重新识别",color=secondary,style=MaterialTheme.typography.bodySmall)
+                        TextButton(onClick={confirm("允许「${row.name}」重新连接？",{manager.action(p.id){set("np2p_unblock",row.id);denied=deniedPeers()}})},enabled=enabled){Text("解除拒绝")}
+                    }
+                }
+            }
+        }
+        if(adding)AddPeerSheet(manager,p,s,{adding=false},confirm)
     }
 }
 
@@ -410,7 +434,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
     Column(verticalArrangement=Arrangement.spacedBy(2.dp)) {
         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(8.dp).background(dotColor,CircleShape))
-            Text(peer.name,style=MaterialTheme.typography.bodyLarge)
+            Text(peer.name+(if(peer.isHub)" · 枢纽" else ""),style=MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.weight(1f))
             Text(peer.stateText,color=stateColor,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodySmall)
         }
@@ -418,13 +442,13 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
         Row(verticalAlignment=Alignment.CenterVertically) {
             Text("rtt ${if(peer.rttMs>=0)"${peer.rttMs} ms" else "—"} · rx ${peer.rx} / tx ${peer.tx} / 丢 ${peer.drop}",
                 color=secondary,style=MaterialTheme.typography.bodySmall,modifier=Modifier.weight(1f))
-            TextButton(onClick={manager.action(p.id){set("np2p_knock",index.toString())}},enabled=enabled){Text("重敲")}
-            TextButton(onClick={confirm("移除对端「${peer.name}」？",{manager.action(p.id){set("np2p_peer_del",index.toString())}})},enabled=enabled){Text("删除",color=red)}
+            if(!peer.viaHub)TextButton(onClick={manager.action(p.id){set("np2p_knock",index.toString())}},enabled=enabled){Text("重连")}
+            TextButton(onClick={confirm(if((s.status.optJSONObject("np2p")?.optInt("access_version",0) ?: 0) >= 1) "删除并持续拒绝「${peer.name}」？断电后仍有效，只有本机解除才能恢复。" else "移除对端「${peer.name}」？",{manager.action(p.id){set("np2p_peer_del",index.toString())}})},enabled=enabled){Text("删除",color=red)}
         }
     }
 }
 
-@Composable private fun AddPeerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView,dismiss:()->Unit) {
+@Composable private fun AddPeerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView,dismiss:()->Unit,confirm:(String,()->Unit)->Unit) {
     var peer by remember{mutableStateOf("")};var address by remember{mutableStateOf("")}
     var error by remember{mutableStateOf("")}
     val nameBytes=peer.toByteArray(Charsets.UTF_8).size
@@ -443,8 +467,9 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
             Button(onClick={
                 if(nameBytes==0 || nameBytes>7){error="名称要 1–7 字节";return@Button}
                 if(address.isBlank()){error="请填写对端地址";return@Button}
-                manager.action(p.id){set("np2p_peer_add","$peer,$address")}
-                dismiss()
+                val policy=(s.status.optJSONObject("np2p")?.optInt("access_version",0) ?: 0)>=1
+                val add={manager.action(p.id){set(if(policy)"np2p_peer_restore" else "np2p_peer_add","$peer,$address")};dismiss()}
+                if(policy)confirm("添加此对端？如果此地址曾被拒绝，将解除对应拒绝并恢复连接。",add) else add()
             },shape=RoundedCornerShape(17.dp),modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)){Text("添加")}
         }
     }
@@ -462,6 +487,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
         if(open)Surface(shape=RoundedCornerShape(20.dp),color=panel) {
             Column(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=4.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                 Parameter(manager,p,s,"np2p_stun","STUN 服务器",s.status.value("np2p.stun"),hint="host:port；留空使用手台默认列表")
+                TextButton(onClick={manager.action(p.id){set("np2p_stun",s.status.value("np2p.stun"))}},enabled=s.connected&&!s.maintenance){Text("重新探测公网地址")}
                 if(diag.isNotBlank())Text("诊断: $diag",color=amber,style=MaterialTheme.typography.bodySmall)
             }
         }

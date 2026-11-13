@@ -54,11 +54,15 @@ bool sdr_ws_client_attached(void);
 /* Browser microphone audio (raw little-endian PCM16 payload). */
 bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len);
 
-/* Radio-audio tap, called from the monitor task once per output block.
+/* RF-audio tap, called from the monitor task once per output block.
  * `enabled` is false for audio that must not leave the board (module squelch
  * closed, a previewed tail tone, or the audio we ourselves injected). A close
- * edge flushes queued board-side RX samples. */
+ * edge flushes queued RF samples only, leaving remote network audio intact. */
 void sdr_rx_push(const int16_t *pcm, size_t n, bool enabled);
+/* Remote decoded PCM before local RF processing. RF mute cannot close NET. */
+void sdr_rx_network_push(uint8_t mode, const int16_t *pcm, size_t n);
+/* Called by the mode manager before starting/stopping network engines. */
+void sdr_rx_network_mode(uint8_t mode);
 
 /*
  * Drain up to `n` samples of radio audio for the WebSocket handler.  The

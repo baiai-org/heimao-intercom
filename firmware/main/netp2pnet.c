@@ -36,7 +36,9 @@
  *   12   1    flags  bit0 = PTT active (audio only)
  *   13   1    type   0=audio 1=KNOCK 2=KNOCK_ACK 3=PING 4=PONG 5=BYE
  *   14   8    psk_check  HMAC-SHA256(key=PSK, room_be16||mac||"ORL-NP2P")[:8]
- *   (all) 2    nat_hint(1: 0 unknown / 1 port-preserving / 2 not) + ver(1=1)
+ *   (control) 2 nat_hint(1: 0 unknown / 1 port-preserving / 2 not) + ver(1=1)
+ *   (audio) 2 optional big-endian talk epoch when flags bit5 is set; otherwise
+ *             legacy nat_hint/ver. Header/audio lengths are unchanged.
  *   (KNOCK / KNOCK_ACK) +6: sender pub_ip(4, net order) + pub_port(2)
  *   (audio) +80: fixed-size Opus frame, 16 kHz, 320 samples = 20 ms
  *
@@ -47,6 +49,8 @@
  * different room or with a bad psk_check is dropped.
  */
 #include "netp2pnet.h"
+#include "np_access.h"
+#include "net_rx_order.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -98,6 +102,9 @@ static int64_t s_tail_start_ms;
 #define UDP_PORT_PROBE       54322   /* port-preservation probe only */
 
 #define NP_MAGIC             0x4F52
+#define NP_FLAG_HUB          4u  /* this direct sender acts as a hub */
+#define NP_FLAG_FORWARDED    8u  /* one hub hop already consumed */
+#define NP_FLAG_ROLE         16u /* hub role bit is authoritative */
 /* 40 ms at 12 kHz: Opus needs a standard frame duration, and 40 ms keeps
  * the packet rate at 25/s. */
 #define NP_PKT_SAMPLES       OPUS_LINK_SAMPLES   /* one Opus frame */
@@ -136,7 +143,7 @@ static int64_t s_tail_start_ms;
  * 29 ms of wall time -- 38 % too fast -- and the bridge stuttered even on a
  * LAN.  Whatever changes NP_PKT_SAMPLES must change this with it. */
 #define NP_PKT_MS            (NP_PKT_SAMPLES * 1000 / AUDIO_SAMPLE_RATE_HZ)
-#define PEER_MAX             4       /* persistent peer table size          */
+#define PEER_MAX             NP_PEER_LIMIT
 #define SLOT_MAX             (PEER_MAX + 1) /* +1 self-test slot (not persisted) */
 #define KNOCK_PERIOD_MS      1000
 #define PING_PERIOD_MS       10000
@@ -432,6 +439,9 @@ typedef struct {
     uint16_t port;
     bool     linked;
     bool     manual;             /* entered by the operator (not auto-learned) */
+    bool     hub;                /* advertised/inferred role of a direct peer */
+    bool     via_hub;            /* audio origin, not a directly reachable peer */
+    uint8_t  hub_mac[6];          /* upstream transport identity for via_hub */
     np_addr_t rx_src;            /* address the last authenticated frame came from */
     int64_t  rx_src_ms;
     int64_t  last_rx_ms;         /* last valid AUDIO block (stream freshness) */
@@ -448,8 +458,8 @@ typedef struct {
     uint16_t head;
     uint8_t (*jbuf)[NP_AUDIO_OPUS];  /* PSRAM, compressed frames */
     opus_link_dec_t *opus_dec;       /* PSRAM, created on first audio frame */
-    uint16_t jbuf_seq[JBUF_SLOTS];
-    bool     jbuf_valid[JBUF_SLOTS];
+    uint16_t *jbuf_seq;           /* same lazy PSRAM allocation as jbuf */
+    bool     *jbuf_valid;
     uint32_t rx_msgs, tx_msgs, rx_drop;
     /* The sequence counter never resets between transmissions, so a new
      * stream's first packet is contiguous with the previous one's last.  The
@@ -459,6 +469,7 @@ typedef struct {
     bool     have_first;
     uint32_t rx_late;   /* arrived after the play head had passed: dropped */
     uint32_t rx_plc;    /* lost frames Opus concealed */
+    net_rx_order_t order; /* independent of playback-buffer lifetime */
 } rt_peer_t;
 
 static rt_peer_t s_peer[SLOT_MAX];
@@ -481,172 +492,58 @@ enum { F_AUDIO = 0, F_KNOCK = 1, F_KNOCK_ACK = 2, F_PING = 3, F_PONG = 4, F_BYE 
 
 static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
                           bool ptt, const uint8_t *audio);
+static uint16_t s_tx_epoch;
+static bool s_tx_epoch_open;
 
-/*
- * "Peer was deleted" tombstone.
- *
- * The BYE frame is the only control frame that is sent exactly once: KNOCK and
- * PING repeat, so a lost datagram costs a retry, but a lost BYE leaves the far
- * end believing the peer still exists -- it keeps knocking and the link comes
- * back.  Over UDP that single datagram is simply not reliable, so the notice is
- * retransmitted: while a tombstone is live, any frame from that peer triggers
- * another BYE, which makes the removal converge on both ends.  The tombstone
- * expires on its own and is cleared the moment the peer is added again, so it
- * never blocks a later re-pairing.
- */
-#define TOMB_SLOTS   4
-#define TOMB_MS      300000
-#define TOMB_RESEND_MS 400
-
-typedef struct {
-    bool     used;
-    uint8_t  mac[6];
-    uint8_t  fam;
-    uint8_t  ip6[16];
-    uint32_t ip;
-    uint16_t port;
-    int64_t  until_ms;
-    int64_t  last_tx_ms;
-} tomb_t;
-
-static tomb_t s_tomb[TOMB_SLOTS];
-
-/*
- * Every way a received datagram can be thrown away before it counts as "alive".
- * All of these used to be silent, which is why a one-way link (A hears B, B
- * never hears A) could only be guessed at: the only counter was rx_drop, and
- * that covers the PSK check alone.  These are reported in /api/status and in the
- * expiry warning, so the next failure says which gate closed instead of leaving
- * it to be inferred.
- */
-static uint32_t s_drop_short;   /* runt / wrong length              */
-static uint32_t s_drop_room;    /* different room number            */
-static uint32_t s_drop_self;    /* our own frame echoed back        */
-static uint32_t s_drop_tomb;    /* tombstoned MAC (peer was deleted) */
-static uint32_t s_drop_psk;     /* PSK mismatch                     */
-
-static bool peer_addr_set(const rt_peer_t *p);   /* defined below */
-
-/*
- * Is this address (or MAC) one the operator has configured in the peer table?
- *
- * A tombstone exists so a peer the operator DELETED cannot re-learn itself back
- * into the table on the next packet.  It must not silence a peer that is sitting
- * in the table by address: deleting and re-adding a peer tombstoned its MAC for
- * five minutes, and handle_frame() dropped every frame from it before
- * peer_ensure() could bind the MAC to the freshly added slot -- the entry showed
- * "已过期" for five minutes with its address right there on screen, and knocking
- * again did nothing.  A configured slot is an explicit "I want this peer".
- */
-static bool peer_configured(const uint8_t mac[6], uint8_t fam,
-                            const uint8_t ip6[16], uint32_t ip)
+/* Persistent, local admission decisions. Remote KNOCK flags never grant consent. */
+static np_access_record_t s_denied[NP_DENY_LIMIT];
+static size_t s_denied_count;
+static bool s_access_error;
+static uint32_t s_drop_short, s_drop_full, s_drop_room, s_drop_self, s_drop_tomb, s_drop_psk;
+static bool peer_addr_set(const rt_peer_t *p);
+static void peer_record(const rt_peer_t *p, np_access_record_t *r)
 {
-    for (int i = 0; i < SLOT_MAX; ++i) {
-        rt_peer_t *c = &s_peer[i];
-        if (!c->in_use || c->selftest) { continue; }
-        if (memcmp(c->mac, mac, 6) == 0) { return true; }
-        if (!peer_addr_set(c) || c->fam != fam) { continue; }
-        if (fam == 6 ? (memcmp(c->ip6, ip6, 16) == 0) : (c->ip == ip)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static tomb_t *tomb_find(const uint8_t mac[6])
-{
-    for (int i = 0; i < TOMB_SLOTS; ++i) {
-        if (s_tomb[i].used && memcmp(s_tomb[i].mac, mac, 6) == 0) {
-            return &s_tomb[i];
-        }
-    }
-    return NULL;
-}
-
-/* Retransmit the BYE to a tombstone's address (rate limited). */
-static void tomb_resend(tomb_t *t)
-{
-    const int64_t now = now_ms();
-    if (now - t->last_tx_ms < TOMB_RESEND_MS) {
-        return;
-    }
-    t->last_tx_ms = now;
-    rt_peer_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    memcpy(tmp.mac, t->mac, 6);
-    tmp.fam = t->fam;
-    memcpy(tmp.ip6, t->ip6, sizeof(tmp.ip6));
-    tmp.ip = t->ip;
-    tmp.port = t->port;
-    tmp.in_use = true;
-    (void)frame_send_to(&tmp, F_BYE, 0, false, NULL);
-}
-
-static void tomb_add(const rt_peer_t *p)
-{
-    if (!p) {
-        return;
-    }
-    tomb_t *t = tomb_find(p->mac);
-    if (!t) {
-        for (int i = 0; i < TOMB_SLOTS; ++i) {
-            if (!s_tomb[i].used) {
-                t = &s_tomb[i];
-                break;
-            }
-        }
-    }
-    if (!t) {
-        t = &s_tomb[0];
-    }
-    memset(t, 0, sizeof(*t));
-    t->used = true;
-    memcpy(t->mac, p->mac, 6);
-    t->fam = p->fam;
-    memcpy(t->ip6, p->ip6, sizeof(t->ip6));
-    t->ip = p->ip;
-    t->port = p->port;
-    t->until_ms = now_ms() + TOMB_MS;
-    t->last_tx_ms = 0;
-    ESP_LOGW(TAG, "peer '%s' tombstoned for %d s (BYE will be retransmitted)",
-             p->name, TOMB_MS / 1000);
-}
-
-static void tomb_clear(const uint8_t mac[6])
-{
-    tomb_t *t = tomb_find(mac);
-    if (t) {
-        t->used = false;
+    memset(r, 0, sizeof(*r));
+    memcpy(r->peer.name, p->name, 8);
+    if (!r->peer.name[0]) { snprintf(r->peer.name, 8, "peer"); }
+    memcpy(r->mac, p->mac, 6);
+    if (!p->via_hub) {
+        r->peer.family = p->fam; r->peer.port = p->port;
+        if (p->fam == 6) { memcpy(r->peer.address, p->ip6, 16); }
+        else { put_be32(r->peer.address, p->ip); }
     }
 }
-
-/* A peer entered by hand has no MAC yet, so clearing by MAC misses its
- * tombstone and the board keeps ignoring that address -- "deleted once, can
- * never pair again".  Clear by address as well. */
-static void tomb_clear_addr(const np_addr_t *a)
+static int denied_find(const uint8_t mac[6], const np_addr_t *src)
 {
-    if (!a) {
-        return;
+    uint8_t address[16] = {0};
+    if (src) {
+        if (src->fam == 6) { memcpy(address, src->ip6, 16); }
+        else { put_be32(address, src->ip); }
     }
-    if (a->fam == 6) {
-        bool any = false;
-        for (int k = 0; k < 16; ++k) { if (a->ip6[k]) { any = true; break; } }
-        if (!any) { return; }
-    } else if (!a->ip) {
-        return;
+    for (size_t i = 0; i < s_denied_count; ++i) {
+        if (np_access_match(&s_denied[i], mac, src ? src->fam : 0,
+                            src ? address : NULL, src ? src->port : 0)) { return (int)i; }
     }
-    for (int i = 0; i < TOMB_SLOTS; ++i) {
-        tomb_t *t = &s_tomb[i];
-        if (!t->used || t->fam != a->fam) {
-            continue;
-        }
-        if (a->fam == 6) {
-            if (memcmp(t->ip6, a->ip6, 16) == 0) {
-                t->used = false;
-            }
-        } else if (t->ip == a->ip) {
-            t->used = false;
-        }
+    return -1;
+}
+/* Only a local, confirmed address add may use address matching to restore a known MAC. */
+static int denied_address(const np_addr_t *a)
+{
+    for (size_t i = 0; i < s_denied_count; ++i) {
+        np_access_record_t r = s_denied[i];
+        memset(r.mac, 0, 6);
+        uint8_t address[16] = {0};
+        if (a->fam == 6) { memcpy(address, a->ip6, 16); }
+        else { put_be32(address, a->ip); }
+        if (np_access_match(&r, NULL, a->fam, address, a->port)) { return (int)i; }
+    }
+    return -1;
+}
+static void denied_remove(size_t i)
+{
+    if (i < s_denied_count) {
+        memmove(&s_denied[i], &s_denied[i + 1], (s_denied_count - i - 1) * sizeof(s_denied[0]));
+        memset(&s_denied[--s_denied_count], 0, sizeof(s_denied[0]));
     }
 }
 
@@ -682,108 +579,98 @@ static bool        s_hub_on;
 /* v2 adds the family and a 16-byte address so IPv6 peers survive a reboot.
  * It lives under its own key; the v1 blob is migrated on first load. */
 #define KEY_PEERS2       "np_peer2"
+#define KEY_PEERS3       "np_peer3"
+#define KEY_ACCESS       "np_state1"
 #define PEER_BLOB2_ENTRY 27   /* name(8) + fam(1) + addr(16) + port(2)      */
 #define PEER_BLOB2_LEN   (PEER_MAX * PEER_BLOB2_ENTRY)
 
 static bool stun_set_inner(const char *host_port);
+static void peer_clear(rt_peer_t *p);
 
 static void peers_load(void)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-        return;
-    }
-    uint8_t blob2[PEER_BLOB2_LEN];
-    size_t len2 = sizeof(blob2);
-    if (nvs_get_blob(h, KEY_PEERS2, blob2, &len2) == ESP_OK && len2 == sizeof(blob2)) {
-        for (int i = 0; i < PEER_MAX; ++i) {
-            const uint8_t *e = &blob2[i * PEER_BLOB2_ENTRY];
-            if (!e[0]) { continue; }
-            char name[9] = {0}, addr[48] = {0};
-            memcpy(name, &e[0], 8);
-            if (e[8] == 6) {
-                struct in6_addr a6;
-                memcpy(&a6, &e[9], sizeof(a6));
-                inet_ntop(AF_INET6, &a6, addr, sizeof(addr));
-            } else {
-                struct in_addr a4;
-                a4.s_addr = be32(&e[9]);
-                inet_ntoa_r(a4, addr, sizeof(addr));
-            }
-            netp2pnet_peer_add(name, addr, be16(&e[25]));
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err != ESP_OK) { s_access_error = err != ESP_ERR_NVS_NOT_FOUND; return; }
+    /* Keep policy snapshots and encoded blobs off the HTTP/engine task stacks. */
+    np_access_state_t *state = heap_caps_malloc(sizeof(*state), MALLOC_CAP_SPIRAM);
+    uint8_t *blob = heap_caps_malloc(NP_ACCESS_BYTES, MALLOC_CAP_SPIRAM);
+    if (!state || !blob) { s_access_error = true; goto done; }
+    size_t len = NP_ACCESS_BYTES;
+    err = nvs_get_blob(h, KEY_ACCESS, blob, &len);
+    if (err == ESP_OK) {
+        if (!np_access_decode(blob, len, state)) { s_access_error = true; goto done; }
+        s_denied_count = state->denied_count;
+        memcpy(s_denied, state->denied, sizeof(s_denied));
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* One-time migration. Never fall back past an unreadable new policy. */
+        memset(state, 0, sizeof(*state));
+        np_peer_record_t records[PEER_MAX];
+        const char *keys[] = {KEY_PEERS3, KEY_PEERS2, KEY_PEERS};
+        const unsigned versions[] = {3, 2, 1};
+        for (unsigned f = 0; f < 3; ++f) {
+            len = NP_ACCESS_BYTES; size_t count = 0;
+            if (nvs_get_blob(h, keys[f], blob, &len) != ESP_OK ||
+                !np_peer_store_decode(blob, len, versions[f], records, &count)) { continue; }
+            state->peer_count = count;
+            for (size_t i = 0; i < count; ++i) { state->peers[i].peer = records[i]; }
+            break;
         }
-        nvs_close(h);
-        return;
+        s_peers_dirty = true;
+    } else { s_access_error = true; goto done; }
+    for (size_t i = 0; i < state->peer_count; ++i) {
+        rt_peer_t *p = &s_peer[i]; const np_access_record_t *r = &state->peers[i];
+        peer_clear(p); p->in_use = p->manual = true;
+        memcpy(p->name, r->peer.name, 8); memcpy(p->mac, r->mac, 6);
+        p->fam = r->peer.family; p->port = r->peer.port;
+        if (p->fam == 6) { memcpy(p->ip6, r->peer.address, 16); }
+        else { p->ip = be32(r->peer.address); }
+        if (!peer_addr_set(p)) { peer_clear(p); s_peers_dirty = true; }
     }
-    uint8_t blob[PEER_BLOB_LEN];
-    size_t len = sizeof(blob);
-    if (nvs_get_blob(h, KEY_PEERS, blob, &len) == ESP_OK && len == sizeof(blob)) {
-        for (int i = 0; i < PEER_MAX; ++i) {
-            const uint8_t *e = &blob[i * PEER_BLOB_ENTRY];
-            if (e[0]) {
-                char name[9] = {0}, ip[20] = {0};
-                memcpy(name, &e[0], 8);
-                struct in_addr a;
-                a.s_addr = be32(&e[8]);
-                inet_ntoa_r(a, ip, sizeof(ip));
-                netp2pnet_peer_add(name, ip, be16(&e[12]));
-            }
-        }
-    }
+done:
+    heap_caps_free(state); heap_caps_free(blob);
     uint8_t hub = 0;
     if (nvs_get_u8(h, KEY_HUB, &hub) == ESP_OK) { s_hub_on = (hub != 0); }
-    char stun[128] = {0};
-    size_t slen = sizeof(stun);
-    if (nvs_get_str(h, KEY_STUN, stun, &slen) == ESP_OK) {
-        (void)stun_set_inner(stun);
-    }
+    char stun[128] = {0}; size_t slen = sizeof(stun);
+    if (nvs_get_str(h, KEY_STUN, stun, &slen) == ESP_OK) { (void)stun_set_inner(stun); }
     nvs_close(h);
 }
-
-static void peers_save(void)
+/* A single NVS blob contains BOTH admitted peers and denied identities. */
+static esp_err_t peers_save_ex(const rt_peer_t *exclude, const rt_peer_t *prefer)
 {
+    if (s_access_error) { return ESP_ERR_INVALID_STATE; }
+    np_access_state_t *state = heap_caps_malloc(sizeof(*state), MALLOC_CAP_SPIRAM);
+    uint8_t *blob = heap_caps_malloc(NP_ACCESS_BYTES, MALLOC_CAP_SPIRAM);
+    esp_err_t err = ESP_ERR_NO_MEM;
+    if (!state || !blob) { goto done; }
+    memset(state, 0, sizeof(*state));
+    for (int i = 0; i < PEER_MAX; ++i) {
+        const rt_peer_t *p = &s_peer[i];
+        if (p == exclude || !p->in_use || p->selftest || p->via_hub || !peer_addr_set(p)) { continue; }
+        if (prefer && p != prefer && p->fam == prefer->fam && p->port == prefer->port &&
+            (p->fam == 6 ? !memcmp(p->ip6, prefer->ip6, 16) : p->ip == prefer->ip)) { continue; }
+        peer_record(p, &state->peers[state->peer_count++]);
+    }
+    state->denied_count = s_denied_count;
+    memcpy(state->denied, s_denied, sizeof(s_denied));
+    size_t size = np_access_encode(state, blob, NP_ACCESS_BYTES);
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    err = size ? nvs_open(NVS_NS, NVS_READWRITE, &h) : ESP_ERR_INVALID_ARG;
+    if (err == ESP_OK) {
+        /* Legacy keys remain intact for deliberate rollback, never read over the new key. */
+        err = nvs_set_blob(h, KEY_ACCESS, blob, size);
+        if (err == ESP_OK) { err = nvs_set_u8(h, KEY_HUB, s_hub_on ? 1 : 0); }
+        if (err == ESP_OK) { err = nvs_set_str(h, KEY_STUN, s_stun_str); }
+        if (err == ESP_OK) { err = nvs_commit(h); }
+        nvs_close(h);
     }
-    uint8_t blob[PEER_BLOB_LEN];
-    memset(blob, 0, sizeof(blob));
-    int n = 0;
-    for (int i = 0; i < SLOT_MAX && n < PEER_MAX; ++i) {
-        rt_peer_t *p = &s_peer[i];
-        if (p->in_use && !p->selftest) {
-            uint8_t *e = &blob[n * PEER_BLOB_ENTRY];
-            memcpy(e, p->name, 8);
-            put_be32(&e[8], p->ip);
-            put_be16(&e[12], p->port);
-            n++;
-        }
-    }
-    (void)nvs_set_blob(h, KEY_PEERS, blob, sizeof(blob));
-    /* v2 blob: family + full address */
-    uint8_t blob2[PEER_BLOB2_LEN];
-    memset(blob2, 0, sizeof(blob2));
-    int n2 = 0;
-    for (int i = 0; i < SLOT_MAX && n2 < PEER_MAX; ++i) {
-        rt_peer_t *p = &s_peer[i];
-        if (!p->in_use || p->selftest) { continue; }
-        uint8_t *e = &blob2[n2 * PEER_BLOB2_ENTRY];
-        memcpy(e, p->name, 8);
-        e[8] = (p->fam == 6) ? 6 : 4;
-        if (p->fam == 6) {
-            memcpy(&e[9], p->ip6, 16);
-        } else {
-            put_be32(&e[9], p->ip);
-        }
-        put_be16(&e[25], p->port);
-        n2++;
-    }
-    (void)nvs_set_blob(h, KEY_PEERS2, blob2, sizeof(blob2));
-    (void)nvs_set_u8(h, KEY_HUB, s_hub_on ? 1 : 0);
-    (void)nvs_set_str(h, KEY_STUN, s_stun_str);
-    (void)nvs_commit(h);
-    nvs_close(h);
+done:
+    heap_caps_free(state); heap_caps_free(blob);
+    s_peers_dirty = err != ESP_OK;
+    if (err != ESP_OK) { ESP_LOGW(TAG, "peer/policy save pending: %s", esp_err_to_name(err)); }
+    return err;
 }
+static void peers_save(void) { (void)peers_save_ex(NULL, NULL); }
 
 /* ------------------------------------------------------------ address utils */
 
@@ -919,24 +806,61 @@ static rt_peer_t *peer_free_slot(void)
     return NULL;
 }
 
-/* Zero a peer slot without losing the PSRAM jitter buffer that start() gave it.
- * The buffers are allocated once for all SLOT_MAX slots and live for the whole
- * boot (stop() does not free them), so a runtime peer add/del or a restart of
- * the engine must keep the pointer: wiping it made jbuf_audio() decode into a
- * NULL pointer, which crashed the board (StoreProhibited on core 1) as soon as
- * a peer that had been added at runtime sent its first audio frame. */
+/* An authenticated datagram's transport can be the hub rather than its origin.
+ * Never bind a forwarded origin MAC to a configured hub's address. */
+static rt_peer_t *peer_by_source(const np_addr_t *src)
+{
+    for (int i = 0; i < PEER_MAX; ++i) {
+        rt_peer_t *p = &s_peer[i];
+        if (!p->in_use || p->selftest || p->via_hub) { continue; }
+        if (p->rx_src_ms > 0 && now_ms() - p->rx_src_ms < 45000
+            && p->rx_src.fam == src->fam && p->rx_src.port == src->port
+            && (src->fam == 6 ? !memcmp(p->rx_src.ip6, src->ip6, 16) : p->rx_src.ip == src->ip)) {
+            return p;
+        }
+        if (p->fam == src->fam && p->port == src->port
+            && (src->fam == 6 ? !memcmp(p->ip6, src->ip6, 16) : p->ip == src->ip)) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Caller holds the peer mutex. Audio storage is created on first audio and
+ * released with the slot, so empty capacity consumes no jitter-buffer RAM. */
+static void peer_audio_free(rt_peer_t *p)
+{
+    opus_link_dec_free(p->opus_dec);
+    p->opus_dec = NULL;
+    heap_caps_free(p->jbuf);
+    p->jbuf = NULL; p->jbuf_seq = NULL; p->jbuf_valid = NULL;
+}
 static void peer_clear(rt_peer_t *p)
 {
-    uint8_t (*jb)[NP_AUDIO_OPUS] = p->jbuf;
-    opus_link_dec_free(p->opus_dec);
+    peer_audio_free(p);
     memset(p, 0, sizeof(*p));
-    p->jbuf = jb;
+}
+/* Allocated on first audio, never for idle configured peers. Caller holds the
+ * peer mutex; the playout task uses the same mutex before reading/freeing it. */
+static bool peer_jbuf_alloc(rt_peer_t *p)
+{
+    if (!p->jbuf) {
+        const size_t audio = JBUF_SLOTS * NP_AUDIO_OPUS;
+        uint8_t *data = heap_caps_malloc(audio + JBUF_SLOTS * (sizeof(uint16_t) + sizeof(bool)), MALLOC_CAP_SPIRAM);
+        if (!data) { return false; }
+        p->jbuf = (uint8_t (*)[NP_AUDIO_OPUS])data;
+        p->jbuf_seq = (uint16_t *)(data + audio);
+        p->jbuf_valid = (bool *)(data + audio + JBUF_SLOTS * sizeof(uint16_t));
+        memset(p->jbuf_seq, 0, JBUF_SLOTS * sizeof(uint16_t));
+        memset(p->jbuf_valid, 0, JBUF_SLOTS * sizeof(bool));
+    }
+    return p->jbuf != NULL;
 }
 
 /* Find or create a runtime slot for a sender MAC.  A configured peer (known
  * by ip:port from NVS) has no MAC until the first frame: when the source
  * address matches such a slot we bind the MAC to it instead of creating a
- * duplicate.  New MACs evict the oldest peer slot when the table is full. */
+ * duplicate. New senders are refused when the table is full. */
 static bool ip4_is_private(uint32_t be_addr)
 {
     const uint32_t a = ntohl(be_addr);
@@ -986,7 +910,7 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
             }
             memcpy(c->mac, mac, 6);
             c->port = src->port;                /* adopt the NAT port */
-            tomb_clear(mac);                    /* it is wanted again */
+            s_peers_dirty = true; /* Persist the newly learned identity. */
             ESP_LOGI(TAG, "peer '%s' bound to incoming mac (%u)",
                      c->name, (unsigned)src->port);
             return c;
@@ -1008,20 +932,13 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
              * otherwise the frame belongs to this slot as it is. */
             if (!c->mac[0] || !c->linked || memcmp(c->mac, mac, 6) == 0) {
                 memcpy(c->mac, mac, 6);
+                s_peers_dirty = true;
                 return c;
             }
         }
     }
     p = peer_free_slot();
-    if (!p) {
-        int oldest = 0;
-        for (int i = 1; i < PEER_MAX; ++i) {
-            if (s_peer[i].last_rx_ms < s_peer[oldest].last_rx_ms) {
-                oldest = i;
-            }
-        }
-        p = &s_peer[oldest];
-    }
+    if (!p) { return NULL; }
     peer_clear(p);
     p->in_use = true;
     memcpy(p->mac, mac, 6);
@@ -1053,10 +970,55 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
     }
     return p;
 }
+
+static rt_peer_t *peer_for_frame(const uint8_t mac[6], const np_addr_t *src,
+                                uint8_t type, uint8_t flags)
+{
+    rt_peer_t *upstream = type == F_AUDIO ? peer_by_source(src) : NULL;
+    rt_peer_t *origin = peer_by_mac(mac);
+    const bool own_transport = origin && !origin->via_hub && origin->fam == src->fam
+        && origin->port == src->port && (src->fam == 6
+            ? !memcmp(origin->ip6, src->ip6, 16) : origin->ip == src->ip);
+    const bool relayed = type == F_AUDIO && ((flags & NP_FLAG_FORWARDED)
+        || (!own_transport && upstream && upstream->linked && memcmp(upstream->mac, mac, 6)));
+    rt_peer_t *p;
+    if (relayed) {
+        if (!upstream || !upstream->linked || !memcmp(upstream->mac, mac, 6)) { return NULL; }
+        upstream->hub = true; /* Also recognises an older hub without role flags. */
+        p = peer_by_mac(mac);
+        /* A configured direct route wins; don't mix direct/relayed copies. */
+        if (p && !p->via_hub && peer_addr_set(p)) { return NULL; }
+        if (!p) {
+            p = peer_free_slot();
+            if (!p) { ++s_drop_full; return NULL; }
+            peer_clear(p);
+            p->in_use = p->via_hub = true;
+            p->rtt_ms = -1; /* No end-to-end RTT was measured for this origin. */
+            memcpy(p->mac, mac, 6);
+            snprintf(p->name, sizeof(p->name), "%02x%02x%02x", mac[3], mac[4], mac[5]);
+        }
+        memcpy(p->hub_mac, upstream->mac, 6);
+        p->linked = true;
+        p->last_linked_ms = now_ms();
+        return p;
+    }
+    p = peer_ensure(mac, src);
+    if (!p) { ++s_drop_full; }
+    if (p) {
+        if (p->via_hub) {
+            p->via_hub = false;
+            memset(p->hub_mac, 0, sizeof(p->hub_mac));
+            peer_take_addr(p, src);
+            s_peers_dirty = true;
+        }
+        if (flags & (NP_FLAG_ROLE | NP_FLAG_HUB)) { p->hub = (flags & NP_FLAG_HUB) != 0; }
+    }
+    return p;
+}
 static void peer_reset_stream(rt_peer_t *p)
 {
-    memset(p->jbuf_seq, 0, sizeof(p->jbuf_seq));
-    memset(p->jbuf_valid, 0, sizeof(p->jbuf_valid));
+    if (p->jbuf_seq) { memset(p->jbuf_seq, 0, JBUF_SLOTS * sizeof(uint16_t)); }
+    if (p->jbuf_valid) { memset(p->jbuf_valid, 0, JBUF_SLOTS * sizeof(bool)); }
     p->have_latest = false;
     p->head_valid = false;
     p->head = 0;
@@ -1080,11 +1042,10 @@ static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
     h->room = netcom_room();
     h->seq = seq;
     memcpy(h->mac, s_my_mac, 6);
-    /* bit 0 = PTT, bit 1 = "the operator added you explicitly": the far end may
-     * clear a delete-tombstone only for a KNOCK that carries it, so an
-     * automatic reconnect is still suppressed while a deliberate re-pairing
-     * gets through. */
-    h->flags = (uint8_t)((ptt ? 1 : 0) | ((type == F_KNOCK && p->manual) ? 2 : 0));
+    /* Keep bit 1 for old peers' wire compatibility. It is never consent to
+     * override a local persistent refusal on this firmware. */
+    h->flags = (uint8_t)((ptt ? 1 : 0) | ((type == F_KNOCK && p->manual) ? 2 : 0)
+        | NP_FLAG_ROLE | (s_hub_on ? NP_FLAG_HUB : 0));
     h->type = type;
     psk_compute(h->room, s_my_mac, &pkt[NP_HDR_LEN]);
     uint8_t *pl = &pkt[NP_CTR_BASE];
@@ -1095,6 +1056,8 @@ static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
     pl[1] = 1;                      /* ver */
     int len;
     if (type == F_AUDIO) {
+        h->flags |= NET_RX_FLAG_EPOCH;
+        put_be16(pl, s_tx_epoch); /* audio does not consume NAT hints */
         memcpy(pl + 2, audio, NP_AUDIO_OPUS);
         len = NP_AUDIO_LEN;
     } else if (type == F_KNOCK || type == F_KNOCK_ACK) {
@@ -1118,30 +1081,45 @@ static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
 }
 
 /* --------------------------------------------------------------- receive side */
-static void jbuf_audio(rt_peer_t *p, uint16_t seq, const uint8_t *audio,
-                       size_t audio_len, bool ptt)
+static bool jbuf_audio(rt_peer_t *p, uint16_t seq, const uint8_t *audio,
+                       size_t audio_len, bool ptt, uint16_t epoch)
 {
-    if (audio_len != NP_AUDIO_OPUS || !p->jbuf) { p->rx_drop++; return; }
-    if (p->have_latest && now_ms() - p->last_rx_ms > STREAM_IDLE_MS) { peer_reset_stream(p); }
+    if (audio_len != NP_AUDIO_OPUS || !peer_jbuf_alloc(p)) { p->rx_drop++; return false; }
+    net_rx_order_t next = p->order;
+    const int accept = net_rx_order_accept(&next, epoch, seq, ptt, now_ms());
+    if (accept == NET_RX_DROP) {
+        /* Keep a legacy restart probe, but never its tentative PTT. */
+        p->order.probe_count = next.probe_count; p->order.probe_seq = next.probe_seq;
+        p->order.probe_ms = next.probe_ms;
+        ++p->rx_late; return false;
+    }
+    const bool continuing = p->order.seen && p->order.epoch == epoch && p->order.ptt;
+    const bool pending = p->have_latest && (!p->head_valid || (int16_t)(p->head - p->latest) <= 0);
+    if (continuing) { next.audio |= p->order.audio; }
+    if ((accept == NET_RX_NEW || (p->have_latest && now_ms() - p->last_rx_ms > STREAM_IDLE_MS)) &&
+        !(continuing && pending)) { peer_reset_stream(p); }
     if (p->have_latest) {
         const int16_t fwd = (int16_t)(seq - p->latest);
-        if (fwd < 0 && -fwd >= JBUF_SLOTS / 2) { p->rx_drop++; return; }
+        if (fwd < 0 && -fwd >= JBUF_SLOTS / 2) { p->rx_drop++; return false; }
         if (fwd > 0 && fwd >= JBUF_SLOTS / 2) { peer_reset_stream(p); }
     }
     if (p->head_valid && (int16_t)(seq - p->head) < 0) {
         ++p->rx_late;
-        return;
+        return false;
     }
+    const uint16_t slot = seq % JBUF_SLOTS;
+    if (p->jbuf_valid[slot] && p->jbuf_seq[slot] == seq) { ++p->rx_late; return false; }
+    p->order = next;
     if (!p->have_latest) { p->stream_first = seq; p->have_first = true; }
     if (!p->have_latest || (int16_t)(seq - p->latest) > 0) { p->latest = seq; }
     p->have_latest = true;
     p->last_rx_ms = now_ms();
     p->rx_msgs++;
-    const uint16_t slot = seq % JBUF_SLOTS;
     memcpy(p->jbuf[slot], audio, NP_AUDIO_OPUS);
     p->jbuf_seq[slot] = seq;
     p->jbuf_valid[slot] = true;
     if (ptt && !p->selftest) { radio_led_note_net_rx(NETCOM_MODE_NETP2P); }
+    return true;
 }
 
 /* A peer becomes LINKED once its PSK is validated (we heard an acceptable
@@ -1277,6 +1255,33 @@ static void handle_control(rt_peer_t *p, const uint8_t *pkt, int len,
         break;
     }
 }
+/* Caller holds the peer mutex; preserve the original sender and packet. */
+static void hub_forward_audio(const uint8_t sender[6], const uint8_t *pkt, size_t len, bool keyed)
+{
+    if (s_access_error || denied_find(sender, NULL) >= 0 || !s_hub_on || len < NP_HDR_LEN || len > NP_AUDIO_LEN
+        || (pkt[12] & NP_FLAG_FORWARDED)) { return; }
+    uint8_t forwarded[NP_AUDIO_LEN];
+    memcpy(forwarded, pkt, len);
+    forwarded[12] |= NP_FLAG_FORWARDED;
+    for (int i = 0; i < PEER_MAX; ++i) {
+        rt_peer_t *p = &s_peer[i];
+        if (!p->in_use || p->selftest || p->via_hub || p->hub || !p->linked || !peer_addr_set(p) ||
+            memcmp(p->mac, sender, 6) == 0) { continue; }
+        if (denied_find(p->mac, NULL) >= 0) { continue; }
+        const int sent = peer_send_raw(p, forwarded, (int)len);
+        if (sent >= 0) { ++p->tx_msgs; }
+        if (sent == (int)len && keyed) { radio_led_note_net_tx(NETCOM_MODE_NETP2P); }
+    }
+}
+
+static bool frame_admitted(const uint8_t mac[6], const np_addr_t *src, uint8_t type, uint8_t flags)
+{
+    rt_peer_t *transport = peer_by_source(src);
+    const bool relayed = type == F_AUDIO && ((flags & NP_FLAG_FORWARDED) ||
+        (transport && transport->linked && memcmp(transport->mac, mac, 6)));
+    return !s_access_error && denied_find(mac, relayed ? NULL : src) < 0 &&
+        !(relayed && transport && denied_find(transport->mac, src) >= 0);
+}
 static void handle_frame(const uint8_t *pkt, int len, const np_addr_t *src)
 {
     if (len < NP_HDR_LEN + NP_CHECK_LEN + 2) { ++s_drop_short; return; }
@@ -1295,25 +1300,26 @@ static void handle_frame(const uint8_t *pkt, int len, const np_addr_t *src)
         ++s_drop_psk;
         return;
     }
-    tomb_t *tb = tomb_find(h.mac);
-    if (tb && peer_configured(h.mac, src->fam, src->ip6, src->ip)) {
-        tb->used = false;
-        tb = NULL;
+    /* Check the original sender, including Hub-forwarded audio, before allocation/PTT. */
+    if (!frame_admitted(h.mac, src, h.type, h.flags)) {
+        ++s_drop_tomb;
+        /* Converge old peers after an offline delete without relying on BYE.
+         * Reply only to direct KNOCK, at its current source, never a relayed origin. */
+        static int64_t last_refusal_ms;
+        if (!s_access_error && h.type == F_KNOCK && now_ms() - last_refusal_ms >= 400) {
+            last_refusal_ms = now_ms();
+            rt_peer_t reply = {0}; reply.in_use = true; reply.fam = src->fam;
+            reply.ip = src->ip; memcpy(reply.ip6, src->ip6, 16); reply.port = src->port;
+            (void)frame_send_to(&reply, F_BYE, 0, false, NULL);
+        }
+        return;
     }
-    if (tb) {
-        const bool explicit_knock = h.type == F_KNOCK && (h.flags & 2);
-        if (now_ms() >= tb->until_ms || explicit_knock) { tb->used = false; }
-        else { ++s_drop_tomb; tomb_resend(tb); return; }
-    }
-    rt_peer_t *p = peer_ensure(h.mac, src);
-    if (!p) { ++s_drop_short; return; }
+    rt_peer_t *p = peer_for_frame(h.mac, src, h.type, h.flags);
+    if (!p) { return; }
+    /* Allocation failure must not refresh RX PTT and key a silent transmitter. */
+    if (h.type == F_AUDIO && !peer_jbuf_alloc(p)) { ++p->rx_drop; return; }
     p->last_frame_ms = now_ms();
-    if (h.type == F_AUDIO) {
-        s_rx_ptt = (h.flags & 1) != 0;
-        s_rx_ptt_ms = now_ms();
-        netcom_note_rx_ptt(s_rx_ptt, false);
-        if (s_rx_ptt) { s_rx_hang_ms = 0; }
-    }
+    if (h.type == F_AUDIO && !p->via_hub) { link_peer(p, src); }
     const bool changed = p->rx_src.fam != src->fam ||
         (src->fam == 4 ? p->rx_src.ip != src->ip
                         : memcmp(p->rx_src.ip6, src->ip6, 16) != 0) ||
@@ -1330,20 +1336,9 @@ static void handle_frame(const uint8_t *pkt, int len, const np_addr_t *src)
             ESP_LOGI(TAG, "audio from '%s' (seq %u, ptt %u)", p->name,
                      (unsigned)h.seq, (unsigned)(h.flags & 1));
         }
-        jbuf_audio(p, h.seq, pkt + NP_CTR_BASE + 2, NP_AUDIO_OPUS, (h.flags & 1) != 0);
-        if (s_hub_on) {
-            for (int i = 0; i < SLOT_MAX; ++i) {
-                rt_peer_t *o = &s_peer[i];
-                if (o->in_use && o->linked && peer_addr_set(o) &&
-                    memcmp(o->mac, h.mac, 6) != 0) {
-                    const int sent = peer_send_raw(o, pkt, NP_AUDIO_LEN);
-                    if (sent >= 0) { o->tx_msgs++; }
-                    if (sent == NP_AUDIO_LEN && (h.flags & 1)) {
-                        radio_led_note_net_tx(NETCOM_MODE_NETP2P);
-                    }
-                }
-            }
-        }
+        const uint16_t epoch = (h.flags & NET_RX_FLAG_EPOCH) ? be16(pkt + NP_CTR_BASE) : 0;
+        if (jbuf_audio(p, h.seq, pkt + NP_CTR_BASE + 2, NP_AUDIO_OPUS, (h.flags & 1) != 0, epoch)
+            && !p->via_hub) { hub_forward_audio(h.mac, pkt, NP_AUDIO_LEN, (h.flags & 1) != 0); }
     } else {
         handle_control(p, pkt, len, src);
     }
@@ -1444,6 +1439,16 @@ static void engine_tick_timers(void)
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest) { continue; }
+        if (p->via_hub) {
+            const rt_peer_t *upstream = peer_by_mac(p->hub_mac);
+            if (p->linked && (!upstream || !upstream->linked
+                || now - upstream->last_frame_ms > PEER_EXPIRE_MS
+                || now - p->last_frame_ms > PEER_EXPIRE_MS)) {
+                p->linked = false;
+                peer_reset_stream(p);
+            }
+            continue; /* No direct KNOCK/PING to an indirect audio origin. */
+        }
         const bool expired = p->linked && now - p->last_frame_ms > PEER_EXPIRE_MS;
         if (expired) {
             /*
@@ -1682,15 +1687,17 @@ static bool peer_jbuf_next(rt_peer_t *p, int16_t *out, int *peak_out)
 {
     *peak_out = 0;
     const int64_t now = now_ms();
-    if (p->have_latest && now - p->last_rx_ms > STREAM_IDLE_MS) {
+    if (p->have_latest && now - p->last_rx_ms > STREAM_IDLE_MS &&
+        p->head_valid && (int16_t)(p->head - p->latest) > 0) {
         p->head_valid = false; p->have_latest = false; p->have_first = false;
-        memset(p->jbuf_valid, 0, sizeof(p->jbuf_valid));
+        memset(p->jbuf_valid, 0, JBUF_SLOTS * sizeof(bool));
         opus_link_dec_free(p->opus_dec); p->opus_dec = NULL;
     }
     if (!p->have_latest) { return false; }
     if (!p->head_valid) {
-        if (!p->have_first || (int16_t)(p->latest - p->stream_first) < PLAY_LAG) return false;
-        p->head = (uint16_t)(p->latest - PLAY_LAG);
+        if (!p->have_first || (net_rx_order_keyed(&p->order, now, NP_RX_PTT_TIMEOUT_MS) &&
+            (int16_t)(p->latest - p->stream_first) < PLAY_LAG)) return false;
+        p->head = p->stream_first;
         p->head_valid = true;
     } else {
         const int32_t behind = (int32_t)(int16_t)(p->latest - p->head);
@@ -1720,13 +1727,17 @@ static bool peer_jbuf_next(rt_peer_t *p, int16_t *out, int *peak_out)
  * last active sender wins; re-anchoring happens in the jitter buffer). */
 static rt_peer_t *select_active_peer(void)
 {
+    static rt_peer_t *playing;
     rt_peer_t *best = NULL;
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *p = &s_peer[i];
-        if (!p->in_use || !p->jbuf || !p->have_latest) { continue; }
-        if (now_ms() - p->last_rx_ms > STREAM_IDLE_MS) { continue; }
+        if (!p->in_use || !p->jbuf || !p->order.audio) { continue; }
+        const bool pending = p->have_latest && (!p->head_valid || (int16_t)(p->head - p->latest) <= 0);
+        if (!net_rx_order_keyed(&p->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) &&
+            (!pending || (p != playing && now_ms() - p->last_rx_ms > STREAM_IDLE_MS))) { continue; }
         if (!best || p->last_rx_ms > best->last_rx_ms) { best = p; }
     }
+    playing = best;
     return best;
 }
 
@@ -1736,15 +1747,35 @@ static void bridge_key_update(bool played)
 {
     peer_lock();
     const int64_t now = now_ms();
-    if (s_rx_ptt && now - s_rx_ptt_ms > NP_RX_PTT_TIMEOUT_MS) {
-        s_rx_ptt = false;
-        netcom_note_rx_ptt(false, true);
+    rt_peer_t *active = select_active_peer();
+    const bool incoming = active && net_rx_order_keyed(&active->order, now, NP_RX_PTT_TIMEOUT_MS);
+    static uint16_t traced_epoch, traced_latest;
+    static int64_t traced_last_ms;
+    static bool traced_ptt;
+    if (active) {
+        traced_latest = active->order.latest;
+        traced_last_ms = active->order.last_ms;
+        traced_ptt = active->order.ptt;
     }
-    if (s_rx_ptt || played) { s_last_play_ms = now; }
-    const bool keyed = s_rx_ptt ||
+    const uint16_t epoch = active ? active->order.epoch : traced_epoch;
+    const bool timed_out = !incoming && s_rx_ptt && traced_ptt && now - traced_last_ms > NP_RX_PTT_TIMEOUT_MS;
+    if (incoming != s_rx_ptt || (incoming && epoch != traced_epoch)) {
+        ptt_trace_note(incoming ? PTT_TRACE_NET_ON : timed_out ? PTT_TRACE_NET_TIMEOUT : PTT_TRACE_NET_OFF,
+                       1, epoch, traced_latest);
+        traced_epoch = incoming ? epoch : 0;
+    }
+    if (incoming != s_rx_ptt) { netcom_note_rx_ptt(incoming, timed_out); }
+    s_rx_ptt = incoming;
+    s_rx_ptt_ms = incoming ? active->order.last_ms : 0;
+    const bool feeding = incoming || (active && active->have_latest &&
+        (!active->head_valid || (int16_t)(active->head - active->latest) <= 0));
+    peer_unlock();
+    voice_bridge_network_state(feeding, bridge_active());
+    const bool pcm_pending = voice_bridge_network_pending();
+    if (feeding || played || pcm_pending) { s_last_play_ms = now; }
+    const bool keyed = feeding ||
         (s_last_play_ms != 0 && now - s_last_play_ms < NP_RX_HANG_MS);
     netcom_note_rx_carrier(keyed);
-    peer_unlock();
     bool tailing = voice_net_tail_active();
     if (played) {
         s_tail_played = false;            /* a new over may have its own tone */
@@ -1759,6 +1790,7 @@ static void bridge_key_update(bool played)
     } else if (ptt_owned(PTT_OWNER_NETWORK, 1)) {
         ptt_bridge_key(false);
     }
+    voice_bridge_network_keyed(ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed());
 }
 
 static void netp2pnet_play_task(void *arg)
@@ -1768,16 +1800,22 @@ static void netp2pnet_play_task(void *arg)
     int16_t silence[NP_PKT_SAMPLES] = {0};
     int64_t next_ms = 0;
     while (!s_play_stop) {
+        /* Establish RF/lead before making the first PCM visible to monitor. */
+        bridge_key_update(false);
         if (voice_mode() == VOICE_MONITOR) {
             const int64_t now = now_ms();
             if (!next_ms || now - next_ms > 4 * NP_PKT_MS) { next_ms = now; }
             bool played = false;
             for (int due = 0; due < 4 && now >= next_ms; ++due) {
+                if (voice_bridge_room() < NP_PKT_SAMPLES) { next_ms = now; break; }
                 int peak = 0;
                 peer_lock();
                 const bool have = select_active_peer() ? peer_jbuf_next(select_active_peer(), block, &peak) : false;
                 peer_unlock();
-                if (have) { voice_bridge_inject(block, NP_PKT_SAMPLES); played = true; }
+                if (have) {
+                    sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES);
+                    voice_bridge_inject(block, NP_PKT_SAMPLES); played = true;
+                }
                 next_ms += NP_PKT_MS;
             }
             bridge_key_update(played);
@@ -1797,10 +1835,13 @@ static void netp2pnet_play_task(void *arg)
             continue;
         }
         int peak = 0;
+        const bool ready = voice_bridge_network_ready();
         peer_lock();
-        const bool have = select_active_peer() ? peer_jbuf_next(select_active_peer(), block, &peak) : false;
+        const bool have = ready && select_active_peer()
+            ? peer_jbuf_next(select_active_peer(), block, &peak) : false;
         peer_unlock();
         bridge_key_update(have);
+        if (have) { sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES); }
         int16_t *pcm = have ? block : silence;
         if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, NP_PKT_SAMPLES); }
         if (voice_dac_held_by_talk()) {
@@ -1810,6 +1851,8 @@ static void netp2pnet_play_task(void *arg)
             (void)audio_i2s_write(pcm, NP_PKT_SAMPLES);
         }
     }
+    if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
+    voice_bridge_network_cancel();
     s_play_task = NULL;
     vTaskDeleteWithCaps(NULL);
 }
@@ -1843,6 +1886,7 @@ static uint8_t          s_enc_buf[NP_AUDIO_OPUS];
 
 static bool send_audio_to_all(const int16_t *pcm, bool ptt)
 {
+    (void)net_tx_epoch(&s_tx_epoch, &s_tx_epoch_open, ptt);
     /* Encode once for every peer: the bytes are identical, only the address
      * differs.  This runs on the transmit task, not the audio task. */
     if (!s_opus_enc) {
@@ -1961,7 +2005,10 @@ static void test_tone_task(void *arg)
     const int ms = (int)(intptr_t)arg;
     rt_peer_t *p = &s_peer[SLOT_MAX - 1];
     opus_link_enc_t *enc = opus_link_enc_new();
-    if (!enc || !p->jbuf) { opus_link_enc_free(enc); s_test_tone_task = NULL; vTaskDeleteWithCaps(NULL); return; }
+    peer_lock();
+    const bool ready = enc && peer_jbuf_alloc(p);
+    peer_unlock();
+    if (!ready) { opus_link_enc_free(enc); s_test_tone_task = NULL; vTaskDeleteWithCaps(NULL); return; }
     int16_t pcm[NP_PKT_SAMPLES];
     uint8_t packet[NP_AUDIO_OPUS];
     const int frames = (ms + NP_PKT_MS - 1) / NP_PKT_MS;
@@ -2025,22 +2072,6 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
         return ESP_FAIL;
     }
 
-    if (!s_peer[0].jbuf) {
-        const size_t bytes = (size_t)SLOT_MAX * JBUF_SLOTS * NP_AUDIO_OPUS;
-        uint8_t (*alloc)[NP_AUDIO_OPUS] =
-            (uint8_t (*)[NP_AUDIO_OPUS])heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-        if (!alloc) {
-            ESP_LOGE(TAG, "start: PSRAM jitter alloc failed (%u bytes)", (unsigned)bytes);
-            (void)netp2pnet_stop();
-            return ESP_ERR_NO_MEM;
-        }
-        for (int i = 0; i < SLOT_MAX; ++i) {
-            s_peer[i].jbuf = &alloc[i * JBUF_SLOTS];
-        }
-        ESP_LOGI(TAG, "jitter buffers in PSRAM: %u bytes at %p",
-                 (unsigned)bytes, (void *)alloc);
-    }
-
     if (!s_peer_mux) { s_peer_mux = xSemaphoreCreateMutex(); }
     if (!s_tx_mux) { s_tx_mux = xSemaphoreCreateMutex(); }
     if (!s_peer_mux || !s_tx_mux) { return ESP_ERR_NO_MEM; }
@@ -2082,6 +2113,7 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
         if (p->in_use) {
             p->linked = false;
             peer_reset_stream(p);
+            memset(&p->order, 0, sizeof(p->order));
             p->last_rx_ms = 0;
             p->last_frame_ms = 0;
             p->last_linked_ms = 0;
@@ -2101,6 +2133,8 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
     tx_lock();
     s_tx_acc_n = 0;
     s_tx_seq = 0;
+    s_tx_epoch = (uint16_t)esp_random(); if (!s_tx_epoch) { s_tx_epoch = 1; }
+    s_tx_epoch_open = false;
     tx_unlock();
     s_amp_on = false;
     s_last_play_ms = 0;
@@ -2178,7 +2212,9 @@ static esp_err_t netp2pnet_stop(void)
     s_pend_probe.pending = false;
     peer_lock();
     for (int i = 0; i < SLOT_MAX; ++i) {
-        if (s_peer[i].in_use) { s_peer[i].linked = false; peer_reset_stream(&s_peer[i]); }
+        rt_peer_t *p = &s_peer[i];
+        if (p->in_use) { p->linked = false; peer_reset_stream(p); }
+        peer_audio_free(p);
     }
     peer_unlock();
     tx_lock();
@@ -2246,19 +2282,19 @@ static void netp2pnet_stats(uint32_t *tx_msgs, uint32_t *rx_msgs,
     peer_unlock();
 }
 
-/* How long the roster has been without a linked peer, measured from the last
- * moment a peer was LINKED.  A member whose hub vanished reports "hub offline"
- * once this passes the same 90 s that expires a link. */
+/* Only a known hub can be reported offline. An ordinary expired peer must not
+ * create a fictitious hub-offline warning. Any live hub keeps the route up. */
 static int64_t hub_quiet_ms(void)
 {
     int64_t quiet = 0;
     const int64_t now = now_ms();
     for (int i = 0; i < SLOT_MAX; ++i) {
         const rt_peer_t *p = &s_peer[i];
-        if (!p->in_use || p->selftest || p->linked || p->last_linked_ms == 0) {
+        if (!p->in_use || p->selftest || p->via_hub || !p->hub || p->last_frame_ms == 0) {
             continue;
         }
-        const int64_t q = now - p->last_linked_ms;
+        const int64_t q = now - p->last_frame_ms;
+        if (p->linked && q <= PEER_EXPIRE_MS) { return 0; }
         if (q > quiet) {
             quiet = q;
         }
@@ -2284,10 +2320,10 @@ static void netp2pnet_diag(char *out, size_t n)
     }
     const int64_t age = s_last_stun_ms ? (now_ms() - s_last_stun_ms) / 1000 : -1;
     const int64_t quiet = hub_quiet_ms();
-    snprintf(out, n, "pub %s:%u (%s)%s stun %llds rtt %d ms | links %d/4 hub:%s",
+    snprintf(out, n, "pub %s:%u (%s)%s stun %llds rtt %d ms | links %d/%d hub:%s",
              pub, (unsigned)s_pub_port, pp,
              (age >= 0 && age < 30) ? "" : " STALE",
-             (long long)age, s_last_rtt_ms, linked, s_hub_on ? "on" : "off");
+             (long long)age, s_last_rtt_ms, linked, PEER_MAX, s_hub_on ? "on" : "off");
     if (!s_hub_on && quiet > PEER_EXPIRE_MS) {
         const size_t used = strlen(out);
         snprintf(out + used, n - used, " | hub offline %llds",
@@ -2331,9 +2367,9 @@ void netp2pnet_init(void)
 
 /* --------------------------------------------------------------- public API */
 
-esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
+esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_t port, bool restore)
 {
-    if (!name || !ip || !port || strlen(name) >= 8) {
+    if (!name || !name[0] || !ip || !port || strlen(name) >= 8) {
         return ESP_ERR_INVALID_ARG;
     }
     peer_lock();
@@ -2352,6 +2388,10 @@ esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
         peer_unlock();
         return ESP_ERR_INVALID_ARG;
     }
+    if (!np_addr_set(&a)) { peer_unlock(); return ESP_ERR_INVALID_ARG; }
+    if (s_access_error) { peer_unlock(); return ESP_ERR_INVALID_STATE; }
+    const int denied = denied_address(&a);
+    if (denied >= 0 && !restore) { peer_unlock(); return ESP_ERR_INVALID_STATE; }
     /* Replace an existing entry for the same (address, port). */
     rt_peer_t *p = NULL;
     for (int i = 0; i < SLOT_MAX; ++i) {
@@ -2392,26 +2432,28 @@ esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
     }
     if (!p) {
         p = peer_free_slot();
-        if (!p) {
-            int oldest = 0;
-            for (int i = 1; i < PEER_MAX; ++i) {
-                if (s_peer[i].last_rx_ms < s_peer[oldest].last_rx_ms) {
-                    oldest = i;
-                }
-            }
-            p = &s_peer[oldest];
-        }
+        if (!p) { peer_unlock(); return ESP_ERR_NOT_FOUND; }
     }
-    peer_clear(p);
+    rt_peer_t previous = *p;
+    np_access_record_t restored = {0};
+    if (denied >= 0) { restored = s_denied[denied]; denied_remove((size_t)denied); }
+    /* Retain buffers until the new policy has been durably accepted. */
+    memset(p, 0, sizeof(*p));
     p->in_use = true;
     snprintf(p->name, sizeof(p->name), "%s", name);
     p->manual = true;
     peer_take_addr(p, &a);
     p->port = port;
     p->linked = false;
-    if (adopted) {
-        memcpy(p->mac, keep_mac, sizeof(p->mac));
+    if (adopted || np_access_has_mac(keep_mac)) { memcpy(p->mac, keep_mac, 6); }
+    if (denied >= 0 && np_access_has_mac(restored.mac)) { memcpy(p->mac, restored.mac, 6); }
+    esp_err_t saved = peers_save_ex(NULL, p);
+    if (saved != ESP_OK) {
+        *p = previous;
+        if (denied >= 0) { s_denied[s_denied_count++] = restored; }
+        peer_unlock(); return saved;
     }
+    peer_audio_free(&previous);
     /* Collapse duplicates for the same address.  A frame that arrives while the
      * configured slot is being replaced (or an older firmware that saved two
      * slots for one peer) can leave a second slot with the same ip:port, and
@@ -2426,17 +2468,6 @@ esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
             peer_clear(c);
         }
     }
-    tomb_clear(p->mac);
-    {
-        np_addr_t a;
-        memset(&a, 0, sizeof(a));
-        a.fam = p->fam;
-        a.ip = p->ip;
-        memcpy(a.ip6, p->ip6, sizeof(a.ip6));
-        a.port = p->port;
-        tomb_clear_addr(&a);
-    }
-    peers_save();
     char ipb[48] = "?";
     peer_addr_text(p, ipb, sizeof(ipb));
     ESP_LOGI(TAG, "peer add: '%s' %s:%u", p->name, ipb, (unsigned)port);
@@ -2444,52 +2475,51 @@ esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
     return ESP_OK;
 }
 
+esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
+{
+    return netp2pnet_peer_add_confirmed(name, ip, port, false);
+}
 esp_err_t netp2pnet_peer_del(int index)
 {
     peer_lock();
+    if (s_access_error) { peer_unlock(); return ESP_ERR_INVALID_STATE; }
     int n = 0;
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *p = &s_peer[i];
-        if (p->in_use && !p->selftest) {
-            if (n == index) {
-                /*
-                 * Tell the other side before forgetting it, otherwise it keeps
-                 * knocking and both ends disagree about whether the peer still
-                 * exists.  The result is logged: "BYE sent: no" was invisible
-                 * before and left the far end connected.
-                 */
-                bool bye_ok = false;
-                if (s_started) {
-                    bye_ok = frame_send_to(p, F_BYE, 0, false, NULL);
-                }
-                char ipb[48] = "?";
-                peer_addr_text(p, ipb, sizeof(ipb));
-                snprintf(s_last_del, sizeof(s_last_del),
-                         "%s fam=%u port=%u bye=%s rc=%d",
-                         p->name, (unsigned)p->fam, (unsigned)p->port,
-                         bye_ok ? "sent" : "FAILED", s_last_send_rc);
-                ESP_LOGW(TAG, "peer del: '%s' %s:%u fam=%u bye=%s started=%d",
-                         p->name, ipb, (unsigned)p->port, (unsigned)p->fam,
-                         bye_ok ? "sent" : "FAILED", s_started ? 1 : 0);
-                /* send the BYE a few times back to back: one datagram is
-                 * easily lost, and the far end has no other way to learn */
-                for (int k = 0; k < 3; ++k) {
-                    if (s_started) {
-                        (void)frame_send_to(p, F_BYE, 0, false, NULL);
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(15));
-                }
-                tomb_add(p);
-                peer_clear(p);
-                peers_save();
-                peer_unlock();
-                return ESP_OK;
-            }
-            n++;
+        if (!p->in_use || p->selftest || n++ != index) { continue; }
+        np_access_record_t record; peer_record(p, &record);
+        if (!np_access_has_mac(record.mac) && !peer_addr_set(p)) {
+            peer_unlock(); return ESP_ERR_INVALID_STATE;
         }
+        if (s_denied_count == NP_DENY_LIMIT) { peer_unlock(); return ESP_ERR_NO_MEM; }
+        s_denied[s_denied_count++] = record;
+        esp_err_t saved = peers_save_ex(p, NULL);
+        if (saved != ESP_OK) {
+            memset(&s_denied[--s_denied_count], 0, sizeof(s_denied[0]));
+            peer_unlock(); return saved;
+        }
+        /* Notification is best effort; local refusal does not depend on delivery. */
+        if (s_started && !p->via_hub) { (void)frame_send_to(p, F_BYE, 0, false, NULL); }
+        snprintf(s_last_del, sizeof(s_last_del), "persistent refusal (%s)",
+                 np_access_has_mac(record.mac) ? "identity" : "address only");
+        peer_clear(p);
+        peer_unlock(); return ESP_OK;
     }
-    peer_unlock();
-    return ESP_ERR_NOT_FOUND;
+    peer_unlock(); return ESP_ERR_NOT_FOUND;
+}
+esp_err_t netp2pnet_unblock(const char *id)
+{
+    if (!id || !*id) { return ESP_ERR_INVALID_ARG; }
+    peer_lock();
+    for (size_t i = 0; i < s_denied_count; ++i) {
+        char key[56]; np_access_id(&s_denied[i], key, sizeof(key));
+        if (strcmp(key, id)) { continue; }
+        np_access_record_t r = s_denied[i]; denied_remove(i);
+        esp_err_t saved = peers_save_ex(NULL, NULL);
+        if (saved != ESP_OK) { s_denied[s_denied_count++] = r; }
+        peer_unlock(); return saved;
+    }
+    peer_unlock(); return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t netp2pnet_peer_knock(int index)
@@ -2550,6 +2580,13 @@ static const char *peer_state_str(const rt_peer_t *p)
     if (!p->in_use) {
         return "empty";
     }
+    if (p->via_hub) {
+        const rt_peer_t *upstream = peer_by_mac(p->hub_mac);
+        if (!upstream || !upstream->linked || now_ms() - upstream->last_frame_ms > PEER_EXPIRE_MS) {
+            return "expired";
+        }
+        return p->linked && now_ms() - p->last_frame_ms <= PEER_EXPIRE_MS ? "linked" : "expired";
+    }
     /*
      * Liveness is last_frame_ms, the same clock the engine expires on
      * (engine_tick_timers).  This used last_rx_ms, which is AUDIO only, so a
@@ -2606,8 +2643,14 @@ int netp2pnet_peer_info(int index, char *name, size_t name_len,
 esp_err_t netp2pnet_hub_set(bool on)
 {
     peer_lock();
+    const bool previous = s_hub_on;
     s_hub_on = on;
     peers_save();
+    if (s_peers_dirty) {
+        s_hub_on = previous;
+        peer_unlock();
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "hub -> %s", on ? "ON" : "off");
     peer_unlock();
     return ESP_OK;
@@ -2722,6 +2765,7 @@ void netp2pnet_factory_reset(void)
             peer_clear(&s_peer[i]);
         }
     }
+    s_denied_count = 0; memset(s_denied, 0, sizeof(s_denied)); s_access_error = false;
     s_hub_on = false;
     s_have_override = false;
     s_ovr_host[0] = '\0';
@@ -2777,8 +2821,15 @@ void netp2pnet_status_json(char *buf, size_t n)
     }
     const char *nat = (s_port_preserving == 1) ? "port-preserving"
                     : (s_port_preserving == 2) ? "not-port-preserving" : "unknown";
-    int linked = 0;
+    int linked = 0, registered = 0, direct = 0, indirect = 0, hubs = 0;
+    unsigned audio_bytes = 0;
     for (int i = 0; i < SLOT_MAX; ++i) {
+        if (s_peer[i].in_use && !s_peer[i].selftest) { ++registered; }
+        if (s_peer[i].in_use && !s_peer[i].selftest) {
+            if (s_peer[i].via_hub) { ++indirect; }
+            else { ++direct; if (s_peer[i].hub) { ++hubs; } }
+        }
+        if (s_peer[i].jbuf) { audio_bytes += JBUF_SLOTS * (NP_AUDIO_OPUS + sizeof(uint16_t) + sizeof(bool)); }
         if (s_peer[i].in_use && s_peer[i].linked && !s_peer[i].selftest) {
             linked++;
         }
@@ -2794,7 +2845,9 @@ void netp2pnet_status_json(char *buf, size_t n)
         "\"bye_tx\":%d,\"bye_rx\":%u,\"last_del\":\"%s\","
         "\"drops\":{\"short\":%u,\"room\":%u,\"self\":%u,\"tomb\":%u,\"psk\":%u},"
         "\"hub\":%s,\"hub_offline\":%s,\"hub_quiet_s\":%lld,\"links\":%d,"
-        "\"g6\":%s,\"peers\":[",
+        "\"g6\":%s,\"peer_limit\":%d,\"peer_count\":%d,\"jbuf_bytes\":%u,\"drop_full\":%u,\"save_pending\":%s,"
+        "\"access_version\":1,\"access_ready\":%s,\"denied_count\":%u,\"denied_limit\":%u,"
+        "\"hub_role\":\"%s\",\"hub_conflict\":%s,\"direct_count\":%d,\"indirect_count\":%d,\"peers\":[",
         pub, (unsigned)s_pub_port, nat, stun_esc,
         (long long)age, s_last_rtt_ms, s_last_send_rc, (unsigned)s_bye_rx,
         s_last_del,
@@ -2802,7 +2855,11 @@ void netp2pnet_status_json(char *buf, size_t n)
         (unsigned)s_drop_tomb, (unsigned)s_drop_psk,
         s_hub_on ? "true" : "false", hub_offline ? "true" : "false",
         (long long)(quiet / 1000), linked,
-        netp2pnet_has_global_ipv6() ? "true" : "false");
+        netp2pnet_has_global_ipv6() ? "true" : "false", PEER_MAX, registered,
+        audio_bytes, (unsigned)s_drop_full, s_peers_dirty ? "true" : "false",
+        s_access_error ? "false" : "true", (unsigned)s_denied_count, NP_DENY_LIMIT,
+        s_hub_on ? "hub" : hubs ? "member" : "direct",
+        s_hub_on && hubs ? "true" : "false", direct, indirect);
     if (off >= n) { off = n - 1; }
     bool first = true;
     size_t peer_start[SLOT_MAX];
@@ -2812,19 +2869,25 @@ void netp2pnet_status_json(char *buf, size_t n)
         if (!p->in_use || p->selftest) {
             continue;
         }
-        char ipb[48] = "0.0.0.0", name_esc[32];
-        peer_addr_text(p, ipb, sizeof(ipb));
+        char ipb[48] = "", name_esc[32], via_esc[32] = "";
+        if (!p->via_hub && peer_addr_set(p)) { peer_addr_text(p, ipb, sizeof(ipb)); }
+        if (p->via_hub) {
+            const rt_peer_t *upstream = peer_by_mac(p->hub_mac);
+            if (upstream) { json_escape_str_n(upstream->name, via_esc, sizeof(via_esc)); }
+        }
         json_escape_str_n(p->name, name_esc, sizeof(name_esc));
         if (peer_marks < SLOT_MAX) {
             peer_start[peer_marks++] = off;
         }
         off += (size_t)snprintf(buf + off, n - off,
             "%s{\"name\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
-            "\"rtt_ms\":%d,\"rx\":%u,\"tx\":%u,\"drop\":%u,\"audio_idle_s\":%lld}",
+            "\"rtt_ms\":%d,\"rx\":%u,\"tx\":%u,\"drop\":%u,\"audio_idle_s\":%lld,"
+            "\"route\":\"%s\",\"via\":\"%s\",\"hub\":%s}",
             first ? "" : ",", name_esc, ipb, (unsigned)p->port,
             peer_state_str(p), p->rtt_ms,
             (unsigned)p->rx_msgs, (unsigned)p->tx_msgs, (unsigned)p->rx_drop,
-            (long long)(p->last_rx_ms ? (now_ms() - p->last_rx_ms) / 1000 : -1));
+            (long long)(p->last_rx_ms ? (now_ms() - p->last_rx_ms) / 1000 : -1),
+            p->via_hub ? "hub" : "direct", via_esc, p->hub ? "true" : "false");
         first = false;
         if (off >= n) { off = n - 1; }
     }
@@ -2843,4 +2906,32 @@ void netp2pnet_status_json(char *buf, size_t n)
     buf[off++] = '}';
     buf[off] = '\0';
     peer_unlock();
+}
+
+/* Separate bounded endpoint: 64 refusals must not crowd the main status/audio poll. */
+esp_err_t netp2pnet_denied_json(char *buf, size_t n)
+{
+    if (!buf || n < 32) { return ESP_ERR_INVALID_ARG; }
+    peer_lock();
+    size_t off = (size_t)snprintf(buf, n, "{\"count\":%u,\"limit\":%u,\"ready\":%s,\"entries\":[",
+        (unsigned)s_denied_count, NP_DENY_LIMIT, s_access_error ? "false" : "true");
+    for (size_t i = 0; i < s_denied_count; ++i) {
+        const np_access_record_t *r = &s_denied[i];
+        char id[56], name[32], address[48] = "";
+        np_access_id(r, id, sizeof(id)); json_escape_str_n(r->peer.name, name, sizeof(name));
+        if (r->peer.family == 6) {
+            struct in6_addr a; memcpy(&a, r->peer.address, 16); inet_ntop(AF_INET6, &a, address, sizeof(address));
+        } else if (r->peer.family == 4) {
+            struct in_addr a = {.s_addr = be32(r->peer.address)}; inet_ntoa_r(a, address, sizeof(address));
+        }
+        if (off >= n) { peer_unlock(); return ESP_ERR_NO_MEM; }
+        int wrote = snprintf(buf + off, n - off,
+            "%s{\"id\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"identity\":%s}",
+            i ? "," : "", id, name, address, (unsigned)r->peer.port,
+            np_access_has_mac(r->mac) ? "true" : "false");
+        if (wrote < 0 || (size_t)wrote >= n - off) { peer_unlock(); return ESP_ERR_NO_MEM; }
+        off += (size_t)wrote;
+    }
+    if (off + 3 > n) { peer_unlock(); return ESP_ERR_NO_MEM; }
+    memcpy(buf + off, "]}", 3); peer_unlock(); return ESP_OK;
 }

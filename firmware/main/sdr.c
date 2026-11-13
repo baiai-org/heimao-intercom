@@ -22,6 +22,7 @@
 #include "ptt.h"
 #include "voice.h"
 #include "netcom.h"
+#include "monitor_rx.h"
 
 static const char *TAG = "sdr";
 
@@ -76,14 +77,11 @@ static bool          s_inited;
 
 static int16_t *s_rx_ring;
 static int16_t *s_tx_ring;
-static volatile size_t s_rx_head, s_rx_tail;
+static monitor_rx_t s_monitor;
 static volatile size_t s_tx_head, s_tx_tail;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-/* Whether the current monitor block is allowed to enter the browser RX ring.
- * A close edge drops already queued board-side audio so a stale hiss cannot be
- * sent after the module squelch has closed. */
-static bool s_rx_gate_known;
-static bool s_rx_gate_open;
+/* The RX ring and its RF/network arbitration share s_mux. Local microphone
+ * TX stays muted through its release tail; NETWORK-owned RF TX is audible. */
 
 static httpd_handle_t s_server;
 static volatile int   s_ws_fd = -1;
@@ -102,9 +100,6 @@ static volatile uint32_t s_tx_dry;
 static volatile uint32_t s_tx_samples;
 static volatile uint32_t s_ws_frames;   /* audio frames from the page */
 static volatile uint32_t s_ws_bytes;
-static volatile uint32_t s_rx_drop;     /* samples thrown away because the RX
-                                         * ring was full (a slow/stalled link
-                                         * that the handler could not drain) */
 static volatile uint32_t s_ws_send_err; /* frames the socket refused */
 /* Browser TX level diagnostics: maxima for the current SDR session. */
 static volatile uint32_t s_tx_raw_peak;
@@ -133,7 +128,8 @@ void sdr_init(void)
         s_rx_ring = s_tx_ring = NULL;
         return;
     }
-    s_rx_head = s_rx_tail = 0;
+    monitor_rx_init(&s_monitor, s_rx_ring, SDR_RX_RING_SAMPLES);
+    monitor_rx_mode(&s_monitor, netcom_mode());
     s_tx_head = s_tx_tail = 0;
     s_session = esp_random();
     if (!s_session) { s_session = 1; }
@@ -191,30 +187,33 @@ static size_t ring_take(int16_t *ring, size_t cap, volatile size_t *head,
 
 void sdr_rx_push(const int16_t *pcm, size_t n, bool enabled)
 {
-    if (!s_on || !enabled) {
-        if (s_on && !enabled) {
-            portENTER_CRITICAL(&s_mux);
-            if (!s_rx_gate_known || s_rx_gate_open) {
-                s_rx_tail = s_rx_head;
-            }
-            s_rx_gate_known = true;
-            s_rx_gate_open = false;
-            portEXIT_CRITICAL(&s_mux);
-        }
-        return;
-    }
+    if (!s_on) { return; }
+    const int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_mux);
-    s_rx_gate_known = true;
-    s_rx_gate_open = true;
+    if (s_on) { monitor_rx_rf(&s_monitor, pcm, n, enabled, now); }
     portEXIT_CRITICAL(&s_mux);
-    ring_put(s_rx_ring, SDR_RX_RING_SAMPLES, &s_rx_head, &s_rx_tail, pcm, n,
-             &s_rx_drop);
+}
+void sdr_rx_network_push(uint8_t mode, const int16_t *pcm, size_t n)
+{
+    if (!s_on) { return; }
+    const int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_mux);
+    if (s_on) { monitor_rx_network(&s_monitor, mode, pcm, n, now); }
+    portEXIT_CRITICAL(&s_mux);
+}
+void sdr_rx_network_mode(uint8_t mode)
+{
+    portENTER_CRITICAL(&s_mux);
+    monitor_rx_mode(&s_monitor, mode);
+    portEXIT_CRITICAL(&s_mux);
 }
 
 size_t sdr_rx_take(int16_t *out, size_t n)
 {
-    return ring_take(s_rx_ring, SDR_RX_RING_SAMPLES, &s_rx_head, &s_rx_tail,
-                     out, n);
+    portENTER_CRITICAL(&s_mux);
+    const size_t used = monitor_rx_take(&s_monitor, out, n);
+    portEXIT_CRITICAL(&s_mux);
+    return used;
 }
 
 void sdr_note_rx_sent(size_t samples)
@@ -311,6 +310,7 @@ static void release_locked(const char *reason)
     s_end_reason = reason;
     portENTER_CRITICAL(&s_mux);
     s_tx_tail = s_tx_head;
+    monitor_rx_local_tx(&s_monitor, false);
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -410,6 +410,7 @@ bool sdr_ptt_request(uint32_t sid, uint32_t tx, bool on)
                     } else {
                         portENTER_CRITICAL(&s_mux);
                         s_tx_tail = s_tx_head;
+                        monitor_rx_local_tx(&s_monitor, true);
                         portEXIT_CRITICAL(&s_mux);
                         s_tx_id = tx;
                         s_ptt_hold = true;
@@ -683,7 +684,7 @@ bool sdr_ws_attach(httpd_handle_t server, int fd, uint32_t sid)
         s_server = server; s_ws_fd = fd; s_ws_last_us = s_client_us = now;
         s_ws_dead = false;
         portENTER_CRITICAL(&s_mux);
-        s_rx_tail = s_rx_head;
+        monitor_rx_clear(&s_monitor);
         portEXIT_CRITICAL(&s_mux);
     }
     xSemaphoreGive(s_key);
@@ -720,7 +721,9 @@ esp_err_t sdr_set_enabled(bool on)
         s_monitor_borrowed = true;
         xSemaphoreTake(s_key, portMAX_DELAY);
         portENTER_CRITICAL(&s_mux);
-        s_rx_head = s_rx_tail = s_tx_head = s_tx_tail = 0;
+        s_tx_head = s_tx_tail = 0;
+        monitor_rx_clear(&s_monitor);
+        monitor_rx_local_tx(&s_monitor, false);
         portEXIT_CRITICAL(&s_mux);
         s_tx_raw_peak = 0;
         s_tx_processed_peak = 0;
@@ -746,7 +749,11 @@ esp_err_t sdr_set_enabled(bool on)
         }
     } else {
         xSemaphoreTake(s_key, portMAX_DELAY);
-        release_locked("disabled"); s_on = false; s_ws_fd = -1;
+        release_locked("disabled");
+        portENTER_CRITICAL(&s_mux);
+        s_on = false; monitor_rx_clear(&s_monitor);
+        portEXIT_CRITICAL(&s_mux);
+        s_ws_fd = -1;
         xSemaphoreGive(s_key);
         /* The tx task can run this off path itself when an orphaned session
          * self-shuts (s_ws_dead); it must not wait on its own handle -- the
@@ -860,6 +867,11 @@ void sdr_status_json(char *buf, size_t n)
     const int64_t now = esp_timer_get_time();
     const unsigned long long pcm_age_ms = s_pcm_us ? (unsigned long long)
         ((now - s_pcm_us) / 1000) : 0ULL;
+    portENTER_CRITICAL(&s_mux);
+    const monitor_rx_source_t source = s_monitor.source;
+    const unsigned rf_samples = s_monitor.rf_samples, network_samples = s_monitor.network_samples;
+    const unsigned drops = s_monitor.drops;
+    portEXIT_CRITICAL(&s_mux);
     snprintf(buf, n,
         "\"sdr\":{\"on\":%s,\"ws\":%s,\"sid\":%lu,\"txid\":%lu,\"ptt\":%s,\"owner\":\"%s\",\"reason\":\"%s\","
         "\"rel\":%s,\"tail\":%s,\"hold\":%s,\"pcm_age_ms\":%llu,\"ring\":%u,"
@@ -868,6 +880,7 @@ void sdr_status_json(char *buf, size_t n)
         "\"rel_tail_timeout\":%u,\"rel_released_notail\":%u,"
         "\"off_stale\":%u,\"off_reject\":%u,\"on_reject\":%u,"
         "\"begin_busy\":%u,\"owner_mismatch\":%u,"
+        "\"rx_source\":\"%s\",\"rf_samples\":%u,\"network_samples\":%u,"
         "\"rx\":%u,\"rsmp\":%llu,\"tx\":%u,\"dry\":%u,\"inj\":%u,\"starve\":%u,\"smp\":%u,\"blk\":%u,\"trim\":%u,\"wf\":%u,\"wb\":%u,\"drop\":%u,\"werr\":%u,\"rawpk\":%u,\"outpk\":%u,\"clip\":%u}",
         s_on ? "true" : "false", s_ws_fd >= 0 ? "true" : "false",
         (unsigned long)s_session, (unsigned long)s_tx_id,
@@ -883,10 +896,12 @@ void sdr_status_json(char *buf, size_t n)
         (unsigned)s_rel_tail_timeout, (unsigned)s_rel_released_notail,
         (unsigned)s_off_stale, (unsigned)s_off_reject, (unsigned)s_on_reject,
         (unsigned)s_begin_busy, (unsigned)s_owner_mismatch,
+        source == MONITOR_RX_NETWORK ? "network" : source == MONITOR_RX_RF ? "rf" : "none",
+        rf_samples, network_samples,
         (unsigned)s_rx_pkts, (unsigned long long)s_rx_smp, (unsigned)s_tx_pkts,
         (unsigned)s_tx_dry, (unsigned)voice_bridge_level(), (unsigned)voice_bridge_starve(),
         (unsigned)s_tx_samples, (unsigned)voice_bridge_blocks(), (unsigned)voice_bridge_trim(),
-        (unsigned)s_ws_frames, (unsigned)s_ws_bytes, (unsigned)s_rx_drop, (unsigned)s_ws_send_err,
+        (unsigned)s_ws_frames, (unsigned)s_ws_bytes, drops, (unsigned)s_ws_send_err,
         (unsigned)s_tx_raw_peak, (unsigned)s_tx_processed_peak,
         (unsigned)s_tx_processed_clip);
     xSemaphoreGive(s_key);

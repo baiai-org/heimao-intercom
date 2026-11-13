@@ -22,7 +22,7 @@ function run(state) {
     console,
   };
   for (const [id, spec] of Object.entries(state)) elements[id] = mk(spec.value, spec.options || []);
-  const fn = new Function('$', 'cmd', 'Date', block + '; return {pushTx, pushRx, toneToSendTx, toneToSendRx};');
+  const fn = new Function('$', 'cmd', 'Date', "let subWrites=0, subPendingUntil=0, last=''; const setTimeout=()=>0, refresh=()=>{};\n" + block + '; return {pushTx, pushRx, toneToSendTx, toneToSendRx};');
   const api = fn(context.$, context.cmd, context.Date);
   return {api, calls, elements};
 }

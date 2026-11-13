@@ -42,6 +42,7 @@
 #include "board_hw.h"
 #include "bridge.h"
 #include "channels.h"
+#include "channel_control.h"
 #include "netcom.h"
 #include "net_wifi.h"
 #include "ptt.h"
@@ -52,7 +53,6 @@ static const char *TAG = "frontpanel";
 
 #define NVS_NS       "orl"
 #define KEY_ACT      "fp_act"     /* blob, FP_KEY_COUNT bytes */
-#define KEY_CHAN     "fp_chan"    /* u8, 1-based current preset */
 
 #define FP_TICK_MS        20
 #define FP_DEBOUNCE       3       /* samples; 3 x 20 ms = 60 ms */
@@ -62,12 +62,11 @@ static const char *TAG = "frontpanel";
 /*
  * Physical order matches the header's key index documentation:
  *
- *   index 0  VOL+  IO38      index 1  VOL-  IO39
+ *   index 0  VOL+  IO39      index 1  VOL-  IO38
  *   index 2  CH+   IO15      index 3  CH-   IO16
  *
- * The volume pair is the way round the built v0.4 panel behaves (pressing the
- * IO39 button lowers the volume); the aliases in board_pins.h carry that, so
- * the labels, the defaults and the pins all agree.
+ * GPIO aliases follow the operator-confirmed physical legends. Remapped actions
+ * stay attached to their logical key indices; no NVS remap blob is reset.
  */
 static const gpio_num_t  s_key_pin[FP_KEY_COUNT] = {
     PIN_KEY_VOL_UP, PIN_KEY_VOL_DN, PIN_KEY_CH_UP, PIN_KEY_CH_DN,
@@ -90,7 +89,6 @@ static bool    s_ptt_stable;
 static uint8_t s_ptt_count;
 static bool    s_ptt_owned;                 /* true while THIS key holds TALK */
 static uint32_t s_ptt_token;
-static int     s_chan = 1;                  /* 1-based preset, 0 = unknown */
 static bool    s_led_rx;
 static bool    s_led_tx;
 
@@ -105,10 +103,6 @@ static void settings_load(void)
         size_t len = sizeof(s_act);
         if (nvs_get_blob(h, KEY_ACT, s_act, &len) != ESP_OK || len != sizeof(s_act)) {
             memcpy(s_act, s_key_default, sizeof(s_act));
-        }
-        uint8_t ch = 0;
-        if (nvs_get_u8(h, KEY_CHAN, &ch) == ESP_OK && ch >= 1) {
-            s_chan = ch;
         }
         nvs_close(h);
     }
@@ -128,7 +122,6 @@ static void settings_save(void)
         return;
     }
     (void)nvs_set_blob(h, KEY_ACT, s_act, sizeof(s_act));
-    (void)nvs_set_u8(h, KEY_CHAN, (uint8_t)(s_chan < 1 ? 1 : s_chan));
     (void)nvs_commit(h);
     nvs_close(h);
 }
@@ -142,7 +135,8 @@ static void act_channel_step(int delta)
         ESP_LOGW(TAG, "channel %+d: no saved channels", delta);
         return;
     }
-    int idx = (s_chan >= 1 && s_chan <= n) ? s_chan + delta : 1;
+    const int current = channel_current();
+    int idx = (current >= 1 && current <= n) ? current + delta : 1;
     if (idx < 1) {
         idx = n;
     }
@@ -164,14 +158,11 @@ static void act_channel_step(int delta)
         return;
     }
     char log[192] = {0};
-    const esp_err_t err = sa818_cfg_update(&cfg, log, sizeof(log));
-    bridge_apply();
+    const esp_err_t err = channel_select(idx, false, log, sizeof(log));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "channel %d/%d apply failed: %s", idx, n, log);
         return;
     }
-    s_chan = idx;
-    settings_save();
     ESP_LOGI(TAG, "channel -> %d/%d  %s", idx, n, log);
 }
 
@@ -211,7 +202,7 @@ static void act_squelch_step(int delta)
     }
     cfg.squelch = v;
     char log[160] = {0};
-    if (sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK) {
+    if (sa818_cfg_update_fields(&cfg, SA818_EDIT_SQ, log, sizeof(log)) == ESP_OK) {
         ESP_LOGI(TAG, "squelch -> %d/8%s", v, v == 0 ? " (open)" : "");
     } else {
         ESP_LOGW(TAG, "squelch %d failed: %s", v, log);
@@ -265,8 +256,9 @@ static void act_bridge_toggle(void)
     }
     int chan = bridge_chan();
     if (chan == 0 && channels_count() > 0) {
-        chan = (s_chan >= 1) ? s_chan : 1;
-        (void)bridge_set_chan(chan);
+        const int current = channel_current();
+        chan = (current >= 1) ? current : 1;
+        if (bridge_set_chan(chan) != ESP_OK) { return; }
     }
     const esp_err_t err = bridge_set_en(true);
     ESP_LOGI(TAG, "analog bridge -> on (channel %d) %s", bridge_chan(),
@@ -465,14 +457,13 @@ void frontpanel_get_state(frontpanel_state_t *out)
     radio_led_get_state(&out->leds);
     out->led_rx        = out->leds.rx;
     out->led_tx        = out->leds.tx;
-    out->channel       = s_chan;
+    out->channel       = channel_current();
     out->channel_count = channels_count();
 }
 
 void frontpanel_reset(void)
 {
     memcpy(s_act, s_key_default, sizeof(s_act));
-    s_chan = 1;
     settings_save();
     ESP_LOGW(TAG, "front panel reset: keys back to vol+/vol-/ch+/ch-");
 }

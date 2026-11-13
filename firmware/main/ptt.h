@@ -30,6 +30,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -175,6 +176,14 @@ typedef struct {
  * the pad still released.
  */
 esp_err_t ptt_dry_run(int tx_ms, ptt_dry_result_t *out);
+
+/* Bounded task-context event history; no PCM, credentials or addresses. */
+enum { PTT_TRACE_RF_ON=1, PTT_TRACE_RF_OFF, PTT_TRACE_COS_ON, PTT_TRACE_COS_OFF,
+       PTT_TRACE_RFNET_ON, PTT_TRACE_RFNET_OFF, PTT_TRACE_NET_ON,
+       PTT_TRACE_NET_OFF, PTT_TRACE_NET_TIMEOUT, PTT_TRACE_CFG_OK, PTT_TRACE_CFG_FAIL };
+typedef struct { uint32_t ms, sequence; uint16_t kind, source; uint32_t a, b; } ptt_trace_event_t;
+void ptt_trace_note(unsigned kind, unsigned source, uint32_t a, uint32_t b);
+size_t ptt_trace_snapshot(ptt_trace_event_t *out, size_t capacity, uint32_t *sequence);
 
 #ifdef __cplusplus
 }

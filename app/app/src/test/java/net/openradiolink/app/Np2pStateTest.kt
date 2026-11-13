@@ -5,6 +5,37 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class Np2pStateTest {
+    @Test fun forwardedMemberHasAPathAndNoFakeDirectEndpoint() {
+        val np=Np2pState.parse(JSONObject("""{"np2p":{"hub_role":"member","hub_conflict":false,"peer_limit":16,"peers":[
+            {"name":"A","ip":"192.0.2.9","port":54321,"state":"linked","hub":true},
+            {"name":"C","ip":"0.0.0.0","port":0,"state":"linked","route":"hub","via":"A"}
+        ]}}"""))
+        assertEquals("1/1",np.onlineCount());assertEquals(1,np.indirectCount)
+        assertEquals("经 A 转发 · 无直连地址",np.peers[1].address)
+        assertEquals("最近收到语音",np.peers[1].stateText)
+        assertEquals("本机连接群聊枢纽",np.roleText)
+        assertTrue(np.peers[0].isHub);assertFalse(np.hubConflict)
+    }
+    @Test fun unresolvedOldPeerNeverDisplaysAnUnusableEndpoint() {
+        val np=Np2pState.parse(JSONObject("""{"np2p":{"hub":true,"hub_conflict":true,"peers":[
+            {"ip":"0.0.0.0","port":0},{"ip":"","port":54321},{"ip":"::","port":0}
+        ]}}"""))
+        assertTrue(np.peers.all{it.address=="等待握手取得地址"})
+        assertEquals("本机是群聊枢纽",np.roleText);assertTrue(np.hubConflict)
+    }
+    @Test fun sixteenPeersAndCapacityAreNotClipped() {
+        val entries=org.json.JSONArray()
+        repeat(16){i->entries.put(JSONObject().put("name","p$i").put("ip","2001:db8::$i").put("port",54321).put("state","linked"))}
+        val st=JSONObject().put("np2p",JSONObject().put("peer_limit",16).put("peer_count",16).put("peers",entries))
+        val np=Np2pState.parse(st)
+        assertEquals(16,np.peerLimit);assertEquals(16,np.storedCount);assertEquals(16,np.peers.size)
+        assertEquals("[2001:db8::15]:54321",np.peers.last().address)
+    }
+    @Test fun capacityFallbackAndIncompleteListRemainVisible() {
+        assertEquals(4,Np2pState.parse(JSONObject().put("np2p",JSONObject())).peerLimit)
+        val np=Np2pState.parse(JSONObject("""{"np2p":{"peer_limit":16,"peer_count":16,"peers":[]}}"""))
+        assertEquals(16,np.storedCount);assertEquals(0,np.peers.size)
+    }
     private fun status(np: String, wifiIp6: String = ""): Pair<JSONObject, JSONObject> =
         JSONObject(np) to JSONObject().put("ip6", wifiIp6)
 

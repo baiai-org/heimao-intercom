@@ -15,9 +15,11 @@
  * call ptt_bridge_key() and voice_bridge_inject() directly.
  */
 #include "bridge.h"
+#include "rx_guard.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -26,11 +28,11 @@
 #include "freertos/semphr.h"
 
 #include "channels.h"
+#include "channel_control.h"
 #include "netcom.h"
 #include "ptt.h"
 #include "sa818_cfg.h"
 #include "voice.h"
-#include "voice_tail.h"
 #include "voice_tail.h"
 
 static const char *TAG = "bridge";
@@ -39,9 +41,10 @@ static const char *TAG = "bridge";
 #define KEY_EN   "bren"
 #define KEY_CHAN "brchan"
 
-static bool s_en;
-static int  s_chan;      /* 1-based preset index; 0 = none */
-static bool s_active;
+static atomic_bool s_en;
+static atomic_int s_chan;      /* 1-based preset index; 0 = none */
+static atomic_bool s_active;
+static SemaphoreHandle_t s_state_mux;
 
 /*
  * RF -> network has a stream-level PTT edge in addition to the PCM blocks.
@@ -68,7 +71,7 @@ static void rx_tx_unlock(void)
 }
 
 /* Send exactly one PTT=0 frame for the current RF -> network stream. */
-static void bridge_rx_end_locked(void)
+static void bridge_rx_end_locked(bool with_tail)
 {
     if (!s_rx.open) {
         return;
@@ -76,7 +79,7 @@ static void bridge_rx_end_locked(void)
     s_rx.end_ms = esp_timer_get_time() / 1000;
     /* Courtesy tone for the RF -> net over: the relay that received it writes
      * the tone into the stream, so the far end just forwards it. */
-    if (tail_should_play(netcom_mode())) {
+    if (with_tail && tail_should_play(netcom_mode())) {
         const int id = tail_get();
         if (id > TAIL_OFF && id < TAIL_COUNT) {
             int16_t buf[240];
@@ -93,13 +96,21 @@ static void bridge_rx_end_locked(void)
         netcom_tx_end();
     s_rx.open = false;
     ++s_rx.ends;
+    ptt_trace_note(PTT_TRACE_RFNET_OFF, netcom_mode(), s_rx.ends, with_tail ? 1 : 0);
     ESP_LOGI(TAG, "RF->NET PTT end");
 }
 
 void bridge_rx_end(void)
 {
     rx_tx_lock();
-    bridge_rx_end_locked();
+    bridge_rx_end_locked(true);
+    rx_tx_unlock();
+}
+
+void bridge_rx_inhibit(void)
+{
+    rx_tx_lock();
+    bridge_rx_end_locked(false);
     rx_tx_unlock();
 }
 
@@ -123,29 +134,15 @@ static bool want_active(void)
         && netcom_engine_running();
 }
 
-/* Apply the selected channel's complete radio profile to the SA818. */
-static esp_err_t tune_channel(int index)
-{
-    sa818_cfg_t cfg;
-    if (!channels_get(index - 1, NULL, 0, &cfg)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    char slog[160];
-    esp_err_t e = sa818_cfg_update(&cfg, slog, sizeof(slog));
-    if (e != ESP_OK) {
-        ESP_LOGW(TAG, "tune to channel %d failed: %s", index, slog);
-        return e;
-    }
-    ESP_LOGW(TAG, "tuned to channel %d: %s", index, slog);
-    return ESP_OK;
-}
-
 void bridge_init(void)
 {
+    channel_control_init();
+    rx_guard_init();
     s_en = false;
     s_chan = 0;
     s_active = false;
     memset(&s_rx, 0, sizeof(s_rx));
+    s_state_mux = xSemaphoreCreateMutex();
     s_rx_tx_mux = xSemaphoreCreateMutex();
     if (!s_rx_tx_mux) {
         ESP_LOGE(TAG, "RF->NET edge mutex allocation failed");
@@ -164,21 +161,22 @@ void bridge_init(void)
     ESP_LOGI(TAG, "init: en=%d chan=%d", s_en ? 1 : 0, s_chan);
 }
 
-static void persist(void)
+static esp_err_t persist_values(bool en, int chan)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-        return;
-    }
-    (void)nvs_set_u8(h, KEY_EN, s_en ? 1 : 0);
-    (void)nvs_set_u8(h, KEY_CHAN, (uint8_t)s_chan);
-    (void)nvs_commit(h);
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) { return err; }
+    err = nvs_set_u8(h, KEY_EN, en ? 1 : 0);
+    if (err == ESP_OK) { err = nvs_set_u8(h, KEY_CHAN, (uint8_t)chan); }
+    if (err == ESP_OK) { err = nvs_commit(h); }
     nvs_close(h);
+    return err;
 }
 
 void bridge_apply(void)
 {
     const bool want = want_active();
+    rx_guard_context(netcom_mode(), want);
     if (want && !s_active) {
         /* Keep the operator's current radio profile. */
         /* Start unkeyed; the playback task keys up with the room audio. */
@@ -195,7 +193,7 @@ void bridge_apply(void)
         const bool was_active = s_active;
         /* Block new samples before sending the end marker or stopping capture. */
         s_active = false;
-        bridge_rx_end_locked();
+        bridge_rx_end_locked(true);
         rx_tx_unlock();
         if (was_active) {
             if (ptt_bridge_keyed()) {
@@ -210,8 +208,13 @@ void bridge_apply(void)
 
 esp_err_t bridge_set_en(bool en)
 {
-    s_en = en;
-    persist();
+    if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t err = persist_values(en, s_chan);
+    if (err == ESP_OK) { s_en = en; }
+    xSemaphoreGive(s_state_mux);
+    if (err != ESP_OK) { return err; }
     bridge_apply();
     ESP_LOGI(TAG, "enabled -> %d", s_en ? 1 : 0);
     return ESP_OK;
@@ -219,27 +222,22 @@ esp_err_t bridge_set_en(bool en)
 
 esp_err_t bridge_set_chan(int index)
 {
-    if (index < 0) {
-        index = 0;
+    char log[192];
+    const esp_err_t err = channel_select(index, true, log, sizeof(log));
+    if (err != ESP_OK) { ESP_LOGW(TAG, "channel selection failed: %s", log); }
+    return err;
+}
+
+esp_err_t bridge_channel_selected(int index, bool bind_bridge)
+{
+    if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
     }
-    if (index > 0 && index > channels_count()) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (index >= 1) {
-        sa818_cfg_t cfg;
-        if (!channels_get(index - 1, NULL, 0, &cfg) || !sa818_cfg_compatible(&cfg)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        if (s_chan != index || !sa818_cfg_tx_ready()) {
-            const esp_err_t e = tune_channel(index);
-            if (e != ESP_OK) {
-                bridge_apply();
-                return e;
-            }
-        }
-    }
-    s_chan = index;
-    persist();
+    if (!bind_bridge && !s_en) { xSemaphoreGive(s_state_mux); return ESP_OK; }
+    const esp_err_t err = persist_values(s_en, index);
+    if (err == ESP_OK) { s_chan = index; }
+    xSemaphoreGive(s_state_mux);
+    if (err != ESP_OK) { return err; }
     bridge_apply();
     ESP_LOGI(TAG, "channel -> %d", s_chan);
     return ESP_OK;
@@ -248,8 +246,10 @@ esp_err_t bridge_set_chan(int index)
 void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled)
 {
     rx_tx_lock();
-    if (!s_active || !sa818_cfg_tx_ready() || !enabled || !squelch_open || ptt_bridge_keyed()) {
-        bridge_rx_end_locked();
+    const bool inhibited = (rx_guard_blocked() & RX_GUARD_OUT_NET) != 0;
+    if (!s_active || !sa818_cfg_tx_ready() || !enabled || !squelch_open || ptt_bridge_keyed() ||
+        inhibited) {
+        bridge_rx_end_locked(!inhibited);
         rx_tx_unlock();
         return;
     }
@@ -267,6 +267,7 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         s_rx.open = true;
         s_rx.start_ms = esp_timer_get_time() / 1000;
         ++s_rx.starts;
+        ptt_trace_note(PTT_TRACE_RFNET_ON, netcom_mode(), s_rx.starts, 0);
         ESP_LOGI(TAG, "RF->NET PTT start");
     }
     netcom_tx_sample(pcm, n, squelch_open);
@@ -275,9 +276,11 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
 
 void bridge_channel_deleted(int index)
 {
+    if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) { return; }
     if (s_chan == index + 1) { s_chan = 0; }
     else if (s_chan > index + 1) { --s_chan; }
-    persist();
+    (void)persist_values(s_en, s_chan);
+    xSemaphoreGive(s_state_mux);
     bridge_apply();
 }
 

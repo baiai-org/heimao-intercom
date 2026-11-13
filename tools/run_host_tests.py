@@ -19,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 
 KNOWN_FAIL = {
-    "test_bridge_edges.py": "host harness predates the bridge.c refactor",
-    "test_radio_profile.py": "host harness predates esp_timer/include changes in sa818_cfg.c",
     "test_tx_ownership.py": "asserts the pre-r11 browser-RX squelch rule",
     "test_app_control_panel.js": "JS harness no longer matches app_control.js timers",
 }

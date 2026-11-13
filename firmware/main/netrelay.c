@@ -31,6 +31,7 @@
  */
 #include "netrelay.h"
 #include "radio_led.h"
+#include "net_rx_order.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -38,6 +39,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -99,10 +101,8 @@ static int64_t s_tail_start_ms;
 #pragma pack(push, 1)
 typedef struct {
     uint16_t magic;
-    uint16_t reserved;   /* was the room; the relay is not grouped any more, so
-                          * it is written as 0 and never checked.  Kept in the
-                          * layout so the header stays 14 bytes and a stray
-                          * older packet is still parsed rather than misread. */
+    uint16_t reserved;   /* talk epoch with flags bit5, otherwise legacy room/
+                          * reserved. The 14-byte layout stays compatible. */
     uint16_t seq;
     uint8_t  mac[6];
     uint8_t  flags;
@@ -245,6 +245,25 @@ static opus_link_enc_t *s_opus_enc;
 static opus_link_dec_t *s_opus_dec;
 static uint8_t          s_opus_dec_mac[6];
 static uint8_t          s_stream_mac[6];
+typedef struct { uint8_t mac[6]; bool used; net_rx_order_t order; } rel_rx_source_t;
+static rel_rx_source_t s_rx_sources[16];
+static rel_rx_source_t *s_stream_source;
+static uint16_t s_tx_epoch;
+static bool s_tx_epoch_open;
+
+static rel_rx_source_t *relay_source(const uint8_t mac[6])
+{
+    rel_rx_source_t *free_slot = NULL;
+    for (unsigned i = 0; i < 16; ++i) {
+        rel_rx_source_t *s = &s_rx_sources[i];
+        if (s->used && !memcmp(s->mac, mac, 6)) { return s; }
+        if (!s->used || now_ms() - s->order.last_ms > 90000) { free_slot = s; }
+    }
+    if (!free_slot) { return NULL; }
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->used = true; memcpy(free_slot->mac, mac, 6);
+    return free_slot;
+}
 
 static void relay_reset_stream(void)
 {
@@ -257,31 +276,53 @@ static void relay_reset_stream(void)
 
 /* Only complete fixed-size codec frames reach this function.  MQTT reception
  * and the player serialize stream state with s_rx_mux. */
-static void relay_store_packet(const rel_header_t *h, const uint8_t *audio,
+static bool relay_store_packet(const rel_header_t *h, const uint8_t *audio,
                                size_t audio_len)
 {
-    if (audio_len != REL_AUDIO_OPUS || !s_jbuf) { ++s_ev_badlen; return; }
+    if (audio_len != REL_AUDIO_OPUS || !s_jbuf) { ++s_ev_badlen; return false; }
+    rel_rx_source_t *source = relay_source(h->mac);
+    if (!source) { ++s_rx_dropped; return false; }
+    net_rx_order_t next = source->order;
+    const uint16_t epoch = (h->flags & NET_RX_FLAG_EPOCH) ? h->reserved : 0;
+    const int accept = net_rx_order_accept(&next, epoch, h->seq, (h->flags & 1) != 0, now_ms());
+    if (accept == NET_RX_DROP) {
+        source->order.probe_count = next.probe_count; source->order.probe_seq = next.probe_seq;
+        source->order.probe_ms = next.probe_ms;
+        ++s_late; return false;
+    }
+    /* An unrelated sender's OFF must not replace the selected audio/PTT. */
+    if (source != s_stream_source && !(h->flags & 1)) {
+        source->order = next; return true;
+    }
     const uint16_t seq = h->seq;
     const bool sender_changed = memcmp(s_stream_mac, h->mac, 6) != 0;
-    if (sender_changed || (s_have_latest && now_ms() - s_last_pkt_ms > REL_STREAM_IDLE_MS)) {
+    const bool continuing = source->order.seen && source->order.epoch == epoch && source->order.ptt;
+    const bool pending = s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0);
+    if (continuing) { next.audio |= source->order.audio; }
+    if (sender_changed || ((accept == NET_RX_NEW || (s_have_latest && now_ms() - s_last_pkt_ms > REL_STREAM_IDLE_MS)) &&
+        !(continuing && pending))) {
         relay_reset_stream();
         memcpy(s_stream_mac, h->mac, 6);
     }
     if (s_have_latest && (int16_t)(seq - s_latest) >= REL_JBUF_SLOTS / 2) {
         relay_reset_stream();
     }
-    if (s_play_head_valid && (int16_t)(seq - s_play_head) < 0) { ++s_late; return; }
+    if (s_play_head_valid && (int16_t)(seq - s_play_head) < 0) { ++s_late; return false; }
+    const uint16_t slot = seq % REL_JBUF_SLOTS;
+    if (s_jbuf_valid[slot] && s_jbuf_seq[slot] == seq) { ++s_late; return false; }
+    source->order = next;
+    s_stream_source = source;
     if (!s_have_latest) { s_stream_first = seq; s_have_first = true; }
     if (!s_have_latest || (int16_t)(seq - s_latest) > 0) { s_latest = seq; }
     s_have_latest = true;
     s_last_rx_ms = s_last_pkt_ms = now_ms();
     ++s_rx_msgs;
-    const uint16_t slot = seq % REL_JBUF_SLOTS;
     memcpy(s_jbuf[slot], audio, REL_AUDIO_OPUS);
     memcpy(s_jbuf_mac[slot], h->mac, 6);
     s_jbuf_seq[slot] = seq;
     s_jbuf_valid[slot] = true;
     if (h->flags & 1) { radio_led_note_net_rx(NETCOM_MODE_RELAY); }
+    return true;
 }
 
 /* ------------------------------------------------------- MQTT events */
@@ -373,10 +414,6 @@ static void relay_mqtt_handler(void *arg, esp_event_base_t base,
             snprintf(id, sizeof(id), "%02x%02x%02x", h.mac[3], h.mac[4], h.mac[5]);
             rx_lock();
             peer_seen(id);
-            s_rx_ptt = (h.flags & 1) != 0;
-            s_rx_ptt_ms = now_ms();
-            netcom_note_rx_ptt(s_rx_ptt, false);
-            if (s_rx_ptt) { s_rx_hang_ms = 0; }
             relay_store_packet(&h, (const uint8_t *)ev->data + off + REL_HDR_LEN,
                                REL_AUDIO_OPUS);
             rx_unlock();
@@ -532,10 +569,10 @@ static void relay_tx_task(void *arg)
         for (;;) {
             rel_header_t *h = (rel_header_t *)(pkt + bytes);
             h->magic = REL_MAGIC;
-            h->reserved = 0;
+            h->reserved = net_tx_epoch(&s_tx_epoch, &s_tx_epoch_open, item.ptt != 0);
             h->seq = s_tx_seq++;
             memcpy(h->mac, s_mac, 6);
-            h->flags = item.ptt;
+            h->flags = item.ptt | NET_RX_FLAG_EPOCH;
             h->reserved2 = 0;
             const int n = s_opus_enc
                               ? opus_link_encode(s_opus_enc, item.pcm,
@@ -651,7 +688,8 @@ static TaskHandle_t s_play_task;
 static bool rel_jbuf_next(int16_t *out, int *peak_out)
 {
     *peak_out = 0;
-    if (s_have_latest && now_ms() - s_last_pkt_ms > REL_STREAM_IDLE_MS) {
+    if (s_have_latest && now_ms() - s_last_pkt_ms > REL_STREAM_IDLE_MS &&
+        s_play_head_valid && (int16_t)(s_play_head - s_latest) > 0) {
         s_play_head_valid = false;
         s_have_latest = false;
         s_have_first = false;
@@ -662,10 +700,11 @@ static bool rel_jbuf_next(int16_t *out, int *peak_out)
     }
     if (!s_have_latest) { return false; }
     if (!s_play_head_valid) {
-        if (!s_have_first || (int16_t)(s_latest - s_stream_first) < REL_PLAY_LAG) {
+        if (!s_have_first || (s_stream_source && net_rx_order_keyed(&s_stream_source->order, now_ms(), REL_RX_PTT_TIMEOUT_MS) &&
+            (int16_t)(s_latest - s_stream_first) < REL_PLAY_LAG)) {
             return false;
         }
-        s_play_head = (uint16_t)(s_latest - REL_PLAY_LAG);
+        s_play_head = s_stream_first;
         s_play_head_valid = true;
         ++s_primes;
         s_prime_first = s_stream_first;
@@ -717,15 +756,34 @@ static void bridge_key_update(bool played)
 {
     rx_lock();
     const int64_t now = now_ms();
-    if (s_rx_ptt && now - s_rx_ptt_ms > REL_RX_PTT_TIMEOUT_MS) {
-        s_rx_ptt = false;
-        netcom_note_rx_ptt(false, true);
+    const bool incoming = s_stream_source && net_rx_order_keyed(&s_stream_source->order, now, REL_RX_PTT_TIMEOUT_MS);
+    static uint16_t traced_epoch, traced_latest;
+    static int64_t traced_last_ms;
+    static bool traced_ptt;
+    if (s_stream_source) {
+        traced_latest = s_stream_source->order.latest;
+        traced_last_ms = s_stream_source->order.last_ms;
+        traced_ptt = s_stream_source->order.ptt;
     }
-    if (s_rx_ptt || played) { s_last_play_ms = now; }
-    const bool keyed = s_rx_ptt ||
+    const uint16_t epoch = s_stream_source ? s_stream_source->order.epoch : traced_epoch;
+    const bool timed_out = !incoming && s_rx_ptt && traced_ptt && now - traced_last_ms > REL_RX_PTT_TIMEOUT_MS;
+    if (incoming != s_rx_ptt || (incoming && epoch != traced_epoch)) {
+        ptt_trace_note(incoming ? PTT_TRACE_NET_ON : timed_out ? PTT_TRACE_NET_TIMEOUT : PTT_TRACE_NET_OFF,
+                       2, epoch, traced_latest);
+        traced_epoch = incoming ? epoch : 0;
+    }
+    if (incoming != s_rx_ptt) { netcom_note_rx_ptt(incoming, timed_out); }
+    s_rx_ptt = incoming;
+    s_rx_ptt_ms = incoming ? s_stream_source->order.last_ms : 0;
+    const bool feeding = incoming || (s_stream_source && s_stream_source->order.audio &&
+        s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0));
+    rx_unlock();
+    voice_bridge_network_state(feeding, bridge_active());
+    const bool pcm_pending = voice_bridge_network_pending();
+    if (feeding || played || pcm_pending) { s_last_play_ms = now; }
+    const bool keyed = feeding ||
         (s_last_play_ms != 0 && now - s_last_play_ms < REL_RX_HANG_MS);
     netcom_note_rx_carrier(keyed);
-    rx_unlock();
     bool tailing = voice_net_tail_active();
     if (played) {
         s_tail_played = false;            /* a new over may have its own tone */
@@ -740,6 +798,7 @@ static void bridge_key_update(bool played)
     } else if (ptt_owned(PTT_OWNER_NETWORK, 1)) {
         ptt_bridge_key(false);
     }
+    voice_bridge_network_keyed(ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed());
 }
 
 static void relay_play_task(void *arg)
@@ -749,16 +808,21 @@ static void relay_play_task(void *arg)
     int16_t silence[REL_PKT_SAMPLES] = {0};
     int64_t next_ms = 0;
     while (!s_play_stop) {
+        bridge_key_update(false);
         if (voice_mode() == VOICE_MONITOR) {
             const int64_t now = now_ms();
             if (!next_ms || now - next_ms > 4 * REL_PKT_MS) { next_ms = now; }
             bool played = false;
             for (int due = 0; due < 4 && now >= next_ms; ++due) {
+                if (voice_bridge_room() < REL_PKT_SAMPLES) { next_ms = now; break; }
                 int peak = 0;
                 rx_lock();
                 const bool have = rel_jbuf_next(block, &peak);
                 rx_unlock();
-                if (have) { voice_bridge_inject(block, REL_PKT_SAMPLES); played = true; }
+                if (have) {
+                    sdr_rx_network_push(NETCOM_MODE_RELAY, block, REL_PKT_SAMPLES);
+                    voice_bridge_inject(block, REL_PKT_SAMPLES); played = true;
+                }
                 next_ms += REL_PKT_MS;
             }
             bridge_key_update(played);
@@ -778,10 +842,12 @@ static void relay_play_task(void *arg)
             continue;
         }
         int peak = 0;
+        const bool ready = voice_bridge_network_ready();
         rx_lock();
-        const bool have = rel_jbuf_next(block, &peak);
+        const bool have = ready && rel_jbuf_next(block, &peak);
         rx_unlock();
         bridge_key_update(have);
+        if (have) { sdr_rx_network_push(NETCOM_MODE_RELAY, block, REL_PKT_SAMPLES); }
         int16_t *pcm = have ? block : silence;
         if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, REL_PKT_SAMPLES); }
         if (voice_dac_held_by_talk()) {
@@ -791,6 +857,8 @@ static void relay_play_task(void *arg)
             (void)audio_i2s_write(pcm, REL_PKT_SAMPLES);
         }
     }
+    if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
+    voice_bridge_network_cancel();
     s_play_task = NULL;
     vTaskDeleteWithCaps(NULL);
 }
@@ -979,6 +1047,8 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
     tx_lock();
     s_tx_acc_n = 0;
     s_tx_seq = 0;
+    s_tx_epoch = (uint16_t)esp_random(); if (!s_tx_epoch) { s_tx_epoch = 1; }
+    s_tx_epoch_open = false;
     tx_unlock();
     s_rx_msgs = 0;
     s_rx_dropped = 0;
@@ -990,6 +1060,7 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
     s_amp_on = false;
     s_last_play_ms = 0;
     s_rx_ptt = false;
+    memset(s_rx_sources, 0, sizeof(s_rx_sources)); s_stream_source = NULL;
 
     if (ptt_owned(PTT_OWNER_NETWORK, 1)) {
         ptt_bridge_key(false);

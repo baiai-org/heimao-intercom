@@ -329,8 +329,8 @@ int channels_list_json(char *out, size_t out_len)
         json_string(c->tx_ctcss, sizeof(c->tx_ctcss), txt);
         json_string(c->rx_ctcss, sizeof(c->rx_ctcss), rxt);
         char tx[64] = "null", rx[64] = "null";
-        if (isfinite(c->tx_mhz)) { snprintf(tx, sizeof(tx), "%.4f", (double)c->tx_mhz); }
-        if (isfinite(c->rx_mhz)) { snprintf(rx, sizeof(rx), "%.4f", (double)c->rx_mhz); }
+        if (!sa818_freq_format(c->tx_mhz, tx, sizeof(tx))) { strcpy(tx, "null"); }
+        if (!sa818_freq_format(c->rx_mhz, rx, sizeof(rx))) { strcpy(rx, "null"); }
         const sa818_band_t band = sa818_freq_pair_valid(SA818_BAND_UHF, c->tx_mhz, c->rx_mhz)
             ? SA818_BAND_UHF : sa818_freq_pair_valid(SA818_BAND_VHF, c->tx_mhz, c->rx_mhz)
             ? SA818_BAND_VHF : SA818_BAND_UNSET;

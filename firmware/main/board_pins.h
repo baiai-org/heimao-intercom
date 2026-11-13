@@ -121,8 +121,8 @@
 #define PIN_LED_RX                 GPIO_NUM_11
 #define PIN_LED_TX                 GPIO_NUM_42
 #define PIN_KEY_PTT                GPIO_NUM_41
-#define PIN_KEY_VOL_UP             GPIO_NUM_38
-#define PIN_KEY_VOL_DN             GPIO_NUM_39
+#define PIN_KEY_VOL_UP             GPIO_NUM_39
+#define PIN_KEY_VOL_DN             GPIO_NUM_38
 #define PIN_KEY_CH_UP              GPIO_NUM_15
 #define PIN_KEY_CH_DN              GPIO_NUM_16
 

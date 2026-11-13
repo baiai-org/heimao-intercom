@@ -29,7 +29,7 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 - **模拟 + 网络双链路**：RF ↔ 网络桥接、网络 P2P 直连、MQTT 中继
 - **信道库**：99 槽，频率、功率、亚音（CTCSS/DCS）、静噪、音量可配
 - **音频**：PCM16 / Opus 链路，6 段 EQ，板载尾音（唯一来源）
-- **并发写保护**：网页与 APP 可同时连接；写操作由板端串行锁保护，冲突返回 409（无登录、无控制租约）
+- **并发写保护**：网页与 APP 可同时连接；参数按字段在板端事务内合并，发话来源互斥
 - **升级**：OTA 双分区；保留配置刷机不擦 NVS/PHY/SPIFFS/另一 OTA 槽
 - **配网**：开放热点 `黑猫智能手台-XXXXXX` + `http://192.168.4.1/`，支持 mDNS
 
@@ -39,17 +39,17 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 
 ## 下载
 
-从 [Releases](../../releases) 获取（只提供这三类文件 + 校验）。固件 BIN 的文件名带固件版本号（当前 `r11-83`），升级后文件名随之变化：
+从 [Releases](../../releases) 获取（固件 r11-93 / APP 1.2.18 / 刷机工具 1.1.4；文件分别下载）。固件 BIN 的文件名带固件版本号（当前 `r11-93`），升级后文件名随之变化：
 
 | 文件 | 用途 |
 |---|---|
 | `heimao-android-<版本>.apk` | Android APP（Android 7.0+） |
-| `heimao-full-r11-83.bin` | 完整固件，USB 刷机 / 救砖 |
-| `heimao-app-OTA-r11-83.bin` | OTA 升级镜像（网页面板或 APP 上传） |
+| `heimao-full-r11-93.bin` | 完整固件，USB 刷机 / 救砖 |
+| `heimao-app-OTA-r11-93.bin` | OTA 升级镜像（网页面板或 APP 上传） |
 | `heimao-flasher-<版本>.exe` | Windows 刷机工具（**不含内置固件**，需选择上面的 full BIN） |
 | `SHA256SUMS.txt` | 校验 |
 
-> 刷机工具是 GPL-3.0 程序、固件是另一套许可，所以公开版不内嵌固件。下载后先选版本化的 full BIN，再开始刷写。
+> 刷机工具不内嵌整机固件。下载后选择独立的 full BIN，再开始刷写；固件与工具分别遵循各自许可证。
 
 ---
 
@@ -57,9 +57,9 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 
 ### 1. 刷机
 
-1. 下载 `heimao-full-r11-83.bin` 与刷机工具；
+1. 下载 `heimao-full-r11-93.bin` 与刷机工具；
 2. 用 USB 数据线连接手台，打开工具，勾选出现的 COM 口；
-3. 点击“选择 BIN”，选中 `heimao-full-r11-83.bin`（或当前版本）；
+3. 点击“选择 BIN”，选中 `heimao-full-r11-93.bin`（或当前版本）；
 4. 选择模式：
    - **保留配置**（默认）：保留 Wi-Fi、信道、参数、自定义尾音；
    - **全新刷机**：擦除整片 Flash，刷完重新配网。
@@ -81,7 +81,7 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 
 ### 4. 安装 APP
 
-安装 Release 中的 APK。APP 与网页共用控制权：一方发话时另一方等待或手动接管。
+安装 Release 中的 APK。APP 与网页共用板端发话状态；一方发话时，另一方等待结束。
 
 ---
 
@@ -105,11 +105,15 @@ ESP32-S3 网络对讲手台：一块板子同时是 **SA818S 模拟电台**、**
 | [docs/hardware.md](docs/hardware.md) | 硬件组成、模块、接线要点 |
 | [docs/PINMAP.md](docs/PINMAP.md) | ESP32-S3 引脚映射 |
 | [docs/architecture.md](docs/architecture.md) | 固件分层、音频链、网络模式、控制权 |
+| [docs/rx-guard.md](docs/rx-guard.md) | 发射后接收抑制（r11-84 / APP 1.2.14 起） |
 | [docs/api/http-api.md](docs/api/http-api.md) | HTTP/HTTPS API |
 | [docs/api/audio-ws.md](docs/api/audio-ws.md) | WebSocket 音频协议 |
 | [docs/flashing.md](docs/flashing.md) | 刷机、OTA、回退、排错 |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 常见故障 |
 | [docs/release.md](docs/release.md) | 维护者发布流程 |
+| [docs/upgrade-plan.md](docs/upgrade-plan.md) | 计划升级列表（待实施项目） |
+| [docs/network-upgrades.md](docs/network-upgrades.md) | r11-85：16 对端与网络来话 APP 监听 |
+| [docs/p2p-persistent-delete-r11-88.md](docs/p2p-persistent-delete-r11-88.md) | r11-88：删除后持久拒绝与本机恢复 |
 
 ---
 

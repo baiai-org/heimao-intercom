@@ -21,6 +21,10 @@ idf_component_register(
         "sa818_cfg.c"
         "sa818_freq.c"
         "ptt.c"
+        "rx_guard.c"
+        "monitor_rx.c"
+        "np_peer_store.c"
+        "np_access.c"
         "bringup.c"
         "audio_i2s.c"
         "audio_codec.c"
@@ -32,6 +36,7 @@ idf_component_register(
         "mp3.c"
         "ctcss.c"
         "channels.c"
+        "channel_control.c"
         "net_wifi.c"
         "wifi_policy.c"
         "device_identity.c"
@@ -58,6 +63,7 @@ idf_component_register(
         "setup.html"
         "app_control.js"
         "device_name.js"
+        "rx_guard.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
         "serverkey.pem"
@@ -93,6 +99,35 @@ idf_component_register(
         json            # bounded app/provision/control JSON request bodies
 )
 
+# Keep the SDK reproducible and untouched: replace its single translation unit
+# with a reviewed, hash-pinned build-local cleanup fix.
+idf_component_get_property(https_lib esp_https_server COMPONENT_LIB)
+idf_component_get_property(https_dir esp_https_server COMPONENT_DIR)
+set(https_source "${https_dir}/src/https_server.c")
+set(https_patch_tool "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/patch_https_server.py")
+set(https_patched "${CMAKE_BINARY_DIR}/heimao-patches/https_server.c")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${https_source}" "${https_patch_tool}")
+execute_process(COMMAND "${python}" "${https_patch_tool}" --source "${https_source}" --output "${https_patched}"
+                RESULT_VARIABLE https_patch_result ERROR_VARIABLE https_patch_error)
+if(NOT https_patch_result EQUAL 0)
+    message(FATAL_ERROR "HTTPS cleanup patch failed: ${https_patch_error}")
+endif()
+get_target_property(https_sources ${https_lib} SOURCES)
+set(https_new_sources "")
+set(https_replaced 0)
+foreach(source IN LISTS https_sources)
+    if(source MATCHES "(^|[/\\\\])https_server\\.c$")
+        list(APPEND https_new_sources "${https_patched}")
+        math(EXPR https_replaced "${https_replaced}+1")
+    else()
+        list(APPEND https_new_sources "${source}")
+    endif()
+endforeach()
+if(NOT https_replaced EQUAL 1)
+    message(FATAL_ERROR "HTTPS source substitution requires exactly one source")
+endif()
+set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
+
 # Apply the exact ADC sample clock inside the driver's start sequence, before
 # conversion is enabled, without modifying the SDK shared with the original.
 target_link_options(${COMPONENT_LIB} INTERFACE
@@ -102,3 +137,5 @@ target_link_options(${COMPONENT_LIB} INTERFACE
 # for routing, TLS and newlib formatting, and retain compiler stack reports.
 set_source_files_properties(net_http.c PROPERTIES
     COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
+set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c PROPERTIES
+    COMPILE_OPTIONS "-fstack-usage")
