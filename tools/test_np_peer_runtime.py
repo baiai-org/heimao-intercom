@@ -178,6 +178,7 @@ int main(void){
  struct {char json[5120];uint8_t guard[16];} b;memset(&b,0xa5,sizeof(b));netp2pnet_status_json(b.json,sizeof(b.json));
  for(unsigned i=0;i<16;i++)assert(b.guard[i]==0xa5);
  printf("{%s}\n",b.json);
+ max_labels=false;
  save_fail=true;peers_save();assert(s_peers_dirty);save_fail=false;peers_save();assert(!s_peers_dirty);
  // Repeat actual delete/re-add/audio allocation; capacity and memory stay bounded.
  for(int cycle=0;cycle<1000;cycle++){
@@ -293,16 +294,48 @@ int main(void){
  s_denied_count=0;for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);assert(allocations==frees);
  // A corrupt new state must never fall back to permissive legacy addresses.
  saved[0]=99;s_access_error=false;peers_load();assert(s_access_error&&!s_peer[0].in_use);
+ // A periodic collector must keep live/tail PCM and independent order history.
+ rt_peer_t *idle=&s_peer[0];idle->in_use=idle->manual=true;idle->fam=4;idle->ip=inet_addr("192.0.2.9");idle->port=54321;idle->mac[5]=9;
+ assert(peer_jbuf_alloc(idle));idle->opus_dec=malloc(1);idle->last_rx_ms=clock_ms-61000;
+ idle->order=(net_rx_order_t){.seen=true,.ptt=false,.epoch=88,.latest=40,.last_ms=clock_ms-61000};net_rx_order_t kept=idle->order;
+ idle->have_latest=idle->head_valid=true;idle->latest=40;idle->head=41;unsigned decoders=0;
+ assert(netp2pnet_cleanup_idle(clock_ms,60000,&decoders)==128*(80+2+1)&&decoders==1);
+ assert(!idle->jbuf&&!idle->opus_dec&&idle->manual&&idle->linked==false&&idle->port==54321&&idle->mac[5]==9&&!memcmp(&kept,&idle->order,sizeof(kept)));
+ assert(peer_jbuf_alloc(idle));idle->last_rx_ms=clock_ms;idle->have_latest=true;idle->head_valid=false;
+ assert(!netp2pnet_cleanup_idle(clock_ms+61000,60000,&decoders)&&idle->jbuf); // even old pending audio is protected
+ peer_reset_stream(idle);assert(netp2pnet_cleanup_idle(clock_ms+61000,60000,&decoders)==128*(80+2+1));
+ peer_clear(idle);assert(allocations==frees);
+ // Multiple unknown peers behind one IP must bind to the exact endpoint.
+ s_access_error=false;rt_peer_t *one=&s_peer[0],*two=&s_peer[1];one->in_use=two->in_use=true;one->fam=two->fam=4;
+ one->ip=two->ip=inet_addr("192.0.2.30");one->port=1000;two->port=2000;np_addr_t shared={.fam=4,.ip=one->ip,.port=2000};uint8_t shared_mac[6]={0,0,0,0,1,7};
+ assert(peer_ensure(shared_mac,&shared)==two&&!np_access_has_mac(one->mac));
+ for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);one->in_use=two->in_use=true;one->fam=two->fam=4;one->ip=two->ip=shared.ip;one->port=1000;two->port=2000;shared.port=3000;
+ rt_peer_t *separate=peer_ensure(shared_mac,&shared);assert(separate&&separate!=one&&separate!=two&&!np_access_has_mac(one->mac)&&!np_access_has_mac(two->mac));
+ for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);
  puts("PASS: actual 16-peer admission/full rejection/incoming lookup/lazy allocation/cleanup/NVS migration; hub origin/transport separation, indirect no-ping/no-NVS, promotion, accurate hub expiry and single-hop forwarding");
 }
+'''
+LABEL_STUBS=r'''
+#define PEER_LABEL_BYTES 96
+#define NP_RX_PTT_TIMEOUT_MS 2000
+static bool device_maintenance_write_begin(void){return true;}
+static void device_maintenance_write_end(void){}
+static bool peer_labels_ready(void){return true;}
+static uint32_t peer_labels_revision(void){return 0;}
+static bool max_labels;
+static void peer_labels_get(const np_access_record_t*r,char*out){(void)r;out[0]=0;if(max_labels){for(int i=0;i<24;i++)memcpy(out+4*i,"\xf0\x9f\x90\xb1",4);out[96]=0;}}
+static int peer_labels_flush(void){return 0;}
+static void peer_labels_bind(const np_access_record_t*a,const np_access_record_t*b){(void)a;(void)b;}
 '''
 def main():
  source=(ROOT/'firmware/main/netp2pnet.c').read_text(encoding='utf-8')
  types=''
  for name in ('np_addr_t','rt_peer_t'):
   end=source.index('} '+name+';')+len('} '+name+';');start=source.rfind('typedef struct {',0,end);types+=source[start:end]+'\n'
- names=['be32','put_be32','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_ensure','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','engine_tick_timers','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json']
- code=PRE+types+'\nstatic rt_peer_t s_peer[SLOT_MAX];\n'+POST+''.join(function(source,n) for n in names)+HARNESS
+ names=['be32','put_be32','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_bind_identity','peer_ensure','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','engine_tick_timers','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','peer_add_confirmed_inner','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json','netp2pnet_cleanup_idle']
+ reserve=next(x for x in (ROOT/'firmware/main/netp2pnet.h').read_text().splitlines() if x.startswith('#define NETP2PNET_STATUS_RESERVE'))
+ harness=HARNESS.replace('char json[5120]','char json[NETP2PNET_STATUS_RESERVE]').replace('struct {char json[NETP2PNET_STATUS_RESERVE]', 'max_labels=true;struct {char json[NETP2PNET_STATUS_RESERVE]')
+ code=PRE+LABEL_STUBS+reserve+'\n'+types+'\nstatic rt_peer_t s_peer[SLOT_MAX];\n'+POST+''.join(function(source,n) for n in names)+harness
  (ROOT/'.tmp').mkdir(exist_ok=True)
  with tempfile.TemporaryDirectory(prefix='np-runtime-',dir=ROOT/'.tmp') as temp:
   d=Path(temp);(d/'test.c').write_text(code,encoding='utf-8');exe=d/'test.exe';env=dict(os.environ,TEMP=temp,TMP=temp,TMPDIR=temp)
@@ -313,5 +346,6 @@ def main():
   denied=json.loads(lines[-2]);assert denied['count']==64 and len(denied['entries'])==64
   state=json.loads(lines[0])['np2p'];assert state['peer_limit']==16 and state['peer_count']==16 and len(state['peers'])==16
   assert state['jbuf_bytes']==16*128*(80+2+1)
+  assert all(len(p['name'].encode('utf-8'))==96 for p in state['peers'])
   print(lines[-1])
 if __name__=='__main__':main()

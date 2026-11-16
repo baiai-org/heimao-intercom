@@ -13,6 +13,7 @@
 #include "nvs.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "device_maintenance.h"
 #include "voice_tail.h"
 #include <stdatomic.h>
 #include "freertos/idf_additions.h"
@@ -1042,7 +1043,7 @@ static esp_err_t mp3_store(const uint8_t *w, size_t len)
     return err;
 }
 
-esp_err_t tail_custom_store(const uint8_t *w, size_t len)
+static esp_err_t tail_custom_store_inner(const uint8_t *w, size_t len)
 {
     if (len < 2) {
         return ESP_ERR_INVALID_ARG;
@@ -1060,6 +1061,13 @@ esp_err_t tail_custom_store(const uint8_t *w, size_t len)
     }
     return ESP_ERR_INVALID_ARG;          /* neither WAV nor MP3 */
 }
+esp_err_t tail_custom_store(const uint8_t *w, size_t len)
+{
+    if (!device_maintenance_write_begin()) { return ESP_ERR_INVALID_STATE; }
+    esp_err_t err = tail_custom_store_inner(w, len);
+    device_maintenance_write_end(); return err;
+}
+bool tail_store_busy(void) { return atomic_load(&s_storing); }
 
 /* ----------------------------------------------------------- fetching */
 

@@ -15,7 +15,9 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stddef.h>
 
 /* Starts the HTTP server.  Safe to call when WiFi is down -- the sockets exist
  * but have no address until the station connects. */
 esp_err_t net_http_start(void);
+size_t net_http_cleanup_idle(void);

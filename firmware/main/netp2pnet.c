@@ -51,6 +51,9 @@
 #include "netp2pnet.h"
 #include "np_access.h"
 #include "net_rx_order.h"
+#include "peer_labels.h"
+#include "device_name.h"
+#include "device_maintenance.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -639,6 +642,7 @@ done:
 static esp_err_t peers_save_ex(const rt_peer_t *exclude, const rt_peer_t *prefer)
 {
     if (s_access_error) { return ESP_ERR_INVALID_STATE; }
+    if (!device_maintenance_write_begin()) { s_peers_dirty = true; return ESP_ERR_INVALID_STATE; }
     np_access_state_t *state = heap_caps_malloc(sizeof(*state), MALLOC_CAP_SPIRAM);
     uint8_t *blob = heap_caps_malloc(NP_ACCESS_BYTES, MALLOC_CAP_SPIRAM);
     esp_err_t err = ESP_ERR_NO_MEM;
@@ -668,7 +672,7 @@ done:
     heap_caps_free(state); heap_caps_free(blob);
     s_peers_dirty = err != ESP_OK;
     if (err != ESP_OK) { ESP_LOGW(TAG, "peer/policy save pending: %s", esp_err_to_name(err)); }
-    return err;
+    device_maintenance_write_end(); return err;
 }
 static void peers_save(void) { (void)peers_save_ex(NULL, NULL); }
 
@@ -879,6 +883,12 @@ static bool ip4_is_private(uint32_t be_addr)
  * the stored address is public but the frame actually came from the LAN.
  */
 
+static void peer_bind_identity(rt_peer_t *p, const uint8_t mac[6])
+{
+    np_access_record_t before, after;
+    peer_record(p, &before); memcpy(p->mac, mac, 6); peer_record(p, &after);
+    peer_labels_bind(&before, &after);
+}
 static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
 {
     rt_peer_t *p = peer_by_mac(mac);
@@ -891,6 +901,7 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
      * left the other connected.
      */
     if (src && np_addr_set(src)) {
+        rt_peer_t *candidate = NULL; unsigned candidates = 0;
         for (int i = 0; i < SLOT_MAX; ++i) {
             rt_peer_t *c = &s_peer[i];
             if (!c->in_use || c->selftest) { continue; }
@@ -908,12 +919,18 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
             } else {
                 continue;
             }
-            memcpy(c->mac, mac, 6);
-            c->port = src->port;                /* adopt the NAT port */
+            ++candidates; candidate = c;
+            if (c->port == src->port) { candidates = 1; break; }
+        }
+        /* Shared public IPs need an exact endpoint; ambiguous NAT rewrites
+         * must not attach a name/identity to a different configured peer. */
+        if (candidate && candidates == 1) {
+            peer_bind_identity(candidate, mac);
+            candidate->port = src->port;                /* adopt the NAT port */
             s_peers_dirty = true; /* Persist the newly learned identity. */
             ESP_LOGI(TAG, "peer '%s' bound to incoming mac (%u)",
-                     c->name, (unsigned)src->port);
-            return c;
+                     candidate->name, (unsigned)src->port);
+            return candidate;
         }
     }
     if (src && np_addr_set(src) && src->port) {
@@ -931,7 +948,7 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
              * slot whose MAC changed (peer restarted), simply takes the new MAC;
              * otherwise the frame belongs to this slot as it is. */
             if (!c->mac[0] || !c->linked || memcmp(c->mac, mac, 6) == 0) {
-                memcpy(c->mac, mac, 6);
+                peer_bind_identity(c, mac);
                 s_peers_dirty = true;
                 return c;
             }
@@ -2361,13 +2378,14 @@ void netp2pnet_init(void)
 {
     if (!s_peer_mux) { s_peer_mux = xSemaphoreCreateMutex(); }
     stun_default_list();
+    (void)peer_labels_init();    /* Independent labels never change admission. */
     peers_load();               /* NVS: peer table, hub flag, stun override */
     netcom_register_engine(NETCOM_MODE_NETP2P, &s_engine);
 }
 
 /* --------------------------------------------------------------- public API */
 
-esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_t port, bool restore)
+static esp_err_t peer_add_confirmed_inner(const char *name, const char *ip, uint16_t port, bool restore, char out_id[56])
 {
     if (!name || !name[0] || !ip || !port || strlen(name) >= 8) {
         return ESP_ERR_INVALID_ARG;
@@ -2471,8 +2489,61 @@ esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_
     char ipb[48] = "?";
     peer_addr_text(p, ipb, sizeof(ipb));
     ESP_LOGI(TAG, "peer add: '%s' %s:%u", p->name, ipb, (unsigned)port);
+    if (out_id) { np_access_record_t ref; peer_record(p, &ref); np_access_id(&ref, out_id, 56); }
     peer_unlock();
     return ESP_OK;
+}
+
+esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_t port, bool restore)
+{
+    return peer_add_confirmed_inner(name, ip, port, restore, NULL);
+}
+esp_err_t netp2pnet_peer_rename(const char *id, const char *label, uint32_t revision)
+{
+    if (!id || !label || !device_name_validate(label)) { return ESP_ERR_INVALID_ARG; }
+    peer_lock();
+    np_access_record_t active[PEER_MAX], target = {0}; size_t count = 0; bool found = false;
+    for (int i = 0; i < PEER_MAX; ++i) {
+        rt_peer_t *p = &s_peer[i];
+        if (!p->in_use || p->selftest) { continue; }
+        peer_record(p, &active[count]); char key[56]; np_access_id(&active[count], key, sizeof(key));
+        if (!strcmp(key, id)) { target = active[count]; found = true; }
+        ++count;
+    }
+    esp_err_t err = found ? peer_labels_set(&target, label, revision, active, count) : ESP_ERR_NOT_FOUND;
+    peer_unlock(); return err;
+}
+esp_err_t netp2pnet_peer_add_named(const char *label, const char *ip, uint16_t port,
+                                 bool restore, uint32_t revision, bool *added)
+{
+    *added = false;
+    if (!label || !device_name_validate(label)) { return ESP_ERR_INVALID_ARG; }
+    if (!peer_labels_ready() || revision != peer_labels_revision()) { return ESP_ERR_INVALID_STATE; }
+    char short_name[8] = "peer", id[56];
+    bool ascii = strlen(label) > 0 && strlen(label) < sizeof(short_name);
+    for (const unsigned char *p = (const unsigned char *)label; *p; ++p) { if (*p >= 0x80) { ascii = false; } }
+    if (ascii) { strcpy(short_name, label); }
+    esp_err_t err = peer_add_confirmed_inner(short_name, ip, port, restore, id);
+    if (err != ESP_OK) { return err; }
+    *added = true;
+    /* Report partial success explicitly if independent label storage fails. */
+    return netp2pnet_peer_rename(id, label, revision);
+}
+size_t netp2pnet_cleanup_idle(int64_t now, int64_t idle_ms, unsigned *decoders)
+{
+    size_t released = 0;
+    peer_lock();
+    for (int i = 0; i < PEER_MAX; ++i) {
+        rt_peer_t *p = &s_peer[i];
+        const bool pending = p->have_latest && (!p->head_valid || (int16_t)(p->head - p->latest) <= 0);
+        if (!p->in_use || p->selftest || pending || !p->last_rx_ms || now - p->last_rx_ms < idle_ms ||
+            net_rx_order_keyed(&p->order, now, NP_RX_PTT_TIMEOUT_MS)) { continue; }
+        if (p->opus_dec) { ++*decoders; }
+        if (p->jbuf) { released += JBUF_SLOTS * (NP_AUDIO_OPUS + sizeof(uint16_t) + sizeof(bool)); }
+        peer_reset_stream(p); peer_audio_free(p);
+        /* Identity, endpoints, admission and replay/order history stay intact. */
+    }
+    peer_unlock(); return released;
 }
 
 esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port)
@@ -2772,6 +2843,8 @@ void netp2pnet_factory_reset(void)
     s_stun_str[0] = '\0';
     stun_default_list();
     peers_save();
+    esp_err_t labels = peer_labels_reset();
+    if (labels != ESP_OK) { ESP_LOGW(TAG, "peer label reset failed: %s", esp_err_to_name(labels)); }
     ESP_LOGI(TAG, "factory reset: peers cleared, hub off, stun list default");
     peer_unlock();
 }
@@ -2812,6 +2885,7 @@ void netp2pnet_status_json(char *buf, size_t n)
         s_peers_dirty = false;
         peers_save();
     }
+    (void)peer_labels_flush(); /* Commit a newly learned label identity once. */
     size_t off = 0;
     char pub[20] = "0.0.0.0";
     if (s_pub_ip) {
@@ -2847,6 +2921,7 @@ void netp2pnet_status_json(char *buf, size_t n)
         "\"hub\":%s,\"hub_offline\":%s,\"hub_quiet_s\":%lld,\"links\":%d,"
         "\"g6\":%s,\"peer_limit\":%d,\"peer_count\":%d,\"jbuf_bytes\":%u,\"drop_full\":%u,\"save_pending\":%s,"
         "\"access_version\":1,\"access_ready\":%s,\"denied_count\":%u,\"denied_limit\":%u,"
+        "\"labels_version\":1,\"labels_ready\":%s,\"label_revision\":%lu,"
         "\"hub_role\":\"%s\",\"hub_conflict\":%s,\"direct_count\":%d,\"indirect_count\":%d,\"peers\":[",
         pub, (unsigned)s_pub_port, nat, stun_esc,
         (long long)age, s_last_rtt_ms, s_last_send_rc, (unsigned)s_bye_rx,
@@ -2858,6 +2933,7 @@ void netp2pnet_status_json(char *buf, size_t n)
         netp2pnet_has_global_ipv6() ? "true" : "false", PEER_MAX, registered,
         audio_bytes, (unsigned)s_drop_full, s_peers_dirty ? "true" : "false",
         s_access_error ? "false" : "true", (unsigned)s_denied_count, NP_DENY_LIMIT,
+        peer_labels_ready() ? "true" : "false", (unsigned long)peer_labels_revision(),
         s_hub_on ? "hub" : hubs ? "member" : "direct",
         s_hub_on && hubs ? "true" : "false", direct, indirect);
     if (off >= n) { off = n - 1; }
@@ -2869,21 +2945,27 @@ void netp2pnet_status_json(char *buf, size_t n)
         if (!p->in_use || p->selftest) {
             continue;
         }
-        char ipb[48] = "", name_esc[32], via_esc[32] = "";
+        char ipb[48] = "", name_esc[256], via_esc[256] = "", label[PEER_LABEL_BYTES + 1], id[56];
+        np_access_record_t ref; peer_record(p, &ref); np_access_id(&ref, id, sizeof(id));
+        peer_labels_get(&ref, label);
         if (!p->via_hub && peer_addr_set(p)) { peer_addr_text(p, ipb, sizeof(ipb)); }
         if (p->via_hub) {
             const rt_peer_t *upstream = peer_by_mac(p->hub_mac);
-            if (upstream) { json_escape_str_n(upstream->name, via_esc, sizeof(via_esc)); }
+            if (upstream) {
+                np_access_record_t hub_ref; char hub_label[PEER_LABEL_BYTES + 1];
+                peer_record(upstream, &hub_ref); peer_labels_get(&hub_ref, hub_label);
+                json_escape_str_n(hub_label[0] ? hub_label : upstream->name, via_esc, sizeof(via_esc));
+            }
         }
-        json_escape_str_n(p->name, name_esc, sizeof(name_esc));
+        json_escape_str_n(label[0] ? label : p->name, name_esc, sizeof(name_esc));
         if (peer_marks < SLOT_MAX) {
             peer_start[peer_marks++] = off;
         }
         off += (size_t)snprintf(buf + off, n - off,
-            "%s{\"name\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
+            "%s{\"id\":\"%s\",\"name\":\"%s\",\"custom_label\":%s,\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
             "\"rtt_ms\":%d,\"rx\":%u,\"tx\":%u,\"drop\":%u,\"audio_idle_s\":%lld,"
             "\"route\":\"%s\",\"via\":\"%s\",\"hub\":%s}",
-            first ? "" : ",", name_esc, ipb, (unsigned)p->port,
+            first ? "" : ",", id, name_esc, label[0] ? "true" : "false", ipb, (unsigned)p->port,
             peer_state_str(p), p->rtt_ms,
             (unsigned)p->rx_msgs, (unsigned)p->tx_msgs, (unsigned)p->rx_drop,
             (long long)(p->last_rx_ms ? (now_ms() - p->last_rx_ms) / 1000 : -1),

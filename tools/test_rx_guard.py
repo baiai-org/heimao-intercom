@@ -131,6 +131,13 @@ int main(void){
     assert(events[63].sequence==sequence);
     puts("PASS: bounded event history retains latest 64 records in chronological order");
     puts("PASS: actual PTT edges; default/off; 1ms/exact expiry; modes; masks; repeated OFF/TX; frozen config; strict parser; persistence; failures; logical/cancelled TX; watchdogs");
+    ptt_request_rx();ptt_bridge_key(false);ptt_local_audio_end();
+    assert(ptt_source_key(PTT_OWNER_NETWORK,1,true));assert(rf_pin);
+    ptt_prepare_reboot();assert(!rf_pin&&ptt_owner()==PTT_OWNER_NONE&&ptt_get_state()==PTT_IDLE);
+    assert(!ptt_claim(PTT_OWNER_TALK,99)&&!ptt_local_audio_begin());
+    assert(ptt_request_tx(1000)==ESP_ERR_INVALID_STATE&&!ptt_source_key(PTT_OWNER_NETWORK,1,true));
+    ptt_tick();assert(!rf_pin);
+    puts("PASS: reboot latch releases every TX owner and refuses further keying");
 }
 '''
 

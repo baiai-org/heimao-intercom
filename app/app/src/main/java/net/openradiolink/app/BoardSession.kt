@@ -217,10 +217,15 @@ class BoardSession(
         val radio=api.json("api/radio")
         val wifi=api.json("api/wifi")
         val control=api.json("api/control")
+        val deviceMaintenance=if(capabilities.optInt("maintenance")>=1) {
+            try { api.json("api/maintenance") }
+            catch(e:CancellationException){throw e}
+            catch(e:Exception){JSONObject().put("available",false).put("err",e.message ?: "维护状态读取失败")}
+        } else JSONObject()
         val channels=if (tables) JSONArray(String(api.bytes("api/channels",256*1024),Charsets.UTF_8)) else view.value.channels
         if (closed || version!=reads.get()) return
         applyControl(control)
-        publish { it.copy(status=status,live=live,radio=radio,wifi=wifi,channels=channels,connected=true,
+        publish { it.copy(status=status,live=live,radio=radio,wifi=wifi,channels=channels,deviceMaintenance=deviceMaintenance,connected=true,
             phase="已连接",updated=System.currentTimeMillis(),error="") }
     }
     private suspend fun refreshActivity() {
@@ -260,6 +265,50 @@ class BoardSession(
         api.token="";publish { it.copy(mine=false) };refresh()
     }
     internal suspend fun deniedPeers():List<DeniedPeer> = parseDeniedPeers(api.json("api/np2p/denied"))
+    internal suspend fun renamePeer(id:String,name:String,revision:Long) {
+        ensureLease(); check(id.isNotBlank()) { "对端身份不可用，请刷新" }
+        api.json("api/np2p/peer",JSONObject().put("op","rename").put("id",id)
+            .put("name",HandsetName.normalized(name)).put("revision",revision));refresh()
+    }
+    internal suspend fun addNamedPeer(name:String,address:String,restore:Boolean,revision:Long) {
+        ensureLease()
+        api.json("api/np2p/peer",JSONObject().put("op","add").put("name",HandsetName.normalized(name))
+            .put("address",address.trim()).put("restore",restore).put("revision",revision));refresh()
+    }
+    internal suspend fun saveDeviceMaintenance(cleanup:Boolean,restart:Boolean,hours:Int,revision:Long) {
+        require(hours in 1..168) { "重启间隔须为1至168小时" };ensureLease()
+        val data=api.json("api/maintenance",JSONObject().put("op","set").put("revision",revision)
+            .put("cleanup_enabled",cleanup).put("restart_enabled",restart).put("restart_hours",hours))
+        publish{it.copy(deviceMaintenance=data)}
+    }
+    internal suspend fun cleanDeviceResources() {
+        ensureLease();val data=api.json("api/maintenance",JSONObject().put("op","cleanup"))
+        publish{it.copy(deviceMaintenance=data)}
+    }
+    internal suspend fun rebootDevice() {
+        ensureLease()
+        val before=api.json("api/maintenance");val boot=before.getString("boot_id")
+        require(before.getString("device_id")==api.deviceId) { "设备身份变化，已停止操作" }
+        reads.incrementAndGet();cancelPress()
+        publish{it.copy(maintenance=true,phase="正在请求重启",taskResult="",error="")}
+        try {
+            stopPtt();stopListening(announce=false)
+            api.json("api/maintenance",JSONObject().put("op","reboot").put("boot_id",boot))
+            publish{it.copy(phase="等待手台重启",connected=false,mine=false)}
+            withTimeout(60000) {
+                while(true) {
+                    delay(1500)
+                    val data=try{api.json("api/maintenance")}catch(e:CancellationException){throw e}catch(_:Exception){continue}
+                    require(data.optString("device_id")==api.deviceId) { "地址返回了另一台手台，已停止等待" }
+                    if(data.optString("boot_id").isNotBlank() && data.optString("boot_id")!=boot) {
+                        verifyIdentity();refresh();publish{it.copy(deviceMaintenance=data,taskResult="手台已重新上线，启动标识已更新")};break
+                    }
+                }
+            }
+        } catch(e:TimeoutCancellationException) {
+            throw IOException("尚未确认重启完成，请检查连接；没有自动重发重启指令")
+        } finally { publish{it.copy(maintenance=false)} }
+    }
     suspend fun set(key: String,value: String) {
         ensureLease();reads.incrementAndGet()
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }

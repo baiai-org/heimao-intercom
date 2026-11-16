@@ -429,6 +429,11 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
 }
 
 @Composable private fun Np2pPeerRow(manager:DeviceManager,p:DeviceProfile,s:SessionView,peer:PeerInfo,index:Int,enabled:Boolean,confirm:(String,()->Unit)->Unit) {
+    var renaming by remember(p.id,peer.id){mutableStateOf(false)}
+    var label by remember(p.id,peer.id){mutableStateOf("")}
+    var labelRevision by remember(p.id,peer.id){mutableLongStateOf(-1)}
+    var labelError by remember(p.id,peer.id){mutableStateOf("")}
+    var savingLabel by remember(p.id,peer.id){mutableStateOf(false)}
     val dotColor=when(peer.state){"linked"->green;"knocking"->amber;else->MaterialTheme.colorScheme.outline}
     val stateColor=when(peer.state){"linked"->green;"knocking"->amber;else->secondary}
     Column(verticalArrangement=Arrangement.spacedBy(2.dp)) {
@@ -443,34 +448,48 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
             Text("rtt ${if(peer.rttMs>=0)"${peer.rttMs} ms" else "—"} · rx ${peer.rx} / tx ${peer.tx} / 丢 ${peer.drop}",
                 color=secondary,style=MaterialTheme.typography.bodySmall,modifier=Modifier.weight(1f))
             if(!peer.viaHub)TextButton(onClick={manager.action(p.id){set("np2p_knock",index.toString())}},enabled=enabled){Text("重连")}
+            if(peer.id.isNotBlank())TextButton(onClick={label=peer.name;labelRevision=s.status.optJSONObject("np2p")?.optLong("label_revision",-1) ?: -1;labelError="";renaming=true},
+                enabled=enabled&&(s.status.optJSONObject("np2p")?.optBoolean("labels_ready")==true)){Text("改名")}
             TextButton(onClick={confirm(if((s.status.optJSONObject("np2p")?.optInt("access_version",0) ?: 0) >= 1) "删除并持续拒绝「${peer.name}」？断电后仍有效，只有本机解除才能恢复。" else "移除对端「${peer.name}」？",{manager.action(p.id){set("np2p_peer_del",index.toString())}})},enabled=enabled){Text("删除",color=red)}
         }
     }
+    if(renaming)AlertDialog(onDismissRequest={if(!savingLabel)renaming=false},title={Text("修改对端名称")},text={Column {
+        Text(peer.address,color=secondary)
+        OutlinedTextField(label,{label=it;labelError=""},label={Text("最多24字符，留空恢复默认")},singleLine=true,enabled=!savingLabel)
+        if(labelError.isNotBlank())Text(labelError,color=red)
+    }},confirmButton={TextButton(onClick={savingLabel=true;manager.action(p.id){try{renamePeer(peer.id,label,labelRevision);renaming=false}
+        catch(e:kotlinx.coroutines.CancellationException){throw e}catch(e:Exception){labelError=e.message ?: "保存失败，草稿已保留"}finally{savingLabel=false}}},enabled=!savingLabel){Text("保存")}},
+        dismissButton={TextButton(onClick={renaming=false},enabled=!savingLabel){Text("取消")}})
 }
 
 @Composable private fun AddPeerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView,dismiss:()->Unit,confirm:(String,()->Unit)->Unit) {
     var peer by remember{mutableStateOf("")};var address by remember{mutableStateOf("")}
     var error by remember{mutableStateOf("")}
     val nameBytes=peer.toByteArray(Charsets.UTF_8).size
+    val np=Np2pState.parse(s.status);val longNames=np.labelsVersion>=1
     ModalBottomSheet(sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),onDismissRequest=dismiss) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(.7f)
             .padding(bottom=WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())
             .imePadding().padding(horizontal=22.dp).padding(bottom=14.dp),
             verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("添加直连对端",style=MaterialTheme.typography.headlineSmall)
-            OutlinedTextField(peer,{peer=it;error=""},label={Text("对端名称，最多 7 字节")},singleLine=true,modifier=Modifier.fillMaxWidth())
-            if(nameBytes>7)Text("名称最多 7 字节，中文一个算 2 字节",color=red)
+            OutlinedTextField(peer,{peer=it;error=""},label={Text(if(longNames)"对端名称，最多24字符" else "对端名称，最多7字节")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            if(!longNames&&nameBytes>7)Text("旧固件名称最多7个UTF-8字节",color=red)
             OutlinedTextField(address,{address=it;error=""},label={Text("对端 IP:端口 / [IPv6]:端口")},singleLine=true,modifier=Modifier.fillMaxWidth(),
                 keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
             Text("填对方控制面板顶部显示的公网地址；端口 54321 可省略。",color=secondary,style=MaterialTheme.typography.bodySmall)
             if(error.isNotBlank())Text(error,color=red)
             Button(onClick={
-                if(nameBytes==0 || nameBytes>7){error="名称要 1–7 字节";return@Button}
+                if(longNames){try{HandsetName.normalized(peer)}catch(e:IllegalArgumentException){error=e.message ?: "名称无效";return@Button}}
+                else if(nameBytes==0 || nameBytes>7){error="名称要1至7个UTF-8字节";return@Button}
                 if(address.isBlank()){error="请填写对端地址";return@Button}
                 val policy=(s.status.optJSONObject("np2p")?.optInt("access_version",0) ?: 0)>=1
-                val add={manager.action(p.id){set(if(policy)"np2p_peer_restore" else "np2p_peer_add","$peer,$address")};dismiss()}
+                val add={manager.action(p.id){try{
+                    if(longNames)addNamedPeer(peer,address,policy,np.labelRevision) else set(if(policy)"np2p_peer_restore" else "np2p_peer_add","$peer,$address")
+                    dismiss()
+                }catch(e:kotlinx.coroutines.CancellationException){throw e}catch(e:Exception){error=e.message ?: "添加失败，草稿已保留"}};Unit}
                 if(policy)confirm("添加此对端？如果此地址曾被拒绝，将解除对应拒绝并恢复连接。",add) else add()
-            },shape=RoundedCornerShape(17.dp),modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)){Text("添加")}
+            },enabled=!longNames||np.labelsReady,shape=RoundedCornerShape(17.dp),modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)){Text("添加")}
         }
     }
 }
@@ -544,6 +563,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
         }
         Section("本机喇叭诊断") {Text("只在手台喇叭播放，不主动键控电台。录音来自下一次实际收听。",color=secondary)
             FlowRow {listOf("arm" to "记录下一次收听","replay" to "重放录音","silence" to "数字静音","dacmute" to "DAC 静音","tone" to "低电平测试音","stop" to "停止").forEach{(op,label)->TextButton(onClick={manager.action(p.id){diagnostic(op)}}){Text(label)}}}}
+        DeviceMaintenanceSection(manager,p,s,confirm)
         Section("文件与升级") {Text("维护前结束通联；文件和升级始终面向当前手台。",color=secondary)
             FlowRow {OutlinedButton(onClick=download,enabled=s.connected&&!s.maintenance){Text("导出运行固件")};Button(onClick=upload,enabled=s.connected&&!s.maintenance){Text("上传应用固件")}}
             if(s.taskResult.isNotBlank())SelectionContainer{Text(s.taskResult,color=green)}}

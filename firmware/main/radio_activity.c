@@ -10,6 +10,7 @@
 #include "radio_led.h"
 
 static char s_boot[9];
+const char *radio_activity_boot_id(void) { return s_boot; }
 
 void radio_activity_init(void)
 {

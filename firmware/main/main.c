@@ -30,6 +30,8 @@
 #include "audio_i2s.h"
 #include "bridge.h"
 #include "frontpanel.h"
+#include "device_maintenance.h"
+#include "channels.h"
 #include "channels.h"
 #include "net_http.h"
 #include "netcom.h"
@@ -2073,6 +2075,8 @@ void app_main(void)
      * no access point in range, the firmware behaves exactly as it did before
      * and the panel simply has no address.
      */
+    channels_init(); /* Recover/check channel temporary files before HTTP writers exist. */
+    (void)device_maintenance_init();
     if (net_wifi_start() == ESP_OK && net_http_start() == ESP_OK) {
         if (net_wifi_connected()) {
             printf("\n  web panel: http://%s/   (WiFi \"%s\")\n\n",
@@ -2117,6 +2121,7 @@ void app_main(void)
     /* Maintenance only after the full station has remained idle. */
     for (;;) {
         sa818_cfg_refresh_tick();
+        device_maintenance_tick();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

@@ -11,7 +11,7 @@
 
 #include "esp_err.h"
 #include "np_peer_store.h"
-#define NETP2PNET_STATUS_RESERVE (1024 + NP_PEER_LIMIT * 256)
+#define NETP2PNET_STATUS_RESERVE (1536 + NP_PEER_LIMIT * 512)
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +31,10 @@ void netp2pnet_status_json(char *buf, size_t n);
 esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port);
 esp_err_t netp2pnet_peer_del(int index);
 esp_err_t netp2pnet_peer_add_confirmed(const char *name, const char *ip, uint16_t port, bool restore);
+esp_err_t netp2pnet_peer_rename(const char *id, const char *label, uint32_t revision);
+esp_err_t netp2pnet_peer_add_named(const char *label, const char *ip, uint16_t port,
+                                 bool restore, uint32_t revision, bool *added);
+size_t netp2pnet_cleanup_idle(int64_t now, int64_t idle_ms, unsigned *decoders);
 esp_err_t netp2pnet_unblock(const char *id);
 esp_err_t netp2pnet_denied_json(char *buf, size_t n);
 esp_err_t netp2pnet_peer_knock(int index);     /* force a fresh KNOCK */

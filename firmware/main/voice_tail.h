@@ -92,6 +92,7 @@ size_t tail_fetch(int id, size_t pos, int16_t *buf, size_t n);
 
 /* Store an uploaded WAV or MP3 (see the file header for accepted formats). */
 esp_err_t tail_custom_store(const uint8_t *file, size_t len);
+bool tail_store_busy(void);
 esp_err_t tail_custom_delete(void);
 size_t tail_custom_samples(void);    /* 0 = none stored */
 

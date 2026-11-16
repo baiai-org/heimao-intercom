@@ -1734,7 +1734,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <div id="npDeniedList"></div>
         </div>
         <div class="row" style="margin:3px 0">
-          <input type="text" id="npPeerName" maxlength="7" placeholder="名称" style="width:86px;flex:none">
+          <input type="text" id="npPeerName" maxlength="96" placeholder="名称（最多24字符）" style="width:160px;flex:none">
           <input type="text" id="npPeerAddr" placeholder="公网 ip:port" style="flex:1">
           <button id="npPeerAdd" class="pri">添加对端</button>
         </div>
@@ -3661,12 +3661,23 @@ $('brT2').onclick = () => brToggle(!((window._st && window._st.bridge) && window
 $('brChan1').onchange = () => cmd('bridge_chan', $('brChan1').value);
 $('brChan2').onchange = () => cmd('bridge_chan', $('brChan2').value);
 $('brTest2').onclick = () => cmd('bridge_test', 3000);
-$('npPeerAdd').onclick = () => {
+$('npPeerAdd').onclick = async () => {
   const name = $('npPeerName').value.trim();
   const addr = $('npPeerAddr').value.trim();
   if (!name || !addr) { log('请填写对端名称与 ip:port', 'err'); return; }
   const policy = window._st && window._st.np2p && window._st.np2p.access_version >= 1;
   if (policy && !confirm('添加此对端？如果此地址曾被拒绝，将解除对应拒绝并恢复连接。')) return;
+  const np = window._st?.np2p;
+  if (np?.labels_version >= 1) {
+    $('npPeerAdd').disabled = true;
+    try {
+      if (!window.ORLPeerLabels) throw Error('名称功能尚未加载，请稍后重试');
+      await window.ORLPeerLabels.add(name, addr, !!policy, np.label_revision);
+      $('npPeerName').value = ''; $('npPeerAddr').value = ''; log('对端及名称已确认保存', 'good');
+    } catch (e) { log(e.message, 'err'); }
+    finally { $('npPeerAdd').disabled = false; await refresh(); }
+    return;
+  }
   cmd(policy ? 'np2p_peer_restore' : 'np2p_peer_add', name + ',' + addr);
 };
 $('npHubT').onclick = () => {
@@ -3768,6 +3779,7 @@ function renderNp2p(s) {
       '<span class="np-meta">rtt ' + (p.rtt_ms >= 0 ? p.rtt_ms + 'ms' : '-') +
         ' · rx ' + p.rx + ' / tx ' + p.tx + ' / 丢 ' + p.drop + '</span>' +
       (indirect ? '' : '<button type="button" class="pri" data-np-knock="' + i + '" style="padding:2px 8px;font-size:11px">重连</button>') +
+      (np.labels_version >= 1 && p.id ? '<button type="button" data-np-rename="' + escHtml(p.id) + '" style="padding:2px 8px;font-size:11px">改名</button>' : '') +
       '<button type="button" data-np-del="' + i + '" style="padding:2px 8px;font-size:11px">删除</button>' +
       '</div>';
   });
@@ -3783,6 +3795,13 @@ function renderNp2p(s) {
     npl.addEventListener('click', e => {
       const kb = e.target.closest('[data-np-knock]');
       const db = e.target.closest('[data-np-del]');
+      const rb = e.target.closest('[data-np-rename]');
+      if (rb) {
+        const live = window._st?.np2p, peer = live?.peers?.find(p => p.id === rb.dataset.npRename);
+        if (peer && window.ORLPeerLabels) window.ORLPeerLabels.edit(peer, live.label_revision);
+        else log('名称功能暂不可用，请刷新后重试', 'err');
+        return;
+      }
       if (kb) cmd('np2p_knock', kb.dataset.npKnock);
       else if (db) {
         const persistent = window._st && window._st.np2p && window._st.np2p.access_version >= 1;
@@ -4494,6 +4513,7 @@ refresh();
 })();
 
 </script>
+<script src="/maintenance.js"></script>
 </body>
 </html>
 

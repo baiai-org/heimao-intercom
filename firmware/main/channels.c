@@ -35,6 +35,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_spiffs.h"
+#include "device_maintenance.h"
 #include "esp_heap_caps.h"
 
 static const char *TAG = "chan";
@@ -131,9 +132,9 @@ static int migrate_from_nvs(void)
     return moved;
 }
 
-static bool store_load(void)
+static bool store_load_path(const char *path)
 {
-    FILE *f = fopen(CH_PATH, "rb");
+    FILE *f = fopen(path, "rb");
     if (!f) {
         return false;
     }
@@ -162,7 +163,21 @@ static bool store_load(void)
     return true;
 }
 
-static bool store_write(void)
+static bool store_load(void)
+{
+    if (store_load_path(CH_PATH)) {
+        /* No transaction exists during boot. A valid committed table wins. */
+        (void)remove(CH_TMP); return true;
+    }
+    if (!store_load_path(CH_TMP)) { return false; }
+    /* Keep the only recoverable copy when promotion fails. */
+    FILE *formal = fopen(CH_PATH, "rb");
+    if (formal) { fclose(formal); (void)remove(CH_PATH); }
+    if (rename(CH_TMP, CH_PATH) != 0) { ESP_LOGW(TAG, "recovered channel table retained in temporary file"); }
+    else { ESP_LOGI(TAG, "recovered interrupted channel save"); }
+    return true;
+}
+static bool store_write_inner(void)
 {
     if (!spiffs_up()) {
         return false;
@@ -195,6 +210,12 @@ static bool store_write(void)
         return false;
     }
     return true;
+}
+
+static bool store_write(void)
+{
+    if (!device_maintenance_write_begin()) { return false; }
+    bool ok = store_write_inner(); device_maintenance_write_end(); return ok;
 }
 
 void channels_init(void)

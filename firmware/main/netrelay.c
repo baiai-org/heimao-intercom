@@ -276,6 +276,18 @@ static void relay_reset_stream(void)
 
 /* Only complete fixed-size codec frames reach this function.  MQTT reception
  * and the player serialize stream state with s_rx_mux. */
+unsigned netrelay_cleanup_idle(int64_t now, int64_t idle_ms)
+{
+    unsigned released = 0;
+    rx_lock();
+    const bool pending = s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0);
+    if (s_last_pkt_ms && now - s_last_pkt_ms >= idle_ms && !pending &&
+        (!s_stream_source || !net_rx_order_keyed(&s_stream_source->order, now, REL_RX_PTT_TIMEOUT_MS))) {
+        released = s_opus_dec ? 1 : 0;
+        relay_reset_stream(); /* Retain the active engine buffer and order history. */
+    }
+    rx_unlock(); return released;
+}
 static bool relay_store_packet(const rel_header_t *h, const uint8_t *audio,
                                size_t audio_len)
 {

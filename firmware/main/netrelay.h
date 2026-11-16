@@ -2,6 +2,8 @@
  * netrelay -- EMQX/MQTT relay engine (netcom mode 2).  See netrelay.c.
  */
 #pragma once
+#include <stdint.h>
+unsigned netrelay_cleanup_idle(int64_t now, int64_t idle_ms);
 
 #include <stdint.h>
 

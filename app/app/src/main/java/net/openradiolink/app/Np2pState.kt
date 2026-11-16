@@ -18,6 +18,8 @@ internal data class PeerInfo(
     val viaHub: Boolean = false,
     val hubName: String = "",
     val isHub: Boolean = false,
+    val id: String = "",
+    val customLabel: Boolean = false,
 ) {
     val stateText: String get() = if(viaHub) {
         if(state=="linked") "最近收到语音" else "等待新语音"
@@ -62,6 +64,9 @@ internal data class Np2pState(
     val accessReady: Boolean = true,
     val deniedCount: Int = 0,
     val deniedLimit: Int = 0,
+    val labelsVersion: Int = 0,
+    val labelsReady: Boolean = false,
+    val labelRevision: Long = -1,
 ) {
     val linkedCount: Int get() = peers.count { !it.viaHub && it.state == "linked" }
     val peerCount: Int get() = peers.size
@@ -123,6 +128,7 @@ internal data class Np2pState(
                         tx = n.optInt("tx", 0),
                         drop = n.optInt("drop", 0),
                         viaHub = viaHub, hubName = hubName, isHub = n.optBoolean("hub",false),
+                        id = n.optString("id"), customLabel = n.optBoolean("custom_label"),
                     ))
                 }
             }
@@ -147,6 +153,9 @@ internal data class Np2pState(
                 accessReady = np.optBoolean("access_ready",true),
                 deniedCount = np.optInt("denied_count",0),
                 deniedLimit = np.optInt("denied_limit",0),
+                labelsVersion = np.optInt("labels_version",0),
+                labelsReady = np.optBoolean("labels_ready",false),
+                labelRevision = np.optLong("label_revision",-1),
             )
         }
     }

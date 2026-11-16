@@ -91,6 +91,7 @@ data class SessionView(
     val channels: JSONArray = JSONArray(),
     val wifi: JSONObject = JSONObject(),
     val control: JSONObject = JSONObject(),
+    val deviceMaintenance: JSONObject = JSONObject(),
     val updated: Long = 0,
     val listening: Boolean = false,
     val ptt: Boolean = false,

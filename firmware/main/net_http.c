@@ -59,6 +59,8 @@
 #include "net_wifi.h"
 #include "device_identity.h"
 #include "device_name.h"
+#include "device_maintenance.h"
+#include "maintenance_http.h"
 #include "app_control.h"
 #include "cJSON.h"
 #include "panel_address.h"
@@ -78,6 +80,15 @@
 #include "lwip/inet.h"
 
 static const char *TAG = "http";
+extern const uint8_t maintenance_script_start[] asm("_binary_maintenance_js_start");
+extern const uint8_t maintenance_script_end[] asm("_binary_maintenance_js_end");
+static esp_err_t h_maintenance_script(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, (const char *)maintenance_script_start,
+        maintenance_script_end - maintenance_script_start - 1);
+}
 static void json_escape_str(const char *in, char *out, size_t out_len);
 static atomic_uint s_alloc_failures, s_alloc_size, s_alloc_caps;
 static atomic_uint s_https_errors, s_https_opens, s_https_closes;
@@ -563,7 +574,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":1,\"peer_labels\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -2734,6 +2745,17 @@ static void sdr_buf_unlock(int state)
     }
 }
 
+size_t net_http_cleanup_idle(void)
+{
+    if (!s_sdr_buf_mux || xSemaphoreTake(s_sdr_buf_mux, 0) != pdTRUE) { return 0; }
+    size_t released = 0;
+    if (!sdr_enabled() && s_sdr_pcm) {
+        heap_caps_free(s_sdr_pcm); s_sdr_pcm = NULL;
+        released = SDR_WS_PKT * SDR_BUF_PKTS * 2 * sizeof(int16_t);
+    }
+    xSemaphoreGive(s_sdr_buf_mux); return released;
+}
+
 typedef struct {
     httpd_handle_t server;
     int fd;
@@ -2995,6 +3017,10 @@ extern const uint8_t servercert_pem_start[] asm("_binary_servercert_pem_start");
 extern const uint8_t serverkey_pem_start[]  asm("_binary_serverkey_pem_start");
 
 static const httpd_uri_t s_routes[] = {
+    { .uri = "/maintenance.js", .method = HTTP_GET, .handler = h_maintenance_script },
+    { .uri = "/api/maintenance", .method = HTTP_GET, .handler = maintenance_http },
+    { .uri = "/api/maintenance", .method = HTTP_POST, .handler = maintenance_http },
+    { .uri = "/api/np2p/peer", .method = HTTP_POST, .handler = peer_labels_http },
     { .uri = "/brand-icon.png", .method = HTTP_GET, .handler = h_brand_icon },
     { .uri = "/favicon.png", .method = HTTP_GET, .handler = h_favicon },
     { .uri = "/brand.js", .method = HTTP_GET, .handler = h_brand_script },
@@ -3052,6 +3078,8 @@ static const char s_https_panel_context;
 
 static bool route_needs_control(const httpd_uri_t *route, httpd_req_t *req)
 {
+    if (route->handler == maintenance_http) { return req->method == HTTP_POST; }
+    if (route->handler == peer_labels_http) { return true; }
     if (route->handler == h_wifi) { return route->method == HTTP_POST; }
     if (route->handler == h_scan) { return query_int(req, "force", 0, NULL) != 0; }
     return route->handler == h_device_name || route->handler == h_set || route->handler == h_channel || route->handler == h_tail_upload ||
@@ -3072,7 +3100,16 @@ static esp_err_t controlled_dispatch(httpd_req_t *req)
     } else if (route_needs_control(route, req)) {
         if (!app_control_begin(req, websocket)) { return ESP_FAIL; }
     } else { return route->handler(req); }
+    if (device_maintenance_reboot_pending() && route->handler != maintenance_http) {
+        app_control_end(); httpd_resp_set_status(req, "503 Service Unavailable");
+        return send_result(req, false, "设备即将重启，请稍后重新连接");
+    }
+    const bool writer = route->handler == h_ota || route->handler == h_tail_upload;
+    if (writer && !device_maintenance_write_begin()) {
+        app_control_end(); return send_result(req, false, "设备即将重启，暂不接受文件写入");
+    }
     esp_err_t result = route->handler(req);
+    if (writer) { device_maintenance_write_end(); }
     app_control_end();
     return result;
 }

@@ -6,6 +6,9 @@ from test_np_peer_runtime import function
 ROOT=Path(__file__).resolve().parents[1]
 
 PREFIX=r'''
+static int maintenance_writers;
+static _Bool device_maintenance_write_begin(void){++maintenance_writers;return 1;}
+static void device_maintenance_write_end(void){--maintenance_writers;}
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -91,6 +94,7 @@ int main(void) {
  fail_alloc=0;allocations=0;
  assert(tail_custom_store(mp3,sizeof(mp3))==ESP_OK);clean();
  puts("PASS: PSRAM worker stack; early/normal completion; caller-only persistence; timeout cancellation and no background write; all allocation failures reclaimed");
+ assert(maintenance_writers==0);
  return 0;
 }
 '''

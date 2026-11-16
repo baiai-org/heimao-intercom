@@ -64,6 +64,10 @@ uint32_t ptt_owner_token(void);
 const char *ptt_owner_name(void);
 bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on);
 void ptt_release(ptt_owner_t owner, uint32_t token);
+/* Reboot-only latch: release both domains and refuse future TX until boot. */
+void ptt_prepare_reboot(void);
+/* Last short TX/RX/audio edge, including activity between maintenance ticks. */
+int64_t ptt_last_activity_us(void);
 
 #define PTT_PREPARE_MS          30
 #define PTT_TAIL_MS             50

@@ -41,6 +41,10 @@ idf_component_register(
         "wifi_policy.c"
         "device_identity.c"
         "device_name.c"
+        "peer_labels.c"
+        "maintenance_policy.c"
+        "device_maintenance.c"
+        "maintenance_http.c"
         "control_lease.c"
         "app_control.c"
         "net_http.c"
@@ -64,6 +68,7 @@ idf_component_register(
         "app_control.js"
         "device_name.js"
         "rx_guard.js"
+        "maintenance.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
         "serverkey.pem"
@@ -132,6 +137,9 @@ set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
 # conversion is enabled, without modifying the SDK shared with the original.
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=adc_hal_digi_controller_config")
+
+set_source_files_properties(device_maintenance.c maintenance_http.c peer_labels.c
+    PROPERTIES COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
 
 # HTTP tasks have 10 KB stacks. Reserve at least 4 KB beyond each local frame
 # for routing, TLS and newlib formatting, and retain compiler stack reports.

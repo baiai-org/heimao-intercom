@@ -38,17 +38,29 @@ static portMUX_TYPE s_lock_init = portMUX_INITIALIZER_UNLOCKED;
 static ptt_owner_t s_owner;
 static uint32_t s_owner_token;
 static bool s_local_audio;
+static bool s_rebooting;
 #define PTT_TRACE_CAPACITY 64
 static ptt_trace_event_t s_trace[PTT_TRACE_CAPACITY];
 static uint32_t s_trace_sequence;
 static size_t s_trace_used;
 static portMUX_TYPE s_trace_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_traced_pad;
+static int64_t s_last_activity_us;
+
+static void activity_note(void)
+{
+    taskENTER_CRITICAL(&s_trace_mux); s_last_activity_us = esp_timer_get_time(); taskEXIT_CRITICAL(&s_trace_mux);
+}
+int64_t ptt_last_activity_us(void)
+{
+    taskENTER_CRITICAL(&s_trace_mux); int64_t stamp = s_last_activity_us; taskEXIT_CRITICAL(&s_trace_mux); return stamp;
+}
 
 void ptt_trace_note(unsigned kind, unsigned source, uint32_t a, uint32_t b)
 {
     const uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000);
     taskENTER_CRITICAL(&s_trace_mux);
+    if (kind >= PTT_TRACE_RF_ON && kind <= PTT_TRACE_NET_TIMEOUT) { s_last_activity_us = esp_timer_get_time(); }
     const uint32_t sequence = ++s_trace_sequence;
     s_trace[(sequence - 1) % PTT_TRACE_CAPACITY] = (ptt_trace_event_t){ms, sequence,
         (uint16_t)kind, (uint16_t)source, a, b};
@@ -90,6 +102,7 @@ static void enter(ptt_state_t st, const char *why)
 {
     s_state = st;
     s_state_entered_us = now_us();
+    activity_note();
     switch (st) {
     case PTT_IDLE:    ESP_LOGI(TAG, "IDLE%s%s", why ? " -- " : "", why ? why : "");    break;
     case PTT_PREPARE: ESP_LOGI(TAG, "PREPARE%s%s", why ? " -- " : "", why ? why : ""); break;
@@ -118,7 +131,7 @@ static void pad_apply(void)
         return;
     }
     const bool machine = (s_state == PTT_TX) && s_rf_keying;
-    const bool keyed = machine || s_bridge_keyed;
+    const bool keyed = !s_rebooting && (machine || s_bridge_keyed);
     board_ptt_assert(keyed);
     if (keyed != s_traced_pad) {
         s_traced_pad = keyed;
@@ -156,7 +169,7 @@ static void unkey_radio(void)
 bool ptt_claim(ptt_owner_t owner, uint32_t token)
 {
     ptt_control_lock();
-    bool ok = owner != PTT_OWNER_NONE && !s_dry && !s_local_audio;
+    bool ok = owner != PTT_OWNER_NONE && !s_dry && !s_local_audio && !s_rebooting;
     if (s_owner != PTT_OWNER_NONE) {
         ok = ok && s_owner == owner && s_owner_token == token;
     } else {
@@ -164,6 +177,7 @@ bool ptt_claim(ptt_owner_t owner, uint32_t token)
             (s_state == PTT_IDLE || (owner == PTT_OWNER_TALK && s_state == PTT_TAIL));
         if (ok) { s_owner = owner; s_owner_token = token; }
     }
+    if (ok) { activity_note(); }
     ptt_control_unlock();
     return ok;
 }
@@ -171,9 +185,9 @@ bool ptt_claim(ptt_owner_t owner, uint32_t token)
 bool ptt_local_audio_begin(void)
 {
     ptt_control_lock();
-    const bool ok = !s_local_audio && !s_dry && s_owner == PTT_OWNER_NONE &&
+    const bool ok = !s_rebooting && !s_local_audio && !s_dry && s_owner == PTT_OWNER_NONE &&
                     s_state == PTT_IDLE && !s_bridge_keyed;
-    if (ok) { s_local_audio = true; }
+    if (ok) { s_local_audio = true; activity_note(); }
     ptt_control_unlock();
     return ok;
 }
@@ -181,7 +195,7 @@ bool ptt_local_audio_begin(void)
 void ptt_local_audio_end(void)
 {
     ptt_control_lock();
-    s_local_audio = false;
+    s_local_audio = false; activity_note();
     ptt_control_unlock();
 }
 
@@ -231,6 +245,7 @@ void ptt_release(ptt_owner_t owner, uint32_t token)
 {
     ptt_control_lock();
     if (ptt_owned(owner, token)) {
+        activity_note();
         if (owner == PTT_OWNER_TALK) {
             ptt_request_rx();
             s_rf_keying = true;
@@ -308,6 +323,7 @@ static esp_err_t ptt_init_locked(void)
 
 static esp_err_t ptt_request_tx_locked(int max_ms)
 {
+    if (s_rebooting) { return ESP_ERR_INVALID_STATE; }
     if (!s_dry && s_rf_keying && !sa818_cfg_tx_ready()) {
         ESP_LOGW(TAG, "RF TX refused: configure installed module band/profile in panel");
         return ESP_ERR_INVALID_STATE;
@@ -555,6 +571,13 @@ bool ptt_rf_keying_enabled(void) { ptt_control_lock(); bool result = ptt_rf_keyi
 void ptt_set_rf_keying(bool enabled) { ptt_control_lock(); ptt_set_rf_keying_locked(enabled); ptt_control_unlock(); }
 esp_err_t ptt_init(void) { ptt_control_lock(); esp_err_t result = ptt_init_locked(); ptt_control_unlock(); return result; }
 esp_err_t ptt_request_tx(int max_ms) { ptt_control_lock(); esp_err_t result = ptt_request_tx_locked(max_ms); ptt_control_unlock(); return result; }
+void ptt_prepare_reboot(void)
+{
+    ptt_control_lock();
+    s_rebooting = true; s_bridge_keyed = false; s_owner = PTT_OWNER_NONE; s_owner_token = 0;
+    s_state = PTT_IDLE; pad_apply();
+    ptt_control_unlock();
+}
 void ptt_request_rx(void) { ptt_control_lock(); ptt_request_rx_locked(); ptt_control_unlock(); }
 void ptt_tick(void) { ptt_control_lock(); ptt_tick_locked(); ptt_control_unlock(); }
 ptt_state_t ptt_get_state(void) { ptt_control_lock(); ptt_state_t result = ptt_get_state_locked(); ptt_control_unlock(); return result; }

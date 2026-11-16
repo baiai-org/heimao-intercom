@@ -62,6 +62,10 @@ static int query_int(httpd_req_t*r,const char*k,int fallback,void*f){char q[300]
 static void query_str(httpd_req_t*r,const char*k,char*out,size_t len){char q[300];out[0]=0;if(httpd_req_get_url_query_str(r,q,sizeof(q))==0)(void)httpd_query_key_value(q,k,out,len);}
 static int send_result(httpd_req_t*r,bool ok,const char*error){snprintf(r->response,sizeof(r->response),"%s",error?error:"");return ESP_OK;}
 static void revoke(void){++revoked;}
+static bool reboot_pending,writer_refused;static int writer_count;
+static bool device_maintenance_reboot_pending(void){return reboot_pending;}
+static bool device_maintenance_write_begin(void){if(writer_refused)return false;++writer_count;return true;}
+static void device_maintenance_write_end(void){assert(writer_count>0);--writer_count;}
 '''
 HARNESS=r'''
 static httpd_req_t request(const char *body,const char *token){httpd_req_t r={0};r.method=body?HTTP_POST:HTTP_GET;r.body=body;r.content_len=body?strlen(body):0;r.type="application/json";r.token=token;r.device=device_identity_id();r.status=200;return r;}
@@ -100,6 +104,13 @@ int main(void){
  for(int i=0;i<4;++i){r=request(bad[i],NULL);assert(app_control_http(&r)==ESP_FAIL&&r.status==400);}
  r=request("{}",NULL);r.type="text/plain";assert(app_control_http(&r)==ESP_FAIL&&r.status==415);
  assert(lock_count==0);
+ reboot_pending=true;r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)&s_routes[0];
+ const httpd_uri_t *setting_route=NULL,*maint_route=NULL,*upload_route=NULL;
+ for(size_t i=0;i<sizeof(s_routes)/sizeof(s_routes[0]);++i){if(s_routes[i].handler==h_set)setting_route=&s_routes[i];if(s_routes[i].handler==maintenance_http&&s_routes[i].method==HTTP_POST)maint_route=&s_routes[i];if(s_routes[i].handler==h_ota)upload_route=&s_routes[i];}
+ r.user_ctx=(void*)setting_route;int mutations_before=mutations;controlled_dispatch(&r);assert(r.status==503&&mutations==mutations_before&&lock_count==0);
+ r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)maint_route;assert(controlled_dispatch(&r)==0&&mutations==mutations_before+1&&lock_count==0);
+ reboot_pending=false;writer_refused=true;r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)upload_route;controlled_dispatch(&r);assert(writer_count==0&&lock_count==0);
+ writer_refused=false;r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)upload_route;controlled_dispatch(&r);assert(writer_count==0&&lock_count==0);
  assert(lock_count==0);
  puts("PASS: production HTTP claim/renew/release/takeover, device identity, hidden bearer, exact expiry, old WebSocket generations, concurrent mutation refusal, malformed bodies and all legacy route guards");
  return 0;
