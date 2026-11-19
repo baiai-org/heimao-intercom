@@ -58,6 +58,7 @@ static int64_t s_release_started_us;
 static int64_t s_ptt_started_us, s_pcm_us, s_client_us, s_ws_last_us;
 static uint32_t s_session, s_client, s_tx_id;
 static uint32_t s_cancelled_tx;
+static uint32_t s_tail_upload_sid;
 static int64_t s_tail_drain_us;
 static const char *s_end_reason = "idle";
 /* Short-press diagnosis: remember how the last over ended. */
@@ -346,6 +347,21 @@ bool sdr_session_valid(uint32_t sid)
     return ok;
 }
 
+void sdr_tail_upload_pause(bool active)
+{
+    if (!s_key) { return; }
+    xSemaphoreTake(s_key, portMAX_DELAY);
+    if (active) {
+        s_tail_upload_sid = s_on && !s_ptt_hold && !s_releasing ? s_session : 0;
+    } else {
+        if (s_tail_upload_sid && session_locked(s_tail_upload_sid)) {
+            s_ws_last_us = s_client_us = esp_timer_get_time();
+        }
+        s_tail_upload_sid = 0;
+    }
+    xSemaphoreGive(s_key);
+}
+
 static bool start_tx_locked(uint32_t tx)
 {
     if (s_ptt_hold || s_releasing || !voice_sdr_begin(tx)) {
@@ -565,7 +581,9 @@ static void sdr_tx_step(void)
             }
         }
     }
-    if (s_ws_fd >= 0 && now - s_ws_last_us >= (int64_t)SDR_WS_STALE_MS * 1000) {
+    const bool upload_pause = s_tail_upload_sid && s_tail_upload_sid == s_session &&
+                              !s_ptt_hold && !s_releasing;
+    if (!upload_pause && s_ws_fd >= 0 && now - s_ws_last_us >= (int64_t)SDR_WS_STALE_MS * 1000) {
         s_ws_fd = -1;
         if (s_ptt_hold || s_releasing) { release_locked("ws_timeout"); }
     }
@@ -576,7 +594,7 @@ static void sdr_tx_step(void)
      * uploads and OTA stay blocked by a listener that no longer exists.
      * The off path takes s_key, so sdr_tx_task runs it after this step
      * returns. */
-    if (!s_ptt_hold && !s_releasing && s_ws_fd < 0 &&
+    if (!upload_pause && !s_ptt_hold && !s_releasing && s_ws_fd < 0 &&
         now - s_client_us >= (int64_t)SDR_NO_CLIENT_STALE_MS * 1000) {
         release_locked("ws_dead");
         s_ws_dead = true;
@@ -726,6 +744,7 @@ esp_err_t sdr_set_enabled(bool on)
         ++s_session; if (!s_session) { ++s_session; }
         s_client = s_tx_id = 0;
         s_cancelled_tx = 0;
+        s_tail_upload_sid = 0;
         s_tail_drain_us = 0;
         s_ptt_hold = false;
         s_releasing = false;

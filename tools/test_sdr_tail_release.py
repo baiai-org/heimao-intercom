@@ -36,6 +36,8 @@ static int64_t clock_us = 100000;
 static int64_t s_client_us, s_release_started_us, s_ptt_started_us, s_pcm_us, s_ws_last_us;
 static int64_t s_tail_drain_us;
 static uint32_t s_tx_id, s_cancelled_tx, owner, tail_done, s_last_tx_ms, s_last_rel_ms;
+static uint32_t s_session = 7, s_tail_upload_sid;
+static bool s_on = true;
 static uint32_t s_rel_total, s_rel_tail, s_rel_notail, s_rel_pcm_timeout, s_rel_force;
 static uint32_t s_rel_tail_timeout, s_rel_released_notail, s_owner_mismatch;
 static uint32_t s_begin_busy, s_off_stale, s_off_reject, s_on_reject;
@@ -54,7 +56,7 @@ static void strlcpy(char *out, const char *value, size_t n) { snprintf(out, n, "
 static int64_t esp_timer_get_time(void) { return clock_us; }
 static void xSemaphoreTake(int sem, int wait) { (void)sem; (void)wait; }
 static void xSemaphoreGive(int sem) { (void)sem; }
-static bool session_locked(uint32_t sid) { return sid == 7; }
+static bool session_locked(uint32_t sid) { return s_on && sid == s_session; }
 static bool ptt_owned(int source, uint32_t token) { return source == PTT_OWNER_SDR && owner && owner == token; }
 static int ptt_owner(void) { return owner ? PTT_OWNER_SDR : PTT_OWNER_NONE; }
 static uint32_t ptt_owner_token(void) { return owner; }
@@ -100,6 +102,16 @@ TEST = r"""
 int main(void)
 {
     const uint32_t sid = 7;
+    s_ws_fd = 9;
+    sdr_tail_upload_pause(true);
+    clock_us += 31000000;
+    sdr_tx_step();
+    assert(s_ws_fd == 9 && !s_ws_dead && s_tail_upload_sid == sid);
+    sdr_tail_upload_pause(false);
+    assert(!s_tail_upload_sid && s_ws_last_us == clock_us && s_client_us == clock_us);
+    sdr_tx_step();
+    assert(s_ws_fd == 9 && !s_ws_dead);
+    s_ws_fd = -1;
     assert(!sdr_ptt_request(sid + 1, 1, true));
     assert(sdr_ptt_request(sid, 1, true) && keyed);
     s_tx_head = 200; /* below normal playback prefill */
@@ -152,7 +164,7 @@ int main(void)
 def main():
     source = (ROOT / "firmware/main/sdr.c").read_text("utf-8")
     names = ("release_locked", "request_release_locked", "finish_release_locked",
-             "start_tx_locked", "sdr_ptt_request", "sdr_tx_step")
+             "sdr_tail_upload_pause", "start_tx_locked", "sdr_ptt_request", "sdr_tx_step")
     code = SIMULATION + "\n".join(function(source, name) for name in names) + TEST
     scratch = ROOT / ".tmp"
     scratch.mkdir(exist_ok=True)

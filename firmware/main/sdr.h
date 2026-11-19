@@ -46,6 +46,8 @@ bool sdr_client_open(uint32_t client);
 bool sdr_client_close(uint32_t sid, bool force);
 uint32_t sdr_current_session(void);
 bool sdr_session_valid(uint32_t sid);
+/* Preserve an idle listener while a bounded tail upload occupies HTTP. */
+void sdr_tail_upload_pause(bool active);
 void sdr_state_json(char *buf, size_t n, bool accepted, uint32_t request);
 /* True while a live WebSocket listener owns the stream (the HTTP poller uses
  * this to stay out of the way). */

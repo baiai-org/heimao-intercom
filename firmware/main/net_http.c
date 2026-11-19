@@ -372,9 +372,10 @@ static esp_err_t h_tail_upload(httpd_req_t *req)
     if (req->content_len > (size_t)TAIL_UPLOAD_MAX) {
         return send_result(req, false, "file too large (max 512 KB)");
     }
-    if (sdr_enabled() || voice_mode() == VOICE_TALK || ptt_get_state() != PTT_IDLE || ptt_owner() != PTT_OWNER_NONE) {
+    const bool legacy_listener = !activate && sdr_enabled();
+    if (legacy_listener || voice_mode() == VOICE_TALK || ptt_get_state() != PTT_IDLE || ptt_owner() != PTT_OWNER_NONE) {
         char msg[160];
-        if (sdr_enabled()) {
+        if (legacy_listener) {
             snprintf(msg, sizeof(msg), "SDR收听流仍在运行：上传前请先在APP或对讲页停止收听");
         } else if (voice_mode() == VOICE_TALK) {
             snprintf(msg, sizeof(msg), "手机通话仍在进行：请先结束通话再上传");
@@ -3244,7 +3245,10 @@ static esp_err_t controlled_dispatch(httpd_req_t *req)
     if (writer && !device_maintenance_write_begin()) {
         app_control_end(); return send_result(req, false, "设备即将重启，暂不接受文件写入");
     }
+    const bool tail_upload = route->handler == h_tail_upload && query_int(req, "activate", 0, NULL) == 1;
+    if (tail_upload) { sdr_tail_upload_pause(true); }
     esp_err_t result = route->handler(req);
+    if (tail_upload) { sdr_tail_upload_pause(false); }
     if (writer) { device_maintenance_write_end(); }
     app_control_end();
     return result;
