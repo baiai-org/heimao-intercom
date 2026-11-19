@@ -38,7 +38,8 @@ typedef enum {
 } rf_denoise_route_t;
 
 #define RF_DENOISE_MAX_BLOCK 320u
-#define RF_DENOISE_LEAD_SAMPLES 480u
+#define RF_DENOISE_CAPTURE_LEAD_SAMPLES 640u
+#define RF_DENOISE_NETWORK_LEAD_SAMPLES 480u
 
 /* Boot/control task only, serialized by the caller. The workspace is retained
  * for subsequent comparisons and published once. */
@@ -53,7 +54,7 @@ bool rf_denoise_push(rf_denoise_route_t route, const int16_t *pcm, size_t n,
 bool rf_denoise_finish(rf_denoise_route_t route, rf_denoise_emit_t emit, void *context);
 void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *out);
 
-/* Local DAC routes use fixed-size playback, including a 30 ms startup lead.
+/* Fixed-size DAC playback includes the input route's startup lead.
  * Call finish once, then take the remaining PCM before releasing playback. */
 bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n);
 bool rf_denoise_play_finish(rf_denoise_route_t route);

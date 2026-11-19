@@ -101,9 +101,10 @@ int main(void) {
     speaker_open(&dn,pcm);
     s_mod_sq_open=false; speaker_denoise_cos_closed(&dn);
     assert(amp && dn.close_us);
-    for (int block=0;block<5;block++) {
+    for (int block=0;block<6;block++) {
         speaker_denoise_render(&dn,pcm,256,true);
         assert(amp && dn.finished);
+        clock_us += 16000;
     }
     assert(!rf_denoise_play_pending(RF_DENOISE_SPEAKER) && !dn.dma_left);
     speaker_denoise_end(&dn);
@@ -121,9 +122,10 @@ int main(void) {
     }
     eq6_t eq; tx_history_t history;
     mic_open(pcm);
-    assert(talk_denoise_drain(99,pcm,&eq,&history) && written==RF_DENOISE_LEAD_SAMPLES && writes==2);
+    assert(talk_denoise_drain(99,pcm,&eq,&history) &&
+           written==RF_DENOISE_CAPTURE_LEAD_SAMPLES && writes==3);
     talk_denoise_drain_dac(99,pcm);
-    assert(written==RF_DENOISE_LEAD_SAMPLES+AUDIO_I2S_BUFFER_SAMPLES);
+    assert(written==RF_DENOISE_CAPTURE_LEAD_SAMPLES+AUDIO_I2S_BUFFER_SAMPLES);
     mic_open(pcm); revoke_after=1;
     assert(!talk_denoise_drain(99,pcm,&eq,&history) && written==256);
     talk_denoise_drain_dac(99,pcm); assert(written==256);

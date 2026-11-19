@@ -17,18 +17,19 @@ enum {
     SUPPRESSION_DB = -6,
     FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
-    PLAY_DELAY = RF_DENOISE_LEAD_SAMPLES,
-    DRY_CAPACITY = PLAY_DELAY + RF_DENOISE_MAX_BLOCK,
+    DRY_CAPACITY = RF_DENOISE_CAPTURE_LEAD_SAMPLES + RF_DENOISE_MAX_BLOCK,
     MAILBOX_CAPACITY = 8,
     READY_TO_RESUME = 3,
-    JOB_LOOKAHEAD_US = (PLAY_DELAY - FRAME_SAMPLES) * 1000000 / 16000,
 };
 enum { PSRAM_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT };
+_Static_assert(RF_DENOISE_CAPTURE_LEAD_SAMPLES >= RF_DENOISE_NETWORK_LEAD_SAMPLES &&
+               RF_DENOISE_NETWORK_LEAD_SAMPLES > 2 * FRAME_SAMPLES,
+               "playback leads must fit the dry buffer and allow two analysis frames");
 
 typedef struct {
     uint32_t generation;
     uint32_t frame;
-    int64_t deadline_us;
+    int64_t queued_us;
     bool flush;
     int16_t pcm[FRAME_SAMPLES];
 } job_t;
@@ -58,7 +59,7 @@ typedef struct {
     /* Audio owner only. */
     workspace_t *work;
     uint32_t session, submitted, playing;
-    size_t input_n, dry_head, dry_n, frame_offset, lead;
+    size_t input_n, dry_head, dry_n, frame_offset, play_delay, lead;
     unsigned ready_run, fade_left;
     bool finished, use_wet, recovering;
     int32_t last_correction, fade_from;
@@ -78,6 +79,19 @@ static bool has_dac(rf_denoise_route_t route)
 {
     return route != RF_DENOISE_BRIDGE && route != RF_DENOISE_NET_TX &&
            route != RF_DENOISE_RELAY_BRIDGE && route != RF_DENOISE_RELAY_TX;
+}
+
+static unsigned playback_delay(rf_denoise_route_t route)
+{
+    switch (route) {
+    case RF_DENOISE_P2P_SPEAKER:
+    case RF_DENOISE_P2P_RF:
+    case RF_DENOISE_RELAY_SPEAKER:
+    case RF_DENOISE_RELAY_RF:
+        return RF_DENOISE_NETWORK_LEAD_SAMPLES;
+    default:
+        return RF_DENOISE_CAPTURE_LEAD_SAMPLES;
+    }
 }
 
 static void publish_result(stream_t *s, workspace_t *w, const job_t *job)
@@ -105,10 +119,14 @@ static bool service_job(void)
         if (next == atomic_load_explicit(&s->job_head, memory_order_acquire)) { continue; }
         workspace_t *w = atomic_load(&s->prepared);
         const job_t *job = &w->jobs[next % MAILBOX_CAPACITY];
-        if (job->deadline_us < earliest) {
+        /* A result for frame N needs the first two 10 ms input frames
+         * starting at N. Only the remaining lead is available to the worker. */
+        const unsigned slack_samples = playback_delay(i) - 2 * FRAME_SAMPLES;
+        const int64_t deadline = job->queued_us + slack_samples * 1000000 / 16000;
+        if (deadline < earliest) {
             selected = s;
             work = w;
-            earliest = job->deadline_us;
+            earliest = deadline;
             tail = next;
         }
     }
@@ -127,8 +145,7 @@ static bool service_job(void)
     s->worker_frame = job.frame + 1;
     if (job.flush && !s->has_overlap) { return true; }
     const int64_t start = esp_timer_get_time();
-    const int64_t queued = job.deadline_us - JOB_LOOKAHEAD_US;
-    const uint32_t waited = start > queued ? (uint32_t)(start - queued) : 0;
+    const uint32_t waited = start > job.queued_us ? (uint32_t)(start - job.queued_us) : 0;
     orl_speex_run(work->processor, job.pcm);
     const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - start);
     if (job.generation == atomic_load(&s->generation)) {
@@ -195,7 +212,8 @@ bool rf_denoise_start(rf_denoise_route_t route)
     s->session = atomic_fetch_add(&s->generation, 1) + 1;
     s->submitted = s->playing = 0;
     s->input_n = s->dry_head = s->dry_n = s->frame_offset = 0;
-    s->lead = has_dac(route) ? PLAY_DELAY : 0;
+    s->play_delay = playback_delay(route);
+    s->lead = has_dac(route) ? s->play_delay : 0;
     s->finished = s->use_wet = s->recovering = false;
     s->ready_run = READY_TO_RESUME;
     s->fade_left = 0;
@@ -238,7 +256,7 @@ static void enqueue(stream_t *s, bool flush)
     job_t *job = &w->jobs[head % MAILBOX_CAPACITY];
     job->generation = s->session;
     job->frame = frame;
-    job->deadline_us = esp_timer_get_time() + JOB_LOOKAHEAD_US;
+    job->queued_us = esp_timer_get_time();
     job->flush = flush;
     memcpy(job->pcm, w->input, s->input_n * sizeof(*job->pcm));
     memset(job->pcm + s->input_n, 0, (FRAME_SAMPLES - s->input_n) * sizeof(*job->pcm));
@@ -369,7 +387,9 @@ bool rf_denoise_push(rf_denoise_route_t route, const int16_t *pcm, size_t n,
     while (n) {
         const size_t count = n < RF_DENOISE_MAX_BLOCK ? n : RF_DENOISE_MAX_BLOCK;
         append_pcm(s, pcm, count);
-        if (s->dry_n > PLAY_DELAY && !emit_pcm(s, s->dry_n - PLAY_DELAY, emit, context)) { return false; }
+        if (s->dry_n > s->play_delay && !emit_pcm(s, s->dry_n - s->play_delay, emit, context)) {
+            return false;
+        }
         pcm += count;
         n -= count;
     }

@@ -113,7 +113,7 @@ static void push_frame(unsigned frame) {
 }
 
 static void play_while_worker_is_late(void) {
-    push_frame(6);
+    push_frame(7);
     assert(written == 640); // The foreground emitted on this tick.
     assert(!memcmp(output + 560, input + 560, 80 * sizeof(*input)));
 }
@@ -123,6 +123,102 @@ static void replace_source_while_worker_runs(void) {
     assert(rf_denoise_start(RF_DENOISE_BRIDGE));
     written = 0;
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + 640, 47, collect, NULL));
+}
+
+static bool count_output(const int16_t *pcm, size_t n, void *context) {
+    (void)pcm;
+    *(size_t *)context += n;
+    return true;
+}
+
+static void service_between_blocks(void) {
+    while (rf_denoise_test_service()) { }
+}
+
+static void test_input_cadences(void) {
+    enum { RF_FRAMES = 848, NETWORK_FRAMES = 914 };
+    const rf_denoise_route_t forward[] = {RF_DENOISE_BRIDGE, RF_DENOISE_RELAY_BRIDGE};
+    const rf_denoise_route_t network[] = {RF_DENOISE_P2P_SPEAKER, RF_DENOISE_P2P_RF,
+                                         RF_DENOISE_RELAY_SPEAKER, RF_DENOISE_RELAY_RF};
+    rf_denoise_stats_t stats;
+    int16_t block[320];
+    rf_denoise_test_autorun = false;
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        rf_denoise_prepare(forward[mode]);
+        assert(rf_denoise_start(forward[mode]));
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+        size_t streamed = 0, played = 0;
+        for (unsigned pos = 0; pos < RF_FRAMES * 160; pos += 256) {
+            memcpy(block, input, 256 * sizeof(*block));
+            assert(rf_denoise_push(forward[mode], block, 256, count_output, &streamed));
+            assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, block, 256));
+            played += 256;
+            // Both real-time consumers finish this ADC batch before the worker runs.
+            service_between_blocks();
+        }
+        rf_denoise_stats(forward[mode], &stats);
+        assert(stats.wet_frames == RF_FRAMES - 4 && stats.dry_frames == 0);
+        assert(rf_denoise_finish(forward[mode], count_output, &streamed));
+        assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
+        size_t count;
+        while ((count = rf_denoise_play_take(RF_DENOISE_SPEAKER, block, 256))) {
+            played += count;
+            service_between_blocks();
+        }
+        assert(streamed == RF_FRAMES * 160 && played == RF_FRAMES * 160 + 640);
+        rf_denoise_stats(forward[mode], &stats);
+        assert(stats.input_frames == RF_FRAMES && stats.wet_frames == RF_FRAMES - 1 &&
+               stats.dry_frames == 1 && stats.recoveries == 0 && stats.queue_full == 0);
+        rf_denoise_stats(RF_DENOISE_SPEAKER, &stats);
+        assert(stats.input_frames == RF_FRAMES && stats.wet_frames == RF_FRAMES &&
+               stats.dry_frames == 0 && stats.recoveries == 0 && stats.queue_full == 0);
+        rf_denoise_stop(forward[mode]);
+        rf_denoise_stop(RF_DENOISE_SPEAKER);
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+        const rf_denoise_route_t route = network[i];
+        rf_denoise_prepare(route);
+        assert(rf_denoise_start(route));
+        rf_denoise_stats(route, &stats);
+        const uint32_t prior_late = stats.overruns;
+        for (unsigned frame = 0; frame < NETWORK_FRAMES; frame += 2) {
+            memcpy(block, input, sizeof(block));
+            assert(rf_denoise_play_block(route, block, 320));
+            service_between_blocks();
+        }
+        assert(rf_denoise_play_pending(route) == 480);
+        assert(rf_denoise_play_finish(route));
+        service_between_blocks();
+        size_t drained = 0, count;
+        while ((count = rf_denoise_play_take(route, block, 320))) { drained += count; }
+        assert(drained == 480);
+        rf_denoise_stats(route, &stats);
+        assert(stats.input_frames == NETWORK_FRAMES && stats.wet_frames == NETWORK_FRAMES &&
+               stats.dry_frames == 0 && stats.overruns == prior_late);
+        rf_denoise_stop(route);
+    }
+    rf_denoise_test_autorun = true;
+    puts("PASS: 16 ms ADC batches, both modes: wet SPK 848/848 and RF-to-net 847/848; 20 ms network routes: wet 914/914");
+}
+
+static void test_mixed_deadlines(void) {
+    rf_denoise_stats_t before, after;
+    rf_denoise_stats(RF_DENOISE_RELAY_RF, &before);
+    rf_denoise_test_autorun = false;
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_RELAY_RF));
+    written = 0;
+    push_frame(0);
+    int16_t network[160] = {0};
+    assert(rf_denoise_play_block(RF_DENOISE_RELAY_RF, network, 160));
+    assert(rf_denoise_test_service());
+    rf_denoise_stats(RF_DENOISE_RELAY_RF, &after);
+    assert(after.frames == before.frames + 1);
+    service_between_blocks();
+    rf_denoise_stop(RF_DENOISE_BRIDGE);
+    rf_denoise_stop(RF_DENOISE_RELAY_RF);
+    rf_denoise_test_autorun = true;
+    puts("PASS: shorter network receive lead wins dispatch over an older capture job");
 }
 
 int main(int argc, char **argv) {
@@ -153,7 +249,7 @@ int main(int argc, char **argv) {
         memcpy(reference, output, n * sizeof(*output));
         process(n, 71);
         assert(!memcmp(reference, output, n * sizeof(*output)));
-        int16_t dac[1121];
+        int16_t dac[641 + RF_DENOISE_CAPTURE_LEAD_SAMPLES];
         memcpy(dac, input, n * sizeof(*dac));
         assert(rf_denoise_start(RF_DENOISE_SPEAKER));
         for (size_t pos = 0; pos < n; ) {
@@ -162,7 +258,7 @@ int main(int argc, char **argv) {
             pos += count;
         }
         assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
-        const size_t delay = n ? RF_DENOISE_LEAD_SAMPLES : 0;
+        const size_t delay = n ? RF_DENOISE_CAPTURE_LEAD_SAMPLES : 0;
         assert(rf_denoise_play_pending(RF_DENOISE_SPEAKER) == delay);
         assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, dac + n, delay) == delay);
         for (size_t pos = 0; pos < delay; ++pos) { assert(!dac[pos]); }
@@ -196,13 +292,14 @@ int main(int argc, char **argv) {
     rf_denoise_test_autorun = false;
     push_frame(4);
     push_frame(5);
+    push_frame(6);
     slow_clock_call = 2;
     on_slow_frame = play_while_worker_is_late;
     assert(rf_denoise_test_service());
     on_slow_frame = NULL;
     while (rf_denoise_test_service()) { }
     rf_denoise_test_autorun = true;
-    for (unsigned i = 7; i <= 9; ++i) { push_frame(i); }
+    for (unsigned i = 8; i <= 9; ++i) { push_frame(i); }
     assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
     assert(written == 1600);
     rf_denoise_stats_t stats;
@@ -215,7 +312,7 @@ int main(int argc, char **argv) {
     assert(rf_denoise_start(RF_DENOISE_BRIDGE));
     assert(rf_denoise_start(RF_DENOISE_RELAY_RF));
     written = 0;
-    int16_t second[RF_DENOISE_LEAD_SAMPLES];
+    int16_t second[RF_DENOISE_NETWORK_LEAD_SAMPLES];
     for (unsigned i = 0; i < 12; ++i) {
         push_frame(i);
         int16_t block[160];
@@ -277,6 +374,8 @@ int main(int argc, char **argv) {
     cancel = false;
     rf_denoise_stop(RF_DENOISE_BRIDGE);
     puts("PASS: allocation fallback, valid partial PCM, startup lead, chunk invariance and cancelled output");
+    test_input_cadences();
+    test_mixed_deadlines();
     return 0;
 }
 
