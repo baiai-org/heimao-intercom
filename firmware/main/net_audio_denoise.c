@@ -48,23 +48,25 @@ bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
         (dn->source.sender_epoch != source.sender_epoch || dn->source.first_seq != source.first_seq);
     const bool route_changed = dn->latched && dn->rf != rf;
     const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
-    const uint32_t flags = bridge_denoise_flags();
-    const bool opt_in = (flags & (3u << first)) != 0;
+    const uint32_t levels = bridge_denoise_levels();
+    const rf_denoise_level_t speaker_level = bridge_denoise_level(levels, first);
+    const rf_denoise_level_t rf_level = first ? bridge_denoise_level(levels, first + 1) : RF_DENOISE_LEVEL_OFF;
+    const bool opt_in = speaker_level || rf_level;
     if (!allowed || changed || route_changed || (dn->latched && dn->room != room)) {
         if (dn->requested || (dn->latched && opt_in)) { voice_bridge_network_discard(); }
         net_audio_denoise_reset(dn);
         if (!allowed) { return have && !opt_in && current_mode == mode; }
     }
     if (have && !dn->latched) {
-        const uint8_t setting = first + rf;
+        const rf_denoise_level_t level = rf ? rf_level : speaker_level;
         dn->source = source;
         dn->room = room;
         dn->latched = true;
         dn->rf = rf;
-        dn->requested = (flags & (1u << setting)) != 0;
+        dn->requested = level != RF_DENOISE_LEVEL_OFF;
         if (dn->requested) {
-            dn->route = bridge_denoise_route(setting);
-            dn->active = rf_denoise_start(dn->route);
+            dn->route = bridge_denoise_route(first + rf);
+            dn->active = rf_denoise_start(dn->route, level);
         }
     }
     if (have) {

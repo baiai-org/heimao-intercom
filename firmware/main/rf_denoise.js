@@ -2,9 +2,10 @@
   'use strict';
   const card = document.getElementById('rfDenoiseCard');
   const get = name => card.querySelector('[data-dn="' + name + '"]');
-  const inputs = [...card.querySelectorAll('[data-path]')];
+  const selects = [...card.querySelectorAll('select[data-path]')];
   const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '当前使用原声'];
   const modes = ['本地模拟', '公网直连', 'MQTT 网络中继'];
+  const levelNames = ['关闭', '轻度', '标准', '强力', '极强'];
   const pathNames = ['手台发话 → 本机射频', '手台发话 → 网络', '射频来话 → 本机喇叭',
     '射频来话 → 网络转发', '网络来话 → 本机喇叭', '网络来话 → 模拟桥接'];
   const drafts = new Map();
@@ -17,17 +18,21 @@
   let readError = '';
   let epoch = 0;
 
-  function bitFor(path, mode) {
-    if (path === 'handset') return 1 << 4;
-    if (path === 'speaker') return 1 << 3;
+  function settingFor(path, mode) {
+    if (path === 'handset') return 4;
+    if (path === 'speaker') return 3;
     if (!mode) return 0;
-    if (path === 'forward') return 1 << mode;
+    if (path === 'forward') return mode;
     const first = mode === 1 ? 5 : 8;
-    return 1 << (first + ['netTx', 'netSpeaker', 'netRf'].indexOf(path));
+    return first + ['netTx', 'netSpeaker', 'netRf'].indexOf(path);
+  }
+
+  function levelFor(levels, setting) {
+    return (levels >> ((setting - 1) * 3)) & 7;
   }
 
   function modeDrafts(mode) {
-    return inputs.map(input => bitFor(input.dataset.path, mode)).filter(bit => drafts.has(bit));
+    return selects.map(select => settingFor(select.dataset.path, mode)).filter(setting => drafts.has(setting));
   }
 
   function text(node, value) {
@@ -40,20 +45,24 @@
     get('connection').hidden = Boolean(saved && !readError);
     text(get('connection'), readError || (saved ? '' : '正在读取降噪设置…'));
     if (!saved) return;
-    const {mode, flags} = saved;
+    const {mode, levels} = saved;
     text(get('mode'), modes[mode]);
     text(get('txLabel'), '发到' + modes[mode]);
     text(get('forwardLabel'), '转发到' + modes[mode]);
     get('network').hidden = mode === 0;
-    for (const input of inputs) {
-      const bit = bitFor(input.dataset.path, mode);
-      input.closest('label').hidden = !bit;
-      const value = drafts.get(bit)?.value ?? Boolean(flags & bit);
-      if (input.checked !== value) input.checked = value;
-      if (input.getAttribute('aria-disabled') !== String(pending)) {
-        input.setAttribute('aria-disabled', String(pending));
+    let extreme = false;
+    for (const select of selects) {
+      const setting = settingFor(select.dataset.path, mode);
+      select.closest('label').hidden = !setting;
+      if (!setting) continue;
+      const level = drafts.get(setting)?.value ?? levelFor(levels, setting);
+      if (select.value !== String(level)) select.value = level;
+      if (select.getAttribute('aria-disabled') !== String(pending)) {
+        select.setAttribute('aria-disabled', String(pending));
       }
+      extreme ||= level === 4;
     }
+    get('levelNote').hidden = !extreme;
     const notes = {
       rfNote: mode && !saved.rf_tx ? '启用本机射频发射时使用「发到本机射频」。' : '',
       bridgeNote: mode ? (saved.bridge_keyed ? '桥接发射中 · 使用射频出口。桥接时本机喇叭与射频共用音频。' :
@@ -66,14 +75,17 @@
     }
     const stats = [saved.handset_stats, saved.network_stats[0], saved.speaker_stats,
       saved.bridge_stats || saved, saved.network_stats[1], saved.network_stats[2]];
-    const rows = inputs.map((input, index) => {
-      const bit = bitFor(input.dataset.path, mode);
-      if (!bit) return '';
+    const rows = selects.map((select, index) => {
+      const setting = settingFor(select.dataset.path, mode);
+      if (!setting) return '';
       const item = stats[index];
-      const enabled = Boolean(flags & bit);
-      const state = !enabled ? 0 : item?.state || 1;
-      return pathNames[index] + ' · ' + (states[state] || states[1]) +
-        (item?.input_frames ? ' · 当前或最近话段 ' + item.input_frames + ' 帧 · 输出降噪 ' +
+      const configured = levelFor(levels, setting);
+      const active = item?.state === 2 || item?.state === 4;
+      const state = configured || active ? item?.state || 1 : 0;
+      return pathNames[index] + ' · 已保存 ' + levelNames[configured] + ' · ' + (states[state] || states[1]) +
+        (item?.level && (active || item.input_frames) ?
+          ' · ' + (active ? '当前话段 ' : '最近话段 ') + levelNames[item.level] : '') +
+        (item?.input_frames ? ' · ' + item.input_frames + ' 帧 · 输出降噪 ' +
           item.wet_frames + ' · 原声 ' + item.dry_frames + ' · 队列满 ' + item.queue_full +
           ' · 恢复 ' + item.recoveries : '') +
         (item?.frames ? ' · 累计计算 ' + item.frames + ' 帧 · 计算最长 ' + item.max_us +
@@ -116,8 +128,8 @@
       if (!next.ok || !next.device_id || (identity && next.device_id !== identity)) {
         throw Error('设备身份已变化，请重新打开面板');
       }
-      if (!Number.isInteger(next.mode) || !modes[next.mode] || !Number.isInteger(next.flags) ||
-          (next.flags & 0x7fe) !== next.flags || !Array.isArray(next.network_stats) ||
+      if (!Number.isInteger(next.mode) || !modes[next.mode] || !Number.isInteger(next.levels) ||
+          next.levels < 0 || next.levels > 0x3fffffff || !Array.isArray(next.network_stats) ||
           !next.speaker_stats || !next.handset_stats) throw Error('降噪状态未确认');
       return next;
     } finally {
@@ -148,14 +160,17 @@
   async function save() {
     if (pending || !saved) return;
     const mode = saved.mode;
-    const bits = modeDrafts(mode);
-    if (!bits.length) return;
-    const body = {mode, mask: 0, expected: 0, values: 0};
-    for (const bit of bits) {
-      const {expected, value} = drafts.get(bit);
-      body.mask |= bit;
-      if (expected) body.expected |= bit;
-      if (value) body.values |= bit;
+    const settings = modeDrafts(mode);
+    if (!settings.length) return;
+    const body = {mode, mask: 0, expected_levels: 0, levels: 0};
+    let fields = 0;
+    for (const setting of settings) {
+      const {expected, value} = drafts.get(setting);
+      const shift = (setting - 1) * 3;
+      body.mask |= 1 << setting;
+      body.expected_levels |= expected << shift;
+      body.levels |= value << shift;
+      fields |= 7 << shift;
     }
     const boundDevice = device;
     pending = true;
@@ -174,17 +189,17 @@
       saved = next;
       readError = '';
     }
-    if (next && (next.flags & body.mask) === body.values) {
-      for (const bit of bits) drafts.delete(bit);
+    if (next && (next.levels & fields) === body.levels) {
+      for (const setting of settings) drafts.delete(setting);
       messages.set(mode, '已保存，下一话段生效');
-    } else if (next && (conflict || (next.flags & body.mask) !== body.expected)) {
+    } else if (next && (conflict || (next.levels & fields) !== body.expected_levels)) {
       const latest = [];
-      for (const bit of bits) {
-        const draft = drafts.get(bit);
-        const expected = Boolean(next.flags & bit);
+      for (const setting of settings) {
+        const draft = drafts.get(setting);
+        const expected = levelFor(next.levels, setting);
         if (draft.expected !== expected) {
-          const index = inputs.findIndex(input => bitFor(input.dataset.path, mode) === bit);
-          latest.push(pathNames[index] + (expected ? '已开启' : '已关闭'));
+          const index = selects.findIndex(select => settingFor(select.dataset.path, mode) === setting);
+          latest.push(pathNames[index] + '为' + levelNames[expected]);
           draft.expected = expected;
         }
       }
@@ -197,15 +212,17 @@
     render();
   }
 
-  for (const input of inputs) {
-    input.addEventListener('click', event => { if (pending) event.preventDefault(); });
-    input.addEventListener('change', () => {
+  for (const select of selects) {
+    select.replaceChildren(...levelNames.map((label, level) => new Option(label, level)));
+    select.addEventListener('keydown', event => { if (pending && event.key !== 'Tab') event.preventDefault(); });
+    select.addEventListener('change', () => {
       if (!saved || pending) { render(); return; }
-      const bit = bitFor(input.dataset.path, saved.mode);
-      if (!bit) return;
-      const expected = Boolean(saved.flags & bit);
-      if (input.checked === expected) drafts.delete(bit);
-      else drafts.set(bit, {value: input.checked, expected});
+      const setting = settingFor(select.dataset.path, saved.mode);
+      if (!setting) return;
+      const expected = levelFor(saved.levels, setting);
+      const value = Number(select.value);
+      if (value === expected) drafts.delete(setting);
+      else drafts.set(setting, {value, expected});
       messages.delete(saved.mode);
       render();
     });
@@ -214,7 +231,7 @@
   get('retry').onclick = read;
   get('undo').onclick = () => {
     if (pending || !saved) return;
-    for (const bit of modeDrafts(saved.mode)) drafts.delete(bit);
+    for (const setting of modeDrafts(saved.mode)) drafts.delete(setting);
     messages.delete(saved.mode);
     render();
   };

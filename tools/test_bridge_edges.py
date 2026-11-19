@@ -101,10 +101,14 @@ static bool storage_fail;
 static uint8_t denoise_stored;
 static uint8_t local_denoise_stored;
 static bool denoise_exists, denoise_pending, commit_fail;
+static bool legacy_config_exists;
+static uint32_t legacy_config;
 static uint32_t denoise_config, pending_config;
 static unsigned denoise_commits;
+static rf_denoise_level_t started_level;
 static bool protect_during_finish;
 static size_t queued_samples;
+#define LEVEL(setting, level) ((uint32_t)(level) << (3 * ((setting) - 1)))
 void rx_guard_init(void) {}
 void rx_guard_context(uint8_t m, bool active) { (void)m; (void)active; }
 uint8_t rx_guard_blocked(void) { return inhibited; }
@@ -138,13 +142,19 @@ esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t v) {
     return ESP_OK;
 }
 esp_err_t nvs_get_u32(nvs_handle_t h, const char *key, uint32_t *v) {
-    (void)h; assert(strcmp(key, "auddn_cfg2") == 0);
+    (void)h;
+    if (strcmp(key, "auddn_cfg2") == 0) {
+        if (!legacy_config_exists) { return ESP_ERR_INVALID_STATE; }
+        *v = legacy_config;
+        return ESP_OK;
+    }
+    assert(strcmp(key, "auddn_lvl1") == 0);
     if (!denoise_exists) { return ESP_ERR_INVALID_STATE; }
     *v = denoise_config;
     return ESP_OK;
 }
 esp_err_t nvs_set_u32(nvs_handle_t h, const char *key, uint32_t v) {
-    (void)h; assert(strcmp(key, "auddn_cfg2") == 0);
+    (void)h; assert(strcmp(key, "auddn_lvl1") == 0);
     if (storage_fail) { return ESP_ERR_INVALID_STATE; }
     denoise_pending = true; pending_config = v;
     return ESP_OK;
@@ -180,8 +190,9 @@ uint16_t netcom_room(void) { return 1; }
 void rf_denoise_prepare(rf_denoise_route_t route) { assert(route < RF_DENOISE_ROUTE_COUNT); }
 void rf_denoise_stop(rf_denoise_route_t route) { (void)route; }
 void rf_denoise_invalidate(rf_denoise_route_t route) { (void)route; }
-bool rf_denoise_start(rf_denoise_route_t route) {
+bool rf_denoise_start(rf_denoise_route_t route, rf_denoise_level_t level) {
     assert((route == RF_DENOISE_BRIDGE || route == RF_DENOISE_RELAY_BRIDGE) && *s_rx_tx_mux);
+    started_level = level;
     queued_samples = 0;
     return true;
 }
@@ -319,17 +330,18 @@ int main(void) {
     assert(channel_current() == 1 && bridge_chan() == 0 && strstr(log, "正在切换"));
     *s_select_mux = 0;
     /* A short denoised over is drained before the unmodified tail and OFF. */
-    assert(bridge_denoise_set(1, true, false) == ESP_OK && denoise_config == 2);
-    assert(bridge_denoise_set(2, true, false) == ESP_OK && denoise_config == 6);
+    assert(bridge_denoise_set(1, true, false) == ESP_OK && denoise_config == LEVEL(1, RF_DENOISE_LEVEL_STANDARD));
+    assert(bridge_denoise_set(2, true, false) == ESP_OK && bridge_denoise_flags(denoise_config) == 6);
     storage_fail = true;
-    assert(bridge_denoise_set(2, false, true) != ESP_OK && denoise_config == 6);
+    assert(bridge_denoise_set(2, false, true) != ESP_OK && bridge_denoise_flags(denoise_config) == 6);
     storage_fail = false;
-    assert(bridge_denoise_set(2, false, true) == ESP_OK && denoise_config == 2);
+    assert(bridge_denoise_set(2, false, true) == ESP_OK && bridge_denoise_flags(denoise_config) == 2);
     mode = 1;
     tail_enabled = true;
     assert(bridge_set_chan(1) == ESP_OK && bridge_set_en(true) == ESP_OK && bridge_active());
     unsigned at = event_n;
     tap(true, true);
+    assert(started_level == RF_DENOISE_LEVEL_STANDARD);
     assert(bridge_denoise_set(1, false, true) == ESP_OK);
     tap(false, true);
     assert(event_n == at + 3 && !memcmp(events + at, "SSE", 3));
@@ -337,9 +349,10 @@ int main(void) {
     tap(true, true);
     assert(event_n == at + 1 && events[at] == 'S');
     tap(false, true);
-    assert(bridge_denoise_set(1, true, false) == ESP_OK);
+    assert(bridge_denoise_update_levels(1, 2, 0, LEVEL(1, RF_DENOISE_LEVEL_EXTREME)) == ESP_OK);
     at = event_n;
     tap(true, true);
+    assert(started_level == RF_DENOISE_LEVEL_EXTREME);
     protect_during_finish = true;
     tap(false, true);
     assert(event_n == at + 1 && events[at] == 'E');
@@ -351,18 +364,15 @@ int main(void) {
     tap(true, true);
     bridge_rx_room_change(false);
     assert(event_n == at + 1 && events[at] == 'E' && !s_rx.open);
-    assert(!bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
-    assert(!bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    assert(!(bridge_denoise_flags(bridge_denoise_levels()) & 24u));
     assert(bridge_denoise_set(DENOISE_SETTING_SPEAKER, true, false) == ESP_OK);
-    assert(bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
-    assert(!bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    assert((bridge_denoise_flags(bridge_denoise_levels()) & 24u) == 8u);
     assert(bridge_denoise_set(DENOISE_SETTING_HANDSET_TX, true, false) == ESP_OK);
-    assert(denoise_config == 26 && denoise_stored == 0 && local_denoise_stored == 0);
+    assert(bridge_denoise_flags(denoise_config) == 26 && denoise_stored == 0 && local_denoise_stored == 0);
     assert(bridge_denoise_set(DENOISE_SETTING_SPEAKER, false, true) == ESP_OK);
     bridge_init();
-    assert(bridge_denoise_enabled(1) && !bridge_denoise_enabled(2));
-    assert(!bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
-    assert(bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    assert(bridge_denoise_flags(bridge_denoise_levels()) == 18);
+    assert(bridge_denoise_level(bridge_denoise_levels(), 1) == RF_DENOISE_LEVEL_EXTREME);
     const uint32_t p2p = (1u << 5) | (1u << 6) | (1u << 7);
     const uint32_t relay = (1u << 8) | (1u << 9) | (1u << 10);
     assert(bridge_denoise_update(0, p2p, 0, p2p) == ESP_ERR_INVALID_ARG);
@@ -370,20 +380,50 @@ int main(void) {
     unsigned commits_before = denoise_commits;
     commit_fail = true;
     assert(bridge_denoise_update(1, p2p, 0, p2p) != ESP_OK);
-    assert(bridge_denoise_flags() == 18 && denoise_config == 18 && denoise_commits == commits_before);
+    assert(bridge_denoise_levels() == denoise_config && bridge_denoise_flags(denoise_config) == 18 &&
+           denoise_commits == commits_before);
     commit_fail = false;
     assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK);
-    assert(denoise_commits == ++commits_before && denoise_config == (18 | p2p));
+    assert(denoise_commits == ++commits_before && bridge_denoise_flags(denoise_config) == (18 | p2p));
     assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK && denoise_commits == commits_before);
     assert(bridge_denoise_update(1, p2p, 0, 0) == ESP_ERR_INVALID_STATE);
     assert(bridge_denoise_update(2, relay, 0, relay) == ESP_OK);
     bridge_init();
-    assert(bridge_denoise_flags() == (18 | p2p | relay));
+    assert(bridge_denoise_flags(bridge_denoise_levels()) == (18 | p2p | relay));
     denoise_exists = false; denoise_stored = 6; local_denoise_stored = 24;
     bridge_init();
-    assert(bridge_denoise_flags() == 30 && !denoise_exists);
+    assert(bridge_denoise_flags(bridge_denoise_levels()) == 30 && !denoise_exists);
     assert(bridge_denoise_update(2, relay, 0, relay) == ESP_OK);
-    assert(denoise_config == (30 | relay) && denoise_stored == 6 && local_denoise_stored == 24);
+    assert(bridge_denoise_flags(denoise_config) == (30 | relay) && denoise_stored == 6 && local_denoise_stored == 24);
+
+    /* Migrate the recent Boolean mask, preserve that rollback record, and
+       check that changes to one saved strength cannot overwrite another. */
+    legacy_config_exists = true;
+    legacy_config = (1u << 4) | (1u << 6) | (1u << 10);
+    denoise_config = LEVEL(1, 7); // An invalid level falls back to the old record.
+    bridge_init();
+    const uint32_t migrated = LEVEL(4, RF_DENOISE_LEVEL_STANDARD) |
+        LEVEL(6, RF_DENOISE_LEVEL_STANDARD) | LEVEL(10, RF_DENOISE_LEVEL_STANDARD);
+    assert(bridge_denoise_levels() == migrated && denoise_config == LEVEL(1, 7));
+    assert(bridge_denoise_update_levels(1, p2p, 0, LEVEL(5, 5)) == ESP_ERR_INVALID_ARG);
+    assert(bridge_denoise_update_levels(1, p2p, 0, DENOISE_LEVELS_MAX + 1u) == ESP_ERR_INVALID_ARG);
+    assert(bridge_denoise_update_levels(1, p2p, LEVEL(8, 1), 0) == ESP_ERR_INVALID_ARG);
+    assert(bridge_denoise_update_levels(1, relay, 0, 0) == ESP_ERR_INVALID_ARG);
+    const uint32_t chosen = LEVEL(5, RF_DENOISE_LEVEL_LIGHT) | LEVEL(6, RF_DENOISE_LEVEL_STRONG) |
+        LEVEL(7, RF_DENOISE_LEVEL_EXTREME);
+    assert(bridge_denoise_update_levels(1, p2p, 0, chosen) == ESP_ERR_INVALID_STATE);
+    assert(bridge_denoise_levels() == migrated && denoise_config == LEVEL(1, 7));
+    assert(bridge_denoise_update_levels(1, p2p, LEVEL(6, RF_DENOISE_LEVEL_STANDARD), chosen) == ESP_OK);
+    const uint32_t persisted = LEVEL(4, RF_DENOISE_LEVEL_STANDARD) | chosen | LEVEL(10, RF_DENOISE_LEVEL_STANDARD);
+    assert(bridge_denoise_levels() == persisted && denoise_config == persisted);
+    commits_before = denoise_commits;
+    assert(bridge_denoise_update_levels(1, p2p, 0, chosen) == ESP_OK);
+    assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK);
+    assert(denoise_commits == commits_before && bridge_denoise_levels() == persisted);
+    assert(bridge_denoise_update_levels(2, 1u << 10, LEVEL(10, RF_DENOISE_LEVEL_STANDARD), 0) == ESP_OK);
+    bridge_init();
+    assert(bridge_denoise_levels() == (persisted & ~LEVEL(10, 7)));
+    assert(legacy_config == ((1u << 4) | (1u << 6) | (1u << 10)));
     puts("PASS: RX inhibit drops PCM without a synthetic tail; normal tail preserved; squelch edge, repeated close, empty block, capture stop, preview, "
          "half-duplex, disable race, mode switch, RF profile preservation; common channel application, "
          "same-channel retune, profile matching, bridge follow/preselection, busy and storage failure; "

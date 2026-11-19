@@ -506,10 +506,11 @@ static bool append_denoise_stats(char *reply, size_t capacity, size_t *used,
                                  const char *prefix, const rf_denoise_stats_t *stats)
 {
     const int n = snprintf(reply + *used, capacity - *used,
-        "%s{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
+        "%s{\"state\":%u,\"level\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
         "\"wait_max_us\":%lu,\"input_frames\":%lu,\"wet_frames\":%lu,\"dry_frames\":%lu,"
         "\"queue_full\":%lu,\"recoveries\":%lu}",
-        prefix, (unsigned)stats->state, (unsigned long)stats->frames, (unsigned long)stats->max_us,
+        prefix, (unsigned)stats->state, (unsigned)stats->level,
+        (unsigned long)stats->frames, (unsigned long)stats->max_us,
         (unsigned long)stats->overruns, (unsigned long)stats->workspace_bytes,
         (unsigned long)stats->wait_max_us, (unsigned long)stats->input_frames,
         (unsigned long)stats->wet_frames, (unsigned long)stats->dry_frames,
@@ -534,14 +535,25 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(body, "enabled");
         const cJSON *expected = cJSON_GetObjectItemCaseSensitive(body, "expected");
         const cJSON *mask = cJSON_GetObjectItemCaseSensitive(body, "mask");
+        const cJSON *levels = cJSON_GetObjectItemCaseSensitive(body, "levels");
+        const cJSON *expected_levels = cJSON_GetObjectItemCaseSensitive(body, "expected_levels");
+        const cJSON *legacy_values = cJSON_GetObjectItemCaseSensitive(body, "values");
         uint32_t m, bits, before, values;
         esp_err_t err = ESP_ERR_INVALID_ARG;
         if (mask && denoise_number(mode, NETCOM_MODE_MAX, &m) &&
-            denoise_number(mask, DENOISE_CONFIG_MASK, &bits) &&
-            denoise_number(expected, DENOISE_CONFIG_MASK, &before) &&
-            denoise_number(cJSON_GetObjectItemCaseSensitive(body, "values"), DENOISE_CONFIG_MASK, &values)) {
-            err = bridge_denoise_update(m, bits, before, values);
-        } else if (!mask && denoise_number(mode, DENOISE_SETTING_HANDSET_TX, &m) &&
+            denoise_number(mask, DENOISE_CONFIG_MASK, &bits)) {
+            if (levels || expected_levels) {
+                if (!expected && !enabled && !legacy_values &&
+                    denoise_number(expected_levels, DENOISE_LEVELS_MAX, &before) &&
+                    denoise_number(levels, DENOISE_LEVELS_MAX, &values)) {
+                    err = bridge_denoise_update_levels(m, bits, before, values);
+                }
+            } else if (denoise_number(expected, DENOISE_CONFIG_MASK, &before) &&
+                       denoise_number(legacy_values, DENOISE_CONFIG_MASK, &values)) {
+                err = bridge_denoise_update(m, bits, before, values);
+            }
+        } else if (!mask && !levels && !expected_levels &&
+                   denoise_number(mode, DENOISE_SETTING_HANDSET_TX, &m) &&
                    cJSON_IsBool(enabled) && cJSON_IsBool(expected)) {
             err = bridge_denoise_set(m, cJSON_IsTrue(enabled), cJSON_IsTrue(expected));
         }
@@ -557,10 +569,11 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         }
     }
     rf_denoise_stats_t stats, speaker, handset;
-    uint32_t flags;
+    uint32_t levels;
     uint8_t active_mode;
     const uint8_t mode = netcom_mode();
-    bridge_denoise_status(&flags, &active_mode, &stats);
+    bridge_denoise_status(mode, &levels, &active_mode, &stats);
+    const uint32_t flags = bridge_denoise_flags(levels);
     const bool speaker_on = (flags & (1u << DENOISE_SETTING_SPEAKER)) != 0;
     const bool handset_on = (flags & (1u << DENOISE_SETTING_HANDSET_TX)) != 0;
     local_denoise_stats(RF_DENOISE_SPEAKER, speaker_on, &speaker);
@@ -571,14 +584,14 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
     const int root = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
-        "\"mode\":%u,\"flags\":%lu,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
+        "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
         "\"speaker\":%s,\"handset\":%s,"
         "\"i2s\":{\"receive_stalls\":%lu,\"short_writes\":%lu,\"errors\":%lu}",
         device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
         (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
         (unsigned long)stats.overruns, (unsigned long)stats.workspace_bytes,
-        (unsigned)mode, (unsigned long)flags, netcom_rf_tx() ? "true" : "false",
+        (unsigned)mode, (unsigned long)flags, (unsigned long)levels, netcom_rf_tx() ? "true" : "false",
         bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
         (unsigned long)i2s.receive_queue_stalls, (unsigned long)i2s.short_writes, (unsigned long)i2s.errors);

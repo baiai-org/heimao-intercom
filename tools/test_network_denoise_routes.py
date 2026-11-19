@@ -14,7 +14,7 @@ typedef int ptt_owner_t;
 typedef enum { DENOISE_NET_TX, DENOISE_NET_SPEAKER, DENOISE_NET_RF } denoise_network_path_t;
 static uint8_t current_mode;
 static uint16_t room = 41;
-static uint32_t flags;
+static uint32_t levels;
 static bool keyed, talking, local_audio;
 static bool monitor = true, dac_held;
 static unsigned discarded;
@@ -28,7 +28,10 @@ static uint8_t netcom_mode(void) { return current_mode; }
 static uint16_t netcom_room(void) { return room; }
 static int voice_mode(void) { return monitor ? VOICE_MONITOR : 0; }
 static bool voice_dac_held_by_talk(void) { return dac_held; }
-static uint32_t bridge_denoise_flags(void) { return flags; }
+static uint32_t bridge_denoise_levels(void) { return levels; }
+static rf_denoise_level_t bridge_denoise_level(uint32_t config, uint8_t setting) {
+    return setting ? (config >> ((setting - 1) * 3)) & 7u : RF_DENOISE_LEVEL_OFF;
+}
 static uint8_t bridge_denoise_network_setting(uint8_t mode, denoise_network_path_t path) {
     return (mode == 1 ? 5 : 8) + path;
 }
@@ -61,8 +64,11 @@ static void test_rx(uint8_t mode) {
     const uint8_t mac[6] = {2, 0, 0, 0, 0, 11};
     const net_audio_source_t over = net_audio_source(mac, 1234, 501, true);
     const net_audio_source_t ended = net_audio_source(mac, 1234, 501, false);
-    const uint32_t speaker = 1u << bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
-    const uint32_t rf = speaker << 1;
+    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
+    const unsigned speaker_shift = (first - 1) * 3;
+    const unsigned rf_shift = first * 3;
+    const uint32_t speaker = (uint32_t)RF_DENOISE_LEVEL_STANDARD << speaker_shift;
+    const uint32_t rf = (uint32_t)RF_DENOISE_LEVEL_STANDARD << rf_shift;
     int16_t block[320], zero[320] = {0};
     process(640, 170);
     memcpy(reference, output, 640 * sizeof(*output));
@@ -70,8 +76,8 @@ static void test_rx(uint8_t mode) {
         keyed = route != 0;
         owner = keyed ? PTT_OWNER_NETWORK : PTT_OWNER_NONE;
         for (unsigned all = 0; all < 4; ++all) {
-            flags = ((all & 1) ? speaker : 0) | ((all & 2) ? rf : 0);
-            const bool enabled = (flags & (keyed ? rf : speaker)) != 0;
+            levels = ((all & 1) ? speaker : 0) | ((all & 2) ? rf : 0);
+            const bool enabled = (levels & (keyed ? rf : speaker)) != 0;
             net_audio_denoise_t dn = {0};
             fill_block(block, 0);
             assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 10));
@@ -101,7 +107,7 @@ static void test_rx(uint8_t mode) {
             assert(!net_audio_denoise_render(&dn, mode, ended, false, true, block, 185));
         }
     }
-    flags = speaker | rf;
+    levels = speaker | ((uint32_t)RF_DENOISE_LEVEL_EXTREME << rf_shift);
     owner = PTT_OWNER_NONE;
     keyed = false;
     net_audio_denoise_t dn = {0};
@@ -109,15 +115,27 @@ static void test_rx(uint8_t mode) {
     fill_block(block, 0);
     assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 200));
     assert(dn.pending && !dn.rf);
+    rf_denoise_stats_t stats;
+    rf_denoise_stats(dn.route, &stats);
+    assert(stats.level == RF_DENOISE_LEVEL_STANDARD);
     keyed = true;
     owner = PTT_OWNER_NETWORK;
     fill_block(block, 320);
     assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 220));
     assert(discarded == initial + 1 && dn.rf && !memcmp(block, zero, sizeof(block)));
+    rf_denoise_stats(dn.route, &stats);
+    assert(stats.level == RF_DENOISE_LEVEL_EXTREME);
+    levels = speaker | ((uint32_t)RF_DENOISE_LEVEL_LIGHT << rf_shift);
+    fill_block(block, 320);
+    assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 230));
+    rf_denoise_stats(dn.route, &stats);
+    assert(stats.level == RF_DENOISE_LEVEL_EXTREME);
     const net_audio_source_t newer = net_audio_source(mac, 1235, 501, true);
     fill_block(block, 320);
     assert(net_audio_denoise_render(&dn, mode, newer, true, true, block, 240));
     assert(discarded == initial + 2 && !memcmp(block, zero, sizeof(block)));
+    rf_denoise_stats(dn.route, &stats);
+    assert(stats.level == RF_DENOISE_LEVEL_LIGHT);
     ++room;
     fill_block(block, 320);
     assert(net_audio_denoise_render(&dn, mode, newer, true, true, block, 260));
@@ -164,13 +182,13 @@ int main(void) {
         owner = PTT_OWNER_TALK;
         talking = true;
         struct talk_network_denoise tx = {.generation = 1, .room = room, .mode = mode};
-        assert(rf_denoise_start(RF_DENOISE_NET_TX));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX, RF_DENOISE_LEVEL_STANDARD));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         assert(written == 0);
         assert(rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));
         assert(written == short_length && tx.peak == 10);
         for (size_t i = 0; i < written; ++i) assert(output[i] == reference[i] + 13);
-        assert(rf_denoise_start(RF_DENOISE_NET_TX));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX, RF_DENOISE_LEVEL_STANDARD));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         owner = PTT_OWNER_NONE;
         assert(!rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));

@@ -6,4 +6,5 @@
  * Save its used bytes at the same address to restore the pristine state. */
 void *orl_speex_init(void *workspace, size_t capacity, int frame_samples,
                      int suppression_db, size_t *used);
+void orl_speex_set_suppression(void *state, int suppression_db);
 void orl_speex_run(void *state, int16_t *pcm);

@@ -47,7 +47,6 @@ static void sa818_cfg_status(sa818_cfg_status_t *out) { *out = (sa818_cfg_status
 static bool sa818_cfg_tx_ready(void) { return radio_ready; }
 static unsigned netcom_mode(void) { return mode; }
 static bool bridge_active(void) { return false; }
-static bool bridge_denoise_enabled(unsigned setting) { (void)setting; return false; }
 static int ptt_owner(void) { return owner; }
 static bool ptt_owned(int kind, uint32_t generation) { return owner == kind && generation == 99; }
 static int ptt_get_state(void) { return state; }
@@ -68,17 +67,20 @@ static int audio_i2s_write_until(const int16_t *buf,size_t n,int64_t deadline) {
 
 CASES = r'''
 static void speaker_open(speaker_denoise_t *dn, int16_t *buf) {
-    *dn = (speaker_denoise_t){.enabled=true,.mode=mode};
+    *dn = (speaker_denoise_t){.level=RF_DENOISE_LEVEL_EXTREME,.mode=mode};
     amp = s_mod_sq_open = true;
     for (size_t i=0;i<257;i++) buf[i] = (int16_t)(i * 17 + 100);
     speaker_denoise_render(dn, buf, 257, true);
     assert(dn->started && dn->active);
+    rf_denoise_stats_t stats;
+    rf_denoise_stats(RF_DENOISE_SPEAKER, &stats);
+    assert(stats.level == RF_DENOISE_LEVEL_EXTREME);
     for (size_t i=0;i<257;i++) assert(!buf[i]);
 }
 static void mic_open(int16_t *buf) {
     for (size_t i=0;i<110;i++) buf[i] = (int16_t)(i * 23 - 1000);
     state=PTT_TX; owner=PTT_OWNER_TALK; failed=false; writes=0; written=0; revoke_after=0;
-    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX));
+    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX, RF_DENOISE_LEVEL_LIGHT));
     assert(rf_denoise_play_block(RF_DENOISE_HANDSET_TX,buf,110));
 }
 
@@ -87,12 +89,12 @@ int main(void) {
     rf_denoise_prepare(RF_DENOISE_SPEAKER);
     rf_denoise_prepare(RF_DENOISE_HANDSET_TX);
     speaker_denoise_t dn;
-    dn = (speaker_denoise_t){.enabled=true,.mode=mode};
+    dn = (speaker_denoise_t){.level=RF_DENOISE_LEVEL_STANDARD,.mode=mode};
     amp = s_mod_sq_open = true;
     radio_ready = false;
     memset(pcm, 0, sizeof(pcm));
     speaker_denoise_render(&dn, pcm, 256, true);
-    assert(!dn.profile_bound && !dn.started && dn.enabled);
+    assert(!dn.profile_bound && !dn.started && dn.level == RF_DENOISE_LEVEL_STANDARD);
     ++profile;
     radio_ready = true;
     speaker_denoise_render(&dn, pcm, 256, true);

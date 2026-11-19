@@ -42,6 +42,7 @@ static const char *TAG = "bridge";
 #define KEY_CHAN "brchan"
 #define KEY_DENOISE "rfdenoise1"
 #define KEY_DENOISE_CONFIG "auddn_cfg2"
+#define KEY_DENOISE_LEVELS "auddn_lvl1"
 #define DENOISE_MODES ((1u << NETCOM_MODE_NETP2P) | (1u << NETCOM_MODE_RELAY))
 #define KEY_LOCAL_DENOISE "auddn_local1"
 #define DENOISE_LOCAL ((1u << DENOISE_SETTING_SPEAKER) | (1u << DENOISE_SETTING_HANDSET_TX))
@@ -60,7 +61,7 @@ static SemaphoreHandle_t s_state_mux;
  */
 static SemaphoreHandle_t s_rx_tx_mux;
 static bridge_rx_stats_t s_rx;
-static atomic_uint s_denoise_modes;
+static atomic_uint s_denoise_levels;
 static uint32_t s_rx_generation;
 static uint8_t s_rx_denoise_mode;
 static uint16_t s_rx_room;
@@ -145,7 +146,7 @@ uint8_t bridge_denoise_network_setting(uint8_t mode, denoise_network_path_t path
     return (mode == NETCOM_MODE_NETP2P ? 5u : 8u) + path;
 }
 
-uint32_t bridge_denoise_mode_mask(uint8_t mode)
+static uint32_t denoise_mode_mask(uint8_t mode)
 {
     if (mode == NETCOM_MODE_LOCAL) { return DENOISE_LOCAL; }
     const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_TX);
@@ -163,40 +164,119 @@ rf_denoise_route_t bridge_denoise_route(uint8_t setting)
     return setting < sizeof(routes) / sizeof(*routes) ? routes[setting] : RF_DENOISE_ROUTE_COUNT;
 }
 
-static void prepare_denoise(uint32_t flags)
+static unsigned denoise_level_shift(uint8_t setting)
 {
-    for (uint8_t setting = 1; setting <= 10; ++setting) {
-        if (flags & (1u << setting)) { rf_denoise_prepare(bridge_denoise_route(setting)); }
+    return (setting - 1u) * DENOISE_LEVEL_BITS;
+}
+
+#define DENOISE_LEVEL_FIELD ((1u << DENOISE_LEVEL_BITS) - 1u)
+
+uint32_t bridge_denoise_levels(void)
+{
+    return atomic_load(&s_denoise_levels);
+}
+
+rf_denoise_level_t bridge_denoise_level(uint32_t levels, uint8_t setting)
+{
+    if (!setting || setting > DENOISE_SETTING_COUNT) { return RF_DENOISE_LEVEL_OFF; }
+    return (levels >> denoise_level_shift(setting)) & DENOISE_LEVEL_FIELD;
+}
+
+uint32_t bridge_denoise_flags(uint32_t levels)
+{
+    uint32_t flags = 0;
+    for (uint8_t setting = 1; setting <= DENOISE_SETTING_COUNT; ++setting) {
+        if (bridge_denoise_level(levels, setting) != RF_DENOISE_LEVEL_OFF) { flags |= 1u << setting; }
+    }
+    return flags;
+}
+
+static uint32_t denoise_levels_from_flags(uint32_t flags)
+{
+    uint32_t levels = 0;
+    for (uint8_t setting = 1; setting <= DENOISE_SETTING_COUNT; ++setting) {
+        if (flags & (1u << setting)) {
+            levels |= (uint32_t)RF_DENOISE_LEVEL_STANDARD << denoise_level_shift(setting);
+        }
+    }
+    return levels;
+}
+
+static bool denoise_levels_valid(uint32_t levels, uint32_t mask)
+{
+    if (levels > DENOISE_LEVELS_MAX) { return false; }
+    for (uint8_t setting = 1; setting <= DENOISE_SETTING_COUNT; ++setting) {
+        const rf_denoise_level_t level = bridge_denoise_level(levels, setting);
+        if (level > RF_DENOISE_LEVEL_EXTREME || (level && !(mask & (1u << setting)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void prepare_denoise(uint32_t levels, uint32_t mask)
+{
+    for (uint8_t setting = 1; setting <= DENOISE_SETTING_COUNT; ++setting) {
+        if ((mask & (1u << setting)) && bridge_denoise_level(levels, setting)) {
+            rf_denoise_prepare(bridge_denoise_route(setting));
+        }
     }
 }
 
-esp_err_t bridge_denoise_update(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values)
+static esp_err_t denoise_update(uint8_t mode, uint32_t mask, uint32_t expected,
+                                uint32_t values, bool legacy)
 {
-    if (!mask || (mask & ~bridge_denoise_mode_mask(mode)) || ((values | expected) & ~mask)) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    if (!mask || (mask & ~denoise_mode_mask(mode))) { return ESP_ERR_INVALID_ARG; }
+    const bool valid = legacy ? ((values | expected) & ~mask) == 0 :
+        denoise_levels_valid(values, mask) && denoise_levels_valid(expected, mask);
+    if (!valid) { return ESP_ERR_INVALID_ARG; }
     if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
         return ESP_ERR_INVALID_STATE;
     }
-    const uint32_t before = atomic_load(&s_denoise_modes);
-    const uint32_t updated = (before & ~mask) | values;
+    const uint32_t before = bridge_denoise_levels();
+    uint32_t updated = before;
     esp_err_t err = ESP_OK;
-    if (before != updated) {
-        const uint32_t conflicts = mask & (before ^ expected);
+    for (uint8_t setting = 1; setting <= DENOISE_SETTING_COUNT; ++setting) {
+        const uint32_t bit = 1u << setting;
+        if (!(mask & bit)) { continue; }
+        const rf_denoise_level_t current = bridge_denoise_level(before, setting);
+        const unsigned observed = legacy ? current != RF_DENOISE_LEVEL_OFF : current;
+        const unsigned original = legacy ? (expected & bit) != 0 : bridge_denoise_level(expected, setting);
+        const unsigned requested = legacy ? (values & bit) != 0 : bridge_denoise_level(values, setting);
+        if (observed == requested) { continue; }
+        if (observed != original) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
+        const unsigned shift = denoise_level_shift(setting);
+        const uint32_t level = legacy && requested ? RF_DENOISE_LEVEL_STANDARD : requested;
+        updated = (updated & ~(DENOISE_LEVEL_FIELD << shift)) | (level << shift);
+    }
+    if (err == ESP_OK && before != updated) {
         nvs_handle_t h;
-        err = conflicts ? ESP_ERR_INVALID_STATE : nvs_open(NVS_NS, NVS_READWRITE, &h);
+        err = nvs_open(NVS_NS, NVS_READWRITE, &h);
         if (err == ESP_OK) {
-            err = nvs_set_u32(h, KEY_DENOISE_CONFIG, updated);
+            err = nvs_set_u32(h, KEY_DENOISE_LEVELS, updated);
             if (err == ESP_OK) { err = nvs_commit(h); }
             nvs_close(h);
         }
     }
     if (err == ESP_OK) {
-        prepare_denoise(values);
-        atomic_store(&s_denoise_modes, updated);
+        prepare_denoise(updated, mask);
+        atomic_store(&s_denoise_levels, updated);
     }
     xSemaphoreGive(s_state_mux);
     return err;
+}
+
+esp_err_t bridge_denoise_update_levels(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values)
+{
+    return denoise_update(mode, mask, expected, values, false);
+}
+
+esp_err_t bridge_denoise_update(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values)
+{
+    return denoise_update(mode, mask, expected, values, true);
 }
 
 esp_err_t bridge_denoise_set(uint8_t setting, bool enabled, bool expected)
@@ -207,26 +287,16 @@ esp_err_t bridge_denoise_set(uint8_t setting, bool enabled, bool expected)
     return bridge_denoise_update(mode, bit, expected ? bit : 0, enabled ? bit : 0);
 }
 
-uint32_t bridge_denoise_flags(void)
-{
-    return atomic_load(&s_denoise_modes);
-}
-
-bool bridge_denoise_enabled(uint8_t setting)
-{
-    return setting && setting <= 10 && (bridge_denoise_flags() & (1u << setting)) != 0;
-}
-
-void bridge_denoise_status(uint32_t *flags, uint8_t *active_mode, rf_denoise_stats_t *stats)
+void bridge_denoise_status(uint8_t mode, uint32_t *levels, uint8_t *active_mode, rf_denoise_stats_t *stats)
 {
     rx_tx_lock();
-    *flags = atomic_load(&s_denoise_modes);
+    *levels = bridge_denoise_levels();
     *active_mode = s_rx_denoise_mode;
-    const uint8_t mode = netcom_mode();
     rf_denoise_stats(mode == NETCOM_MODE_RELAY ? RF_DENOISE_RELAY_BRIDGE : RF_DENOISE_BRIDGE, stats);
     if (*active_mode != mode || mode == NETCOM_MODE_LOCAL) {
-        stats->state = !(*flags & (1u << mode)) ? RF_DENOISE_OFF : stats->workspace_bytes ?
-            RF_DENOISE_ARMED : RF_DENOISE_MEMORY_BYPASS;
+        const bool enabled = bridge_denoise_level(*levels, mode) != RF_DENOISE_LEVEL_OFF;
+        stats->state = enabled ? (stats->workspace_bytes ? RF_DENOISE_ARMED :
+                       RF_DENOISE_MEMORY_BYPASS) : RF_DENOISE_OFF;
     } else if (stats->state == RF_DENOISE_OFF) {
         stats->state = RF_DENOISE_ARMED;
     }
@@ -266,7 +336,7 @@ void bridge_init(void)
     if (!s_rx_tx_mux) {
         ESP_LOGE(TAG, "RF->NET edge mutex allocation failed");
     }
-    uint32_t flags = 0;
+    uint32_t levels = 0;
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         uint8_t en = 0, chan = 0;
@@ -276,16 +346,21 @@ void bridge_init(void)
         if (nvs_get_u8(h, KEY_CHAN, &chan) == ESP_OK) {
             s_chan = (int)chan;
         }
-        if (nvs_get_u32(h, KEY_DENOISE_CONFIG, &flags) != ESP_OK || (flags & ~DENOISE_CONFIG_MASK)) {
-            uint8_t denoise = 0, local = 0;
-            (void)nvs_get_u8(h, KEY_DENOISE, &denoise);
-            (void)nvs_get_u8(h, KEY_LOCAL_DENOISE, &local);
-            flags = (denoise & DENOISE_MODES) | (local & DENOISE_LOCAL);
+        if (nvs_get_u32(h, KEY_DENOISE_LEVELS, &levels) != ESP_OK ||
+            !denoise_levels_valid(levels, DENOISE_CONFIG_MASK)) {
+            uint32_t flags;
+            if (nvs_get_u32(h, KEY_DENOISE_CONFIG, &flags) != ESP_OK || (flags & ~DENOISE_CONFIG_MASK)) {
+                uint8_t denoise = 0, local = 0;
+                (void)nvs_get_u8(h, KEY_DENOISE, &denoise);
+                (void)nvs_get_u8(h, KEY_LOCAL_DENOISE, &local);
+                flags = (denoise & DENOISE_MODES) | (local & DENOISE_LOCAL);
+            }
+            levels = denoise_levels_from_flags(flags);
         }
         nvs_close(h);
     }
-    prepare_denoise(flags);
-    atomic_store(&s_denoise_modes, flags);
+    prepare_denoise(levels, DENOISE_CONFIG_MASK);
+    atomic_store(&s_denoise_levels, levels);
     ESP_LOGI(TAG, "init: en=%d chan=%d", s_en ? 1 : 0, s_chan);
 }
 
@@ -422,8 +497,8 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         return;
     }
     const uint8_t mode = netcom_mode();
-    const bool configured = mode != NETCOM_MODE_LOCAL && bridge_denoise_enabled(mode);
-    if (!pcm || !n || (configured && s_rx_room_changing)) {
+    const rf_denoise_level_t level = bridge_denoise_level(bridge_denoise_levels(), mode);
+    if (!pcm || !n || (level && s_rx_room_changing)) {
         rx_tx_unlock();
         return;
     }
@@ -435,7 +510,7 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
      */
     const bool starting = !s_rx.open;
     if (starting) {
-        if (configured) {
+        if (level) {
             s_rx_denoise_mode = mode;
             s_rx_room = netcom_room();
             s_rx_chan = s_chan;
@@ -452,7 +527,7 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         return;
     }
     const rf_denoise_route_t route = bridge_denoise_route(s_rx_denoise_mode);
-    if (starting) { (void)rf_denoise_start(route); }
+    if (starting) { (void)rf_denoise_start(route, level); }
     rx_tx_unlock();
     if (!rf_denoise_push(route, pcm, n, denoised_emit, &generation)) { rf_denoise_stop(route); }
 }

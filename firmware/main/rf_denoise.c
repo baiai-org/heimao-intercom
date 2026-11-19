@@ -14,12 +14,17 @@
 
 enum {
     FRAME_SAMPLES = 160,
-    SUPPRESSION_DB = -15,
     FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
     DRY_CAPACITY = RF_DENOISE_CAPTURE_LEAD_SAMPLES + RF_DENOISE_MAX_BLOCK,
     MAILBOX_CAPACITY = 8,
     READY_TO_RESUME = 3,
+};
+static const int suppression_db[] = {
+    [RF_DENOISE_LEVEL_LIGHT] = -6,
+    [RF_DENOISE_LEVEL_STANDARD] = -15,
+    [RF_DENOISE_LEVEL_STRONG] = -24,
+    [RF_DENOISE_LEVEL_EXTREME] = -36,
 };
 enum { PSRAM_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT };
 _Static_assert(RF_DENOISE_CAPTURE_LEAD_SAMPLES >= RF_DENOISE_NETWORK_LEAD_SAMPLES &&
@@ -31,6 +36,7 @@ typedef struct {
     uint32_t frame;
     int64_t queued_us;
     bool flush;
+    uint8_t level;
     int16_t pcm[FRAME_SAMPLES];
 } job_t;
 
@@ -68,7 +74,7 @@ typedef struct {
     uint32_t worker_session, worker_frame;
     bool has_overlap;
 
-    atomic_int state;
+    atomic_int state, level;
     atomic_uint frames, max_us, wait_max_us, overruns;
     atomic_uint input_frames, wet_frames, dry_frames, queue_full, recoveries;
 } stream_t;
@@ -139,6 +145,7 @@ static bool service_job(void)
         job.frame < atomic_load(&s->needed_frame)) { return true; }
     if (s->worker_session != job.generation || s->worker_frame != job.frame) {
         memcpy(work->arena, work->initial, work->used);
+        orl_speex_set_suppression(work->processor, suppression_db[job.level]);
         s->worker_session = job.generation;
         s->has_overlap = false;
     }
@@ -193,7 +200,10 @@ void rf_denoise_prepare(rf_denoise_route_t route)
     workspace_t *w = heap_caps_calloc(1, sizeof(*w), PSRAM_CAPS);
     if (!w) { return; }
     w->arena = heap_caps_aligned_alloc(_Alignof(max_align_t), ARENA_BYTES, PSRAM_CAPS);
-    if (w->arena) { w->processor = orl_speex_init(w->arena, ARENA_BYTES, FRAME_SAMPLES, SUPPRESSION_DB, &w->used); }
+    if (w->arena) {
+        w->processor = orl_speex_init(w->arena, ARENA_BYTES, FRAME_SAMPLES,
+                                      suppression_db[RF_DENOISE_LEVEL_STANDARD], &w->used);
+    }
     if (w->processor) { w->initial = heap_caps_malloc(w->used, PSRAM_CAPS); }
     if (!w->initial || !prepare_worker()) {
         heap_caps_free(w->initial);
@@ -205,8 +215,9 @@ void rf_denoise_prepare(rf_denoise_route_t route)
     atomic_store(&s->prepared, w);
 }
 
-bool rf_denoise_start(rf_denoise_route_t route)
+bool rf_denoise_start(rf_denoise_route_t route, rf_denoise_level_t level)
 {
+    if (level < RF_DENOISE_LEVEL_LIGHT || level > RF_DENOISE_LEVEL_EXTREME) { return false; }
     stream_t *s = &s_streams[route];
     s->work = atomic_load(&s->prepared);
     s->session = atomic_fetch_add(&s->generation, 1) + 1;
@@ -225,6 +236,7 @@ bool rf_denoise_start(rf_denoise_route_t route)
     atomic_store(&s->dry_frames, 0);
     atomic_store(&s->queue_full, 0);
     atomic_store(&s->recoveries, 0);
+    atomic_store(&s->level, level);
     atomic_store(&s->state, s->work ? RF_DENOISE_PROCESSING : RF_DENOISE_MEMORY_BYPASS);
     return s->work != NULL;
 }
@@ -258,6 +270,7 @@ static void enqueue(stream_t *s, bool flush)
     job->frame = frame;
     job->queued_us = esp_timer_get_time();
     job->flush = flush;
+    job->level = atomic_load_explicit(&s->level, memory_order_relaxed);
     memcpy(job->pcm, w->input, s->input_n * sizeof(*job->pcm));
     memset(job->pcm + s->input_n, 0, (FRAME_SAMPLES - s->input_n) * sizeof(*job->pcm));
     atomic_store_explicit(&s->job_head, head + 1, memory_order_release);
@@ -463,6 +476,7 @@ void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *out)
         .overruns = atomic_load(&s->overruns),
         .workspace_bytes = w ? sizeof(*w) + ARENA_BYTES + w->used : 0,
         .state = atomic_load(&s->state),
+        .level = atomic_load(&s->level),
         .wait_max_us = atomic_load(&s->wait_max_us),
         .input_frames = atomic_load(&s->input_frames),
         .wet_frames = atomic_load(&s->wet_frames),

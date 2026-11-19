@@ -75,7 +75,7 @@ static bool collect(const int16_t *pcm, size_t n, void *ctx) {
 
 static void process(size_t n, size_t chunk) {
     written = 0;
-    (void)rf_denoise_start(RF_DENOISE_BRIDGE);
+    (void)rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD);
     for (size_t i = 0; i < n; i += chunk) {
         size_t count = n - i < chunk ? n - i : chunk;
         assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + i, count, collect, NULL));
@@ -120,7 +120,7 @@ static void play_while_worker_is_late(void) {
 
 static void replace_source_while_worker_runs(void) {
     rf_denoise_stop(RF_DENOISE_BRIDGE);
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + 640, 47, collect, NULL));
 }
@@ -135,6 +135,48 @@ static void service_between_blocks(void) {
     while (rf_denoise_test_service()) { }
 }
 
+static void test_speaker_levels(void) {
+    enum { BLOCK = 256, SAMPLES = 32000, STEADY_BLOCK = 63 };
+    const rf_denoise_route_t route = RF_DENOISE_SPEAKER;
+    uint64_t input_power = 0;
+    for (size_t i = 0; i < BLOCK; ++i) {
+        input_power += (int32_t)input[i] * input[i];
+    }
+    input_power *= SAMPLES / BLOCK - STEADY_BLOCK;
+    uint64_t previous = input_power;
+    int16_t block[BLOCK];
+    assert(!rf_denoise_start(route, RF_DENOISE_LEVEL_OFF));
+    rf_denoise_test_autorun = false;
+    for (rf_denoise_level_t level = RF_DENOISE_LEVEL_LIGHT; level <= RF_DENOISE_LEVEL_EXTREME; ++level) {
+        assert(rf_denoise_start(route, level));
+        uint64_t power = 0;
+        for (size_t i = 0; i < SAMPLES / BLOCK; ++i) {
+            memcpy(block, input, sizeof(block));
+            assert(rf_denoise_play_block(route, block, BLOCK));
+            service_between_blocks();
+            if (i >= STEADY_BLOCK) {
+                for (size_t j = 0; j < BLOCK; ++j) { power += (int32_t)block[j] * block[j]; }
+            }
+        }
+        assert(rf_denoise_play_finish(route));
+        size_t drained = 0, count;
+        while ((count = rf_denoise_play_take(route, block, BLOCK))) {
+            service_between_blocks();
+            drained += count;
+        }
+        assert(drained == RF_DENOISE_CAPTURE_LEAD_SAMPLES);
+        rf_denoise_stats_t stats;
+        rf_denoise_stats(route, &stats);
+        assert(stats.level == level && stats.wet_frames == SAMPLES / 160 && !stats.dry_frames);
+        assert(power && power < previous);
+        if (level == RF_DENOISE_LEVEL_STANDARD) { assert(power * 10 < input_power); }
+        previous = power;
+        rf_denoise_stop(route);
+    }
+    rf_denoise_test_autorun = true;
+    puts("PASS: production speaker levels reduce steady noise in order with continuous nonzero PCM and intact timing");
+}
+
 static void test_input_cadences(void) {
     enum { RF_FRAMES = 848, NETWORK_FRAMES = 914 };
     const rf_denoise_route_t forward[] = {RF_DENOISE_BRIDGE, RF_DENOISE_RELAY_BRIDGE};
@@ -145,26 +187,17 @@ static void test_input_cadences(void) {
     rf_denoise_test_autorun = false;
     for (unsigned mode = 0; mode < 2; ++mode) {
         rf_denoise_prepare(forward[mode]);
-        assert(rf_denoise_start(forward[mode]));
-        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+        assert(rf_denoise_start(forward[mode], RF_DENOISE_LEVEL_STRONG));
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER, RF_DENOISE_LEVEL_EXTREME));
         size_t streamed = 0, played = 0;
-        uint64_t input_power = 0, speaker_power = 0;
         for (unsigned pos = 0; pos < RF_FRAMES * 160; pos += 256) {
             memcpy(block, input, 256 * sizeof(*block));
             assert(rf_denoise_push(forward[mode], block, 256, count_output, &streamed));
             assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, block, 256));
-            if (pos >= 16000) {
-                // The periodic, seeded PCM makes each complete block's input power equal.
-                for (size_t i = 0; i < 256; ++i) {
-                    input_power += (int32_t)input[i] * input[i];
-                    speaker_power += (int32_t)block[i] * block[i];
-                }
-            }
             played += 256;
             // Both real-time consumers finish this ADC batch before the worker runs.
             service_between_blocks();
         }
-        assert(speaker_power * 10 < input_power); // At least 10 dB of steady noise reduction.
         rf_denoise_stats(forward[mode], &stats);
         assert(stats.wet_frames == RF_FRAMES - 4 && stats.dry_frames == 0);
         assert(rf_denoise_finish(forward[mode], count_output, &streamed));
@@ -177,17 +210,19 @@ static void test_input_cadences(void) {
         assert(streamed == RF_FRAMES * 160 && played == RF_FRAMES * 160 + 640);
         rf_denoise_stats(forward[mode], &stats);
         assert(stats.input_frames == RF_FRAMES && stats.wet_frames == RF_FRAMES - 1 &&
-               stats.dry_frames == 1 && stats.recoveries == 0 && stats.queue_full == 0);
+               stats.dry_frames == 1 && stats.recoveries == 0 && stats.queue_full == 0 &&
+               stats.level == RF_DENOISE_LEVEL_STRONG);
         rf_denoise_stats(RF_DENOISE_SPEAKER, &stats);
         assert(stats.input_frames == RF_FRAMES && stats.wet_frames == RF_FRAMES &&
-               stats.dry_frames == 0 && stats.recoveries == 0 && stats.queue_full == 0);
+               stats.dry_frames == 0 && stats.recoveries == 0 && stats.queue_full == 0 &&
+               stats.level == RF_DENOISE_LEVEL_EXTREME);
         rf_denoise_stop(forward[mode]);
         rf_denoise_stop(RF_DENOISE_SPEAKER);
     }
     for (unsigned i = 0; i < 4; ++i) {
         const rf_denoise_route_t route = network[i];
         rf_denoise_prepare(route);
-        assert(rf_denoise_start(route));
+        assert(rf_denoise_start(route, RF_DENOISE_LEVEL_EXTREME));
         rf_denoise_stats(route, &stats);
         const uint32_t prior_late = stats.overruns;
         for (unsigned frame = 0; frame < NETWORK_FRAMES; frame += 2) {
@@ -214,8 +249,8 @@ static void test_mixed_deadlines(void) {
     rf_denoise_stats_t before, after;
     rf_denoise_stats(RF_DENOISE_RELAY_RF, &before);
     rf_denoise_test_autorun = false;
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
-    assert(rf_denoise_start(RF_DENOISE_RELAY_RF));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
+    assert(rf_denoise_start(RF_DENOISE_RELAY_RF, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     push_frame(0);
     int16_t network[160] = {0};
@@ -260,7 +295,7 @@ int main(int argc, char **argv) {
         assert(!memcmp(reference, output, n * sizeof(*output)));
         int16_t dac[641 + RF_DENOISE_CAPTURE_LEAD_SAMPLES];
         memcpy(dac, input, n * sizeof(*dac));
-        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER, RF_DENOISE_LEVEL_STANDARD));
         for (size_t pos = 0; pos < n; ) {
             const size_t count = n - pos < 257 ? n - pos : 257;
             assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, dac + pos, count));
@@ -277,7 +312,7 @@ int main(int argc, char **argv) {
     const uint32_t completed_in_time[] = {4632, 5830};
     for (unsigned i = 0; i < 2; ++i) {
         rf_denoise_test_autorun = false;
-        assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+        assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
         written = 0;
         push_frame(0);
         push_frame(1);
@@ -295,7 +330,7 @@ int main(int argc, char **argv) {
     puts("PASS: 4.632 ms and 5.830 ms results completed inside the playback lead remain wet");
     slow_us = 10099;
 
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     for (unsigned i = 0; i <= 3; ++i) { push_frame(i); }
     rf_denoise_test_autorun = false;
@@ -318,8 +353,8 @@ int main(int argc, char **argv) {
     puts("PASS: a 10.099 ms worker spike emits aligned dry PCM on time, discards late result, and recovers");
 
     rf_denoise_test_autorun = false;
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
-    assert(rf_denoise_start(RF_DENOISE_RELAY_RF));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
+    assert(rf_denoise_start(RF_DENOISE_RELAY_RF, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     int16_t second[RF_DENOISE_NETWORK_LEAD_SAMPLES];
     for (unsigned i = 0; i < 12; ++i) {
@@ -340,7 +375,7 @@ int main(int argc, char **argv) {
     assert(!memcmp(second, input + 1440, 480 * sizeof(*second)));
     rf_denoise_stop(RF_DENOISE_RELAY_RF);
     assert(!rf_denoise_play_pending(RF_DENOISE_RELAY_RF));
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     push_frame(0);
     rf_denoise_test_autorun = true;
@@ -353,7 +388,7 @@ int main(int argc, char **argv) {
     assert(!memcmp(output, input, 320 * sizeof(*input)));
     puts("PASS: stalled worker and queue saturation preserve dry PCM on two routes; old generation cannot leak");
 
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     push_frame(0);
     rf_denoise_test_autorun = false;
@@ -368,14 +403,14 @@ int main(int argc, char **argv) {
     memcpy(reference, output, 47 * sizeof(*output));
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
     assert(stats.input_frames == 1 && stats.wet_frames == 1 && stats.dry_frames == 0);
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + 640, 47, collect, NULL));
     assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
     assert(written == 47 && !memcmp(output, reference, 47 * sizeof(*output)));
     puts("PASS: cancellation during a worker pass cannot publish into the next source");
 
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, RF_DENOISE_LEVEL_STANDARD));
     written = 0;
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input, 47, collect, NULL));
     cancel = true;
@@ -383,6 +418,7 @@ int main(int argc, char **argv) {
     cancel = false;
     rf_denoise_stop(RF_DENOISE_BRIDGE);
     puts("PASS: allocation fallback, valid partial PCM, startup lead, chunk invariance and cancelled output");
+    test_speaker_levels();
     test_input_cadences();
     test_mixed_deadlines();
     return 0;

@@ -982,10 +982,11 @@ button:hover:not(:disabled) {
 button:active:not(:disabled) { transform: translateY(1px); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 .eq-denoise { margin-bottom: 14px; }
-.denoise-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
-.denoise-options label { display: flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.denoise-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
+.denoise-options label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; }
 .denoise-options label[hidden] { display: none; }
-.denoise-options input { flex: none; }
+.denoise-options select { flex: 0 0 88px; min-width: 0; }
+.denoise-options select[aria-disabled="true"] { pointer-events: none; }
 .denoise-group { border: 0; padding: 0; margin: 0 0 6px; }
 .denoise-group legend { color: var(--dim); font-size: .9em; }
 .denoise-note { color: var(--dim); font-size: .9em; margin: 6px 0; }
@@ -2110,26 +2111,27 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <fieldset class="denoise-group">
             <legend>手台发话</legend>
             <div class="denoise-options">
-              <label><input type="checkbox" data-path="handset">发到本机射频</label>
-              <label><input type="checkbox" data-path="netTx"><span data-dn="txLabel"></span></label>
+              <label><span>发到本机射频</span><select data-path="handset"></select></label>
+              <label><span data-dn="txLabel"></span><select data-path="netTx"></select></label>
             </div>
           </fieldset>
           <fieldset class="denoise-group">
             <legend>射频来话</legend>
             <div class="denoise-options">
-              <label><input type="checkbox" data-path="speaker">本机喇叭</label>
-              <label><input type="checkbox" data-path="forward"><span data-dn="forwardLabel"></span></label>
+              <label><span>本机喇叭</span><select data-path="speaker"></select></label>
+              <label><span data-dn="forwardLabel"></span><select data-path="forward"></select></label>
             </div>
           </fieldset>
           <fieldset class="denoise-group" data-dn="network" hidden>
             <legend>网络来话</legend>
             <div class="denoise-options">
-              <label><input type="checkbox" data-path="netSpeaker">本机喇叭</label>
-              <label><input type="checkbox" data-path="netRf">模拟桥接 · 射频发出</label>
+              <label><span>本机喇叭</span><select data-path="netSpeaker"></select></label>
+              <label><span>模拟桥接 · 射频发出</span><select data-path="netRf"></select></label>
             </div>
           </fieldset>
           <p data-dn="rfNote" class="denoise-note" hidden></p>
           <p data-dn="bridgeNote" class="denoise-note" hidden></p>
+          <p data-dn="levelNote" class="denoise-note" hidden>极强档可能削弱弱话音和尾音。</p>
           <details><summary>运行详情</summary><ul data-dn="stats"></ul></details>
           <div class="row" style="flex-wrap:wrap;margin:8px 0 0">
             <button type="button" class="pri" data-dn="save" disabled>保存降噪设置</button>

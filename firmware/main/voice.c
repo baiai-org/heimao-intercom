@@ -1076,7 +1076,7 @@ static void rf_forward_block(const int16_t *pcm, size_t n, bool rf_audio,
 }
 
 typedef struct {
-    bool enabled;
+    rf_denoise_level_t level;
     bool started;
     bool active;
     bool finished;
@@ -1125,7 +1125,7 @@ static bool speaker_denoise_route(speaker_denoise_t *dn)
 
 static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n, bool eligible)
 {
-    if (!dn->enabled) { return; }
+    if (!dn->level) { return; }
     if (!eligible || !speaker_denoise_route(dn) ||
         (dn->close_us && esp_timer_get_time() >= dn->close_us)) {
         if (dn->started || !s_mod_sq_open) { speaker_denoise_end(dn); }
@@ -1145,7 +1145,7 @@ static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n
         }
     } else if (s_mod_sq_open) {
         if (!dn->started) {
-            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER);
+            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER, dn->level);
             dn->started = true;
         }
         if (!dn->active) { return; }
@@ -1391,7 +1391,7 @@ static void monitor_task(void *arg)
         }
         if (s_mod_sq_open && !was_open) {
             speaker_denoise_end(&denoise);
-            denoise.enabled = bridge_denoise_enabled(DENOISE_SETTING_SPEAKER);
+            denoise.level = bridge_denoise_level(bridge_denoise_levels(), DENOISE_SETTING_SPEAKER);
             denoise.mode = netcom_mode();
         }
 
@@ -2028,13 +2028,14 @@ static void talk_task(void *arg)
     };
     const bool network = tx.mode != NETCOM_MODE_LOCAL;
     const bool to_rf = !network || s_rf_also;
-    const uint32_t flags = bridge_denoise_flags();
-    const bool denoise_enabled = to_rf && (flags & (1u << DENOISE_SETTING_HANDSET_TX));
+    const uint32_t levels = bridge_denoise_levels();
+    const rf_denoise_level_t rf_level = bridge_denoise_level(levels, DENOISE_SETTING_HANDSET_TX);
+    const bool denoise_enabled = to_rf && rf_level;
     const uint8_t net_setting = bridge_denoise_network_setting(tx.mode, DENOISE_NET_TX);
-    const bool net_requested = net_setting && (flags & (1u << net_setting));
+    const rf_denoise_level_t net_level = bridge_denoise_level(levels, net_setting);
     const rf_denoise_route_t net_route = bridge_denoise_route(net_setting);
-    const bool net_denoising = net_requested && rf_denoise_start(net_route);
-    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX);
+    const bool net_denoising = net_level && rf_denoise_start(net_route, net_level);
+    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX, rf_level);
     const bool split = network && to_rf && (denoising || net_denoising);
     eq6_t rf_eq;
     tx_history_t rf_history;
@@ -2140,7 +2141,7 @@ static void talk_task(void *arg)
      * PTT once this task has exited, and in local mode the DAC is still ours.
      */
     if (net_denoising) { (void)rf_denoise_finish(net_route, talk_network_emit, &tx); }
-    if (net_requested) { rf_denoise_stop(net_route); }
+    if (net_level) { rf_denoise_stop(net_route); }
     const bool drained = captured_for_denoise &&
         talk_denoise_drain(generation, buf, dac_eq, dac_history);
     if (captured_for_denoise && !drained) { ptt_release(PTT_OWNER_TALK, generation); }

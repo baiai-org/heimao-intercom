@@ -16,12 +16,15 @@ status.np2p={access_version:1,access_ready:true,denied_count:0,denied_limit:64,p
  peers:Array.from({length:16},(_,i)=>({name:'p'+i,ip:i<8?'192.0.2.'+(i+20):'2001:db8::'+i,port:54321+i,state:'linked',rtt_ms:30,rx:100,tx:100,drop:0}))};
 let rejectChannel=false,refuseStop=false,stops=0;
 let failDenoiseSave=false, denoiseWrites=0, failDenoiseRead=false, holdDenoiseRead=null, loseDenoiseReply=false;
-const idleDenoise={state:0,frames:0,max_us:0,overruns:0,wait_max_us:0,
+const idleDenoise={state:0,level:0,frames:0,max_us:0,overruns:0,wait_max_us:0,
  input_frames:0,wet_frames:0,dry_frames:0,queue_full:0,recoveries:0};
-const denoise={ok:true,flags:0,active_mode:0,...idleDenoise,
+const denoise={ok:true,levels:0,active_mode:0,...idleDenoise,
  speaker_stats:{...idleDenoise},handset_stats:{...idleDenoise},bridge_stats:{...idleDenoise},
  i2s:{receive_stalls:0,short_writes:0,errors:0},
  network_stats:[{...idleDenoise},{...idleDenoise},{...idleDenoise}]};
+const packLevel=(setting,level)=>level << ((setting-1)*3);
+const getLevel=setting=>(denoise.levels >> ((setting-1)*3)) & 7;
+const putLevel=(setting,level)=>{denoise.levels=(denoise.levels & ~packLevel(setting,7)) | packLevel(setting,level);};
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
 (async()=>{
@@ -44,13 +47,20 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    else if(p==='/api/rf_denoise'){
     if(route.request().method()==='POST'){
      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
-     const {mode,mask,expected,values}=route.request().postDataJSON();
+     const {mode,mask,expected_levels,levels}=route.request().postDataJSON();
      assert.equal(mask & ~[24,250,1820][mode],0);
+     let fields=0;
+     for(let setting=1;setting<=10;setting++)if(mask & (1<<setting))fields|=packLevel(setting,7);
+     assert.equal((levels | expected_levels) & ~fields,0);
      denoiseWrites++;
      if(failDenoiseSave)return route.fulfill({status:503,json:{ok:false}});
-     if((denoise.flags & mask)!==expected && (denoise.flags & mask)!==values)
-      return route.fulfill({status:409,json:{ok:false}});
-     denoise.flags=(denoise.flags & ~mask)|values;
+     for(let setting=1;setting<=10;setting++){
+      if(!(mask & (1<<setting)))continue;
+      const field=packLevel(setting,7), current=denoise.levels & field;
+      if(current!==(expected_levels & field) && current!==(levels & field))
+       return route.fulfill({status:409,json:{ok:false}});
+     }
+     denoise.levels=(denoise.levels & ~fields)|levels;
      if(loseDenoiseReply)return route.abort('timedout');
     }
     json={...denoise,mode:status.intercom.mode,rf_tx:!!status.rf_tx,bridge_active:!!status.bridge.active,
@@ -155,9 +165,10 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
     ['本地模拟','公网直连','MQTT 网络中继'][mode]);
   };
   const saved=()=>page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('已保存'));
-  const visibleInputs=()=>card.locator('input:visible').count();
+  const visibleSelects=()=>card.locator('select:visible').count();
   await selectMode(1);
-  assert.equal(await visibleInputs(),6);
+  assert.equal(await visibleSelects(),6);
+  assert.deepEqual(await input('netTx').locator('option').allTextContents(),['关闭','轻度','标准','强力','极强']);
   await input('netTx').focus();
   await page.evaluate(()=>{window.dnToggles=0;new MutationObserver(list=>{
    window.dnToggles+=list.length;
@@ -166,62 +177,74 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   holdDenoiseRead=new Promise(resolve=>{finishOldGet=resolve;});
   await page.waitForRequest(req=>req.url().endsWith('/api/rf_denoise')&&req.method()==='GET');
   assert(await input('netTx').evaluate(el=>document.activeElement===el));
-  await page.keyboard.press('Space');
-  await input('netSpeaker').check();
-  await input('netRf').check();
+  await input('netTx').selectOption('1');
+  await input('netSpeaker').selectOption('2');
+  await input('netRf').selectOption('4');
+  assert(await card.locator('[data-dn=levelNote]').isVisible());
   assert.equal(denoiseWrites,0);
   await save.click();await saved();
   holdDenoiseRead=null;finishOldGet();
-  assert.equal(denoise.flags,224);
-  assert(await input('netTx').isChecked() && await input('netRf').isChecked());
+  assert.deepEqual([getLevel(5),getLevel(6),getLevel(7)],[1,2,4]);
+  assert.equal(await input('netTx').inputValue(),'1');
+  assert.equal(await input('netRf').inputValue(),'4');
   assert.equal(await page.evaluate(()=>window.dnToggles),0);
   status.bridge.keyed=1;
-  Object.assign(denoise.network_stats[2],{state:2,frames:38,max_us:10099,overruns:1,
+  Object.assign(denoise.network_stats[2],{state:2,level:3,frames:38,max_us:10099,overruns:1,
    wait_max_us:6120,input_frames:40,wet_frames:37,dry_frames:3,queue_full:0,recoveries:1});
   await page.waitForFunction(()=>document.querySelector('[data-dn=bridgeNote]').textContent.includes('使用射频出口'));
   await card.getByText('运行详情', {exact:true}).click();
-  assert(await card.getByText(/网络来话 → 模拟桥接.*输出降噪 37.*原声 3.*恢复 1.*排队最长 6120/).isVisible());
+  assert(await card.getByText(/网络来话 → 模拟桥接.*已保存 极强.*当前话段 强力.*输出降噪 37.*原声 3.*恢复 1.*排队最长 6120/).isVisible());
   assert(await card.getByText(/I2S 累计 · 接收欠载 0/).isVisible());
   await card.getByText('运行详情', {exact:true}).click();
   await card.screenshot({path:path.join(output,'denoise-desktop.png')});
   status.bridge.keyed=0;
-  await input('forward').check();
-  await input('speaker').check();
+  await input('forward').selectOption('3');
+  await input('speaker').selectOption('2');
   await page.locator('#eqTabMic').click();
-  assert.equal(await visibleInputs(),6);
-  assert(await input('speaker').isChecked());
+  assert.equal(await visibleSelects(),6);
+  assert.equal(await input('speaker').inputValue(),'2');
   await selectMode(2);
-  assert(!await input('netTx').isChecked() && !await input('forward').isChecked() && await input('speaker').isChecked());
-  await input('netRf').check();
+  assert.equal(await input('netTx').inputValue(),'0');
+  assert.equal(await input('forward').inputValue(),'0');
+  assert.equal(await input('speaker').inputValue(),'2');
+  await input('netRf').selectOption('1');
   failDenoiseSave=true;
   await save.click();
   await page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('保存未确认'));
-  assert(await input('netRf').isChecked());
+  assert.equal(await input('netRf').inputValue(),'1');
   failDenoiseSave=false;
   loseDenoiseReply=true;
   await save.click();await saved();loseDenoiseReply=false;
-  assert.equal(denoise.flags,224+1024+8);
+  assert.deepEqual([getLevel(3),getLevel(5),getLevel(6),getLevel(7),getLevel(10)],[2,1,2,4,1]);
   await selectMode(1);
-  assert(await input('forward').isChecked() && await input('netSpeaker').isChecked());
-  await undo.click();assert(!await input('forward').isChecked() && await input('speaker').isChecked());
-  await input('forward').check();
-  await input('netTx').uncheck();
-  denoise.flags|=2; // Another panel changed an edited setting before this batch.
+  assert.equal(await input('forward').inputValue(),'3');
+  assert.equal(await input('netSpeaker').inputValue(),'2');
+  await undo.click();
+  assert.equal(await input('forward').inputValue(),'0');
+  assert.equal(await input('speaker').inputValue(),'2');
+  await input('forward').selectOption('3');
+  await input('netTx').selectOption('4');
+  putLevel(5,2); // Another panel changed an enabled route's strength.
   await save.click();
   await page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('请核对后再保存'));
-  assert(await input('forward').isChecked() && !await input('netTx').isChecked());
-  assert(denoise.flags & 32);
-  await save.click();await saved();assert(!(denoise.flags & 32));
+  assert.equal(await input('forward').inputValue(),'3');
+  assert.equal(await input('netTx').inputValue(),'4');
+  assert.deepEqual([getLevel(1),getLevel(5)],[0,2]);
+  await save.click();await saved();
+  assert.deepEqual([getLevel(1),getLevel(5)],[3,4]);
+  await input('netTx').selectOption('0');
+  await save.click();await saved();assert.equal(getLevel(5),0);
   await selectMode(0);
-  assert.equal(await visibleInputs(),2);
-  await input('handset').check();
+  assert.equal(await visibleSelects(),2);
+  await input('handset').selectOption('3');
   await page.locator('[data-page=device]').click();
   await page.locator('[data-page=audio]').click();
-  assert(await input('handset').isChecked());
+  assert.equal(await input('handset').inputValue(),'3');
   await save.click();await saved();
   failDenoiseRead=true;
   await page.waitForFunction(()=>document.querySelector('[data-dn=connection]').textContent.includes('暂未更新'));
-  assert(await input('handset').isChecked() && !await input('handset').isDisabled());
+  assert.equal(await input('handset').inputValue(),'3');
+  assert(!await input('handset').isDisabled());
   failDenoiseRead=false;
   await card.locator('[data-dn=retry]').click();
   await selectMode(2);

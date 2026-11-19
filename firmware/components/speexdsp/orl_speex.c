@@ -49,8 +49,7 @@ void *orl_speex_init(void *workspace, size_t capacity, int frame_samples,
     SpeexPreprocessState *state = NULL;
     if (setjmp(s_no_space) == 0) {
         state = speex_preprocess_state_init(frame_samples, 16000);
-        spx_int32_t suppression = suppression_db;
-        speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &suppression);
+        orl_speex_set_suppression(state, suppression_db);
         *used = s_used;
     } else {
         state = NULL;
@@ -58,6 +57,12 @@ void *orl_speex_init(void *workspace, size_t capacity, int frame_samples,
     s_workspace = NULL;
     atomic_store_explicit(&s_init_lock, 0, memory_order_release);
     return state;
+}
+
+void orl_speex_set_suppression(void *state, int suppression_db)
+{
+    spx_int32_t suppression = suppression_db;
+    (void)speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &suppression);
 }
 
 void orl_speex_run(void *state, int16_t *pcm)
