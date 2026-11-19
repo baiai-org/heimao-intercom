@@ -31,7 +31,8 @@ HARNESS = r'''
 
 static unsigned allocation, fail_at, live_allocations;
 static unsigned timer_calls, slow_at, second_slow_at;
-static uint32_t slow_us = 4001;
+static unsigned slow_even_until;
+static uint32_t slow_us = 8001;
 static int64_t now;
 static int16_t input[1024], output[1024], reference[1024];
 static size_t written;
@@ -55,7 +56,9 @@ void *heap_caps_aligned_alloc(size_t alignment, size_t n, unsigned flags) {
 void heap_caps_free(void *p) { if (p) { --live_allocations; free(p); } }
 int64_t esp_timer_get_time(void) {
     ++timer_calls;
-    now += timer_calls == slow_at || timer_calls == second_slow_at ? slow_us : 1;
+    const bool simulated = timer_calls == slow_at || timer_calls == second_slow_at ||
+        (timer_calls <= slow_even_until && timer_calls % 2 == 0);
+    now += simulated ? slow_us : 1;
     return now;
 }
 
@@ -177,36 +180,40 @@ int main(int argc, char **argv) {
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
     assert(stats.frames == before + 10 && stats.overruns == 0 && stats.max_us == 4000);
 
-    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 3334;
+    timer_calls = 0; slow_at = 0; second_slow_at = 0; slow_even_until = 10; slow_us = 4098;
     process_with_budget(640, 257, false);
     assert(!memcmp(reference, output, 640 * sizeof(*output)) && timer_calls == 10);
-    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 4001;
+    timer_calls = 0; slow_us = 6000;
+    process_with_budget(640, 257, false);
+    check_fallback(output, 160, 640);
+    assert(timer_calls == 6);
+    timer_calls = 0; slow_even_until = 0; slow_at = 4; slow_us = 8001;
     process_with_budget(640, 257, false);
     assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
-    puts("PASS: solo consecutive 3334 us passes continue; any solo pass above 4000 us bypasses");
+    puts("PASS: sustained solo 4098 us continues; sustained 6000 us and 8001 us spikes bypass");
 
     /* A timeout before any processed output has been emitted starts in raw PCM. */
-    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 3334;
+    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 4500;
     process(640, 257);
     assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
-    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 4001;
+    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 8001;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
-    timer_calls = 0; slow_at = 2; slow_us = 4001;
+    timer_calls = 0; slow_at = 2; slow_us = 8001;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
     assert(timer_calls == 2);
     slow_at = 0;
-    puts("PASS: isolated 3334/4000 us passes continue; consecutive slow passes and 4001 us first still bypass");
+    puts("PASS: shared fast frames repay bursts; sustained excess and hard stalls still bypass");
 
     process(640, 257);
     memcpy(reference, output, 640 * sizeof(*output));
-    timer_calls = 0; slow_at = 4; second_slow_at = 6; slow_us = 3334;
+    timer_calls = 0; slow_at = 4; second_slow_at = 6; slow_us = 4100;
     process(640, 257);
     check_fallback(output, 160, 640);
-    assert(timer_calls == 6); // Stop processing after the first late frame.
+    assert(timer_calls == 6); // Stop processing once the burst reserve is exhausted.
 
-    slow_at = 0; second_slow_at = 0; slow_us = 4001;
+    slow_at = 0; second_slow_at = 0; slow_us = 8001;
     process(367, 71);
     memcpy(reference, output, 367 * sizeof(*output));
     timer_calls = 0; slow_at = 8;
@@ -222,7 +229,7 @@ int main(int argc, char **argv) {
     cancel = false;
     process(1, 1);
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.overruns == 6 && stats.max_us == 4001 && stats.frames > 1000);
+    assert(stats.overruns == 7 && stats.max_us == 8001 && stats.frames > 1000);
     printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
            (unsigned long)stats.workspace_bytes);
     rf_denoise_prepare(RF_DENOISE_SPEAKER);

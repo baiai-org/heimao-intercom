@@ -1080,6 +1080,7 @@ typedef struct {
     bool started;
     bool active;
     bool finished;
+    bool profile_bound;
     uint8_t mode;
     unsigned profile_revision;
     size_t dma_left;
@@ -1109,13 +1110,17 @@ static void speaker_denoise_cos_closed(speaker_denoise_t *dn)
     s_amp_settle = AMP_SETTLE_SAMPLES;
 }
 
-static bool speaker_denoise_route(const speaker_denoise_t *dn)
+static bool speaker_denoise_route(speaker_denoise_t *dn)
 {
     sa818_cfg_status_t status;
     sa818_cfg_status(&status);
-    return status.ready && status.applied_revision == dn->profile_revision &&
-           netcom_mode() == dn->mode && ptt_owner() == PTT_OWNER_NONE &&
-           !(rx_guard_blocked() & RX_GUARD_OUT_SPK);
+    if (!status.ready || netcom_mode() != dn->mode || ptt_owner() != PTT_OWNER_NONE ||
+        (rx_guard_blocked() & RX_GUARD_OUT_SPK)) { return false; }
+    if (!dn->profile_bound) {
+        dn->profile_revision = status.applied_revision;
+        dn->profile_bound = true;
+    }
+    return status.applied_revision == dn->profile_revision;
 }
 
 static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n, bool eligible)
@@ -1389,12 +1394,7 @@ static void monitor_task(void *arg)
         if (s_mod_sq_open && !was_open) {
             speaker_denoise_end(&denoise);
             denoise.enabled = bridge_denoise_enabled(DENOISE_SETTING_SPEAKER);
-            if (denoise.enabled) {
-                sa818_cfg_status_t status;
-                sa818_cfg_status(&status);
-                denoise.mode = netcom_mode();
-                denoise.profile_revision = status.applied_revision;
-            }
+            denoise.mode = netcom_mode();
         }
 
         /* Fixed panel gain.  Saturation is only the int16 representation

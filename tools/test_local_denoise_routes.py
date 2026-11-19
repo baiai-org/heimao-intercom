@@ -68,7 +68,7 @@ static int audio_i2s_write_until(const int16_t *buf,size_t n,int64_t deadline) {
 
 CASES = r'''
 static void speaker_open(speaker_denoise_t *dn, int16_t *buf) {
-    *dn = (speaker_denoise_t){.enabled=true,.mode=mode,.profile_revision=profile};
+    *dn = (speaker_denoise_t){.enabled=true,.mode=mode};
     amp = s_mod_sq_open = true;
     for (size_t i=0;i<257;i++) buf[i] = (int16_t)(i * 17 + 100);
     speaker_denoise_render(dn, buf, 257, true);
@@ -87,6 +87,17 @@ int main(void) {
     rf_denoise_prepare(RF_DENOISE_SPEAKER);
     rf_denoise_prepare(RF_DENOISE_HANDSET_TX);
     speaker_denoise_t dn;
+    dn = (speaker_denoise_t){.enabled=true,.mode=mode};
+    amp = s_mod_sq_open = true;
+    radio_ready = false;
+    memset(pcm, 0, sizeof(pcm));
+    speaker_denoise_render(&dn, pcm, 256, true);
+    assert(!dn.profile_bound && !dn.started && dn.enabled);
+    ++profile;
+    radio_ready = true;
+    speaker_denoise_render(&dn, pcm, 256, true);
+    assert(dn.started && dn.profile_bound && dn.profile_revision == profile);
+    speaker_denoise_end(&dn);
     speaker_open(&dn,pcm);
     s_mod_sq_open=false; speaker_denoise_cos_closed(&dn);
     assert(amp && dn.close_us);

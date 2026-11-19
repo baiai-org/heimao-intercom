@@ -9,8 +9,12 @@
 enum {
     FRAME_SAMPLES = 160,
     SUPPRESSION_DB = -6,
-    FRAME_TARGET_US = 2500,
-    FRAME_LIMIT_US = 4000,
+    SOLO_TARGET_US = 4500,
+    SOLO_BURST_US = 4000,
+    SOLO_LIMIT_US = 8000,
+    SHARED_TARGET_US = 2600,
+    SHARED_BURST_US = 2500,
+    SHARED_LIMIT_US = 6000,
     BYPASS_FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
     PLAY_DELAY = 2 * FRAME_SAMPLES,
@@ -34,8 +38,8 @@ typedef struct {
     workspace_t *work;
     bool bypass;
     bool wet_emitted;
-    bool previous_over_target;
     bool shared_budget;
+    uint32_t work_debt_us;
     size_t input_n;
     size_t previous_n;
     size_t head;
@@ -86,8 +90,8 @@ bool rf_denoise_start(rf_denoise_route_t route, bool shared_budget)
     stream->work = atomic_load(&stream->prepared);
     stream->bypass = !stream->work;
     stream->wet_emitted = false;
-    stream->previous_over_target = false;
     stream->shared_budget = shared_budget;
+    stream->work_debt_us = 0;
     stream->input_n = stream->previous_n = stream->head = stream->queued = 0;
     stream->lead = PLAY_DELAY;
     if (stream->work) {
@@ -114,13 +118,16 @@ static bool run_frame(stream_t *stream)
     const uint32_t us = (uint32_t)(esp_timer_get_time() - start);
     atomic_fetch_add(&stream->frames, 1);
     if (us > atomic_load(&stream->max_us)) { atomic_store(&stream->max_us, us); }
-    /* Solo work can use the full limit. Paired work must leave time for the
-     * other route in the same block, while tolerating one isolated slow pass. */
-    const bool over_target = us > FRAME_TARGET_US;
-    const bool timed_out = us > FRAME_LIMIT_US ||
-        (stream->shared_budget && over_target && stream->previous_over_target);
-    stream->previous_over_target = over_target;
-    if (!timed_out) { return true; }
+    const uint32_t target = stream->shared_budget ? SHARED_TARGET_US : SOLO_TARGET_US;
+    const uint32_t burst = stream->shared_budget ? SHARED_BURST_US : SOLO_BURST_US;
+    const uint32_t limit = stream->shared_budget ? SHARED_LIMIT_US : SOLO_LIMIT_US;
+    /* Faster 10 ms frames repay prior excess. The remaining debt bounds
+     * repeated overload, while the absolute limit bounds isolated stalls. */
+    if (us <= limit) {
+        const uint32_t work = stream->work_debt_us + us;
+        stream->work_debt_us = work > target ? work - target : 0;
+        if (stream->work_debt_us <= burst) { return true; }
+    }
     atomic_fetch_add(&stream->overruns, 1);
     atomic_store(&stream->state, RF_DENOISE_TIME_BYPASS);
     stream->bypass = true;
