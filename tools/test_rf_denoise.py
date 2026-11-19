@@ -31,6 +31,7 @@ HARNESS = r'''
 
 static unsigned allocation, fail_at, live_allocations;
 static unsigned timer_calls, slow_at;
+static uint32_t slow_us = 3000;
 static int64_t now;
 static int16_t input[1024], output[1024], reference[1024];
 static size_t written;
@@ -52,7 +53,7 @@ void *heap_caps_aligned_alloc(size_t alignment, size_t n, unsigned flags) {
     return p;
 }
 void heap_caps_free(void *p) { if (p) { --live_allocations; free(p); } }
-int64_t esp_timer_get_time(void) { now += ++timer_calls == slow_at ? 3000 : 1; return now; }
+int64_t esp_timer_get_time(void) { now += ++timer_calls == slow_at ? slow_us : 1; return now; }
 
 static bool collect(const int16_t *pcm, size_t n, void *ctx) {
     (void)ctx;
@@ -153,17 +154,34 @@ int main(int argc, char **argv) {
         assert(!memcmp(reference, output, n * sizeof(*output)));
     }
 
-    /* A timeout before any processed output has been emitted starts in raw PCM. */
-    timer_calls = 0; slow_at = 4;
+    /* The allowance applies to precisely the first analysis pass per talkspurt. */
     process(640, 257);
-    assert(!memcmp(input, output, 640 * sizeof(*output)));
+    memcpy(reference, output, 640 * sizeof(*output));
+    rf_denoise_stats_t stats;
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
+    const uint32_t before = stats.frames;
+    timer_calls = 0; slow_at = 2; slow_us = 3334;
+    process(640, 257);
+    assert(!memcmp(reference, output, 640 * sizeof(*output)));
+    timer_calls = 0; slow_us = 4000;
+    process(640, 257);
+    assert(!memcmp(reference, output, 640 * sizeof(*output)));
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
+    assert(stats.frames == before + 10 && stats.overruns == 0 && stats.max_us == 4000);
+
+    /* A timeout before any processed output has been emitted starts in raw PCM. */
+    timer_calls = 0; slow_at = 4; slow_us = 3334;
+    process(640, 257);
+    assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
     timer_calls = 0; slow_at = 4;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
-    timer_calls = 0; slow_at = 2;
+    timer_calls = 0; slow_at = 2; slow_us = 4001;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
-    slow_at = 0;
+    assert(timer_calls == 2);
+    slow_at = 0; slow_us = 3000;
+    puts("PASS: 3334 us and 4000 us first passes continue; 3334 us later and 4001 us first still bypass");
 
     process(640, 257);
     memcpy(reference, output, 640 * sizeof(*output));
@@ -187,9 +205,8 @@ int main(int argc, char **argv) {
     assert(!rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == 0);
     cancel = false;
     process(1, 1);
-    rf_denoise_stats_t stats;
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.overruns == 5 && stats.max_us == 3000 && stats.frames > 1000);
+    assert(stats.overruns == 5 && stats.max_us == 4001 && stats.frames > 1000);
     printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
            (unsigned long)stats.workspace_bytes);
     rf_denoise_prepare(RF_DENOISE_SPEAKER);

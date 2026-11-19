@@ -9,6 +9,7 @@
 enum {
     FRAME_SAMPLES = 160,
     SUPPRESSION_DB = -6,
+    FIRST_FRAME_BUDGET_US = 4000,
     FRAME_BUDGET_US = 2500,
     BYPASS_FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
@@ -104,12 +105,15 @@ void rf_denoise_stop(rf_denoise_route_t route)
 
 static bool run_frame(stream_t *stream)
 {
+    /* The first analysis pass has no preceding PCM. Every following pass
+     * uses the regular deadline, including the pass that emits the first samples. */
+    const uint32_t budget = stream->previous_n ? FRAME_BUDGET_US : FIRST_FRAME_BUDGET_US;
     const int64_t start = esp_timer_get_time();
     orl_speex_run(stream->work->processor, stream->work->output);
     const uint32_t us = (uint32_t)(esp_timer_get_time() - start);
     atomic_fetch_add(&stream->frames, 1);
     if (us > atomic_load(&stream->max_us)) { atomic_store(&stream->max_us, us); }
-    if (us <= FRAME_BUDGET_US) { return true; }
+    if (us <= budget) { return true; }
     atomic_fetch_add(&stream->overruns, 1);
     atomic_store(&stream->state, RF_DENOISE_TIME_BYPASS);
     stream->bypass = true;
