@@ -30,8 +30,8 @@ HARNESS = r'''
 #include <string.h>
 
 static unsigned allocation, fail_at, live_allocations;
-static unsigned timer_calls, slow_at;
-static uint32_t slow_us = 3000;
+static unsigned timer_calls, slow_at, second_slow_at;
+static uint32_t slow_us = 4001;
 static int64_t now;
 static int16_t input[1024], output[1024], reference[1024];
 static size_t written;
@@ -53,7 +53,11 @@ void *heap_caps_aligned_alloc(size_t alignment, size_t n, unsigned flags) {
     return p;
 }
 void heap_caps_free(void *p) { if (p) { --live_allocations; free(p); } }
-int64_t esp_timer_get_time(void) { now += ++timer_calls == slow_at ? slow_us : 1; return now; }
+int64_t esp_timer_get_time(void) {
+    ++timer_calls;
+    now += timer_calls == slow_at || timer_calls == second_slow_at ? slow_us : 1;
+    return now;
+}
 
 static bool collect(const int16_t *pcm, size_t n, void *ctx) {
     (void)ctx;
@@ -154,7 +158,7 @@ int main(int argc, char **argv) {
         assert(!memcmp(reference, output, n * sizeof(*output)));
     }
 
-    /* The allowance applies to precisely the first analysis pass per talkspurt. */
+    /* An isolated excursion anywhere in the talkspurt preserves processed PCM. */
     process(640, 257);
     memcpy(reference, output, 640 * sizeof(*output));
     rf_denoise_stats_t stats;
@@ -163,34 +167,34 @@ int main(int argc, char **argv) {
     timer_calls = 0; slow_at = 2; slow_us = 3334;
     process(640, 257);
     assert(!memcmp(reference, output, 640 * sizeof(*output)));
-    timer_calls = 0; slow_us = 4000;
+    timer_calls = 0; slow_at = 4; second_slow_at = 8; slow_us = 4000;
     process(640, 257);
     assert(!memcmp(reference, output, 640 * sizeof(*output)));
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
     assert(stats.frames == before + 10 && stats.overruns == 0 && stats.max_us == 4000);
 
     /* A timeout before any processed output has been emitted starts in raw PCM. */
-    timer_calls = 0; slow_at = 4; slow_us = 3334;
+    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 3334;
     process(640, 257);
     assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
-    timer_calls = 0; slow_at = 4;
+    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 4001;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
     timer_calls = 0; slow_at = 2; slow_us = 4001;
     process(47, 47);
     assert(!memcmp(input, output, 47 * sizeof(*output)));
     assert(timer_calls == 2);
-    slow_at = 0; slow_us = 3000;
-    puts("PASS: 3334 us and 4000 us first passes continue; 3334 us later and 4001 us first still bypass");
+    slow_at = 0;
+    puts("PASS: isolated 3334/4000 us passes continue; consecutive slow passes and 4001 us first still bypass");
 
     process(640, 257);
     memcpy(reference, output, 640 * sizeof(*output));
-    timer_calls = 0; slow_at = 6;
+    timer_calls = 0; slow_at = 4; second_slow_at = 6; slow_us = 3334;
     process(640, 257);
     check_fallback(output, 160, 640);
     assert(timer_calls == 6); // Stop processing after the first late frame.
 
-    slow_at = 0;
+    slow_at = 0; second_slow_at = 0; slow_us = 4001;
     process(367, 71);
     memcpy(reference, output, 367 * sizeof(*output));
     timer_calls = 0; slow_at = 8;

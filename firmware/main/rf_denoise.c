@@ -9,8 +9,8 @@
 enum {
     FRAME_SAMPLES = 160,
     SUPPRESSION_DB = -6,
-    FIRST_FRAME_BUDGET_US = 4000,
-    FRAME_BUDGET_US = 2500,
+    FRAME_TARGET_US = 2500,
+    FRAME_LIMIT_US = 4000,
     BYPASS_FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
     PLAY_DELAY = 2 * FRAME_SAMPLES,
@@ -34,6 +34,7 @@ typedef struct {
     workspace_t *work;
     bool bypass;
     bool wet_emitted;
+    bool previous_over_target;
     size_t input_n;
     size_t previous_n;
     size_t head;
@@ -84,6 +85,7 @@ bool rf_denoise_start(rf_denoise_route_t route)
     stream->work = atomic_load(&stream->prepared);
     stream->bypass = !stream->work;
     stream->wet_emitted = false;
+    stream->previous_over_target = false;
     stream->input_n = stream->previous_n = stream->head = stream->queued = 0;
     stream->lead = PLAY_DELAY;
     if (stream->work) {
@@ -105,15 +107,17 @@ void rf_denoise_stop(rf_denoise_route_t route)
 
 static bool run_frame(stream_t *stream)
 {
-    /* The first analysis pass has no preceding PCM. Every following pass
-     * uses the regular deadline, including the pass that emits the first samples. */
-    const uint32_t budget = stream->previous_n ? FRAME_BUDGET_US : FIRST_FRAME_BUDGET_US;
     const int64_t start = esp_timer_get_time();
     orl_speex_run(stream->work->processor, stream->work->output);
     const uint32_t us = (uint32_t)(esp_timer_get_time() - start);
     atomic_fetch_add(&stream->frames, 1);
     if (us > atomic_load(&stream->max_us)) { atomic_store(&stream->max_us, us); }
-    if (us <= budget) { return true; }
+    /* The audio block can absorb an isolated slow pass. Bound its cost and
+     * back off before a pair of slow passes repeatedly eats into playback. */
+    const bool over_target = us > FRAME_TARGET_US;
+    const bool timed_out = us > FRAME_LIMIT_US || (over_target && stream->previous_over_target);
+    stream->previous_over_target = over_target;
+    if (!timed_out) { return true; }
     atomic_fetch_add(&stream->overruns, 1);
     atomic_store(&stream->state, RF_DENOISE_TIME_BYPASS);
     stream->bypass = true;
