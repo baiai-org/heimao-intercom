@@ -1,2 +1,5 @@
 # gitleaks fingerprints for false positives (synthetic host-test data).
 23714e0e336e7ddaa116e16dc161a376b6364e3e:tools/test_radio_profile.py:generic-api-key:359
+
+# Public ECDSA verification key for signed release manifests (X.509 DER).
+a2b3a6181df77de3aa6fdc3767d13c8f0397d5ff:app/app/src/main/java/net/openradiolink/app/ReleaseUpdateManifest.kt:generic-api-key:22
