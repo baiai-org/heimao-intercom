@@ -35,6 +35,7 @@ typedef struct {
     bool bypass;
     bool wet_emitted;
     bool previous_over_target;
+    bool shared_budget;
     size_t input_n;
     size_t previous_n;
     size_t head;
@@ -79,13 +80,14 @@ void rf_denoise_prepare(rf_denoise_route_t route)
     atomic_store(&stream->prepared, work);
 }
 
-bool rf_denoise_start(rf_denoise_route_t route)
+bool rf_denoise_start(rf_denoise_route_t route, bool shared_budget)
 {
     stream_t *stream = &s_streams[route];
     stream->work = atomic_load(&stream->prepared);
     stream->bypass = !stream->work;
     stream->wet_emitted = false;
     stream->previous_over_target = false;
+    stream->shared_budget = shared_budget;
     stream->input_n = stream->previous_n = stream->head = stream->queued = 0;
     stream->lead = PLAY_DELAY;
     if (stream->work) {
@@ -112,10 +114,11 @@ static bool run_frame(stream_t *stream)
     const uint32_t us = (uint32_t)(esp_timer_get_time() - start);
     atomic_fetch_add(&stream->frames, 1);
     if (us > atomic_load(&stream->max_us)) { atomic_store(&stream->max_us, us); }
-    /* The audio block can absorb an isolated slow pass. Bound its cost and
-     * back off before a pair of slow passes repeatedly eats into playback. */
+    /* Solo work can use the full limit. Paired work must leave time for the
+     * other route in the same block, while tolerating one isolated slow pass. */
     const bool over_target = us > FRAME_TARGET_US;
-    const bool timed_out = us > FRAME_LIMIT_US || (over_target && stream->previous_over_target);
+    const bool timed_out = us > FRAME_LIMIT_US ||
+        (stream->shared_budget && over_target && stream->previous_over_target);
     stream->previous_over_target = over_target;
     if (!timed_out) { return true; }
     atomic_fetch_add(&stream->overruns, 1);

@@ -22,6 +22,7 @@ PRELUDE = r'''
 #define BLOCK_FRAMES 256
 #define RX_GUARD_OUT_SPK 4
 #define ESP_OK 0
+#define NETCOM_MODE_LOCAL 0
 enum { PTT_OWNER_NONE, PTT_OWNER_TALK, PTT_OWNER_NETWORK };
 enum { PTT_IDLE, PTT_TX };
 typedef struct { bool ready; unsigned applied_revision; } sa818_cfg_status_t;
@@ -45,6 +46,8 @@ static void board_amp_enable(bool value) { amp = value; }
 static void sa818_cfg_status(sa818_cfg_status_t *out) { *out = (sa818_cfg_status_t){radio_ready,profile}; }
 static bool sa818_cfg_tx_ready(void) { return radio_ready; }
 static unsigned netcom_mode(void) { return mode; }
+static bool bridge_active(void) { return false; }
+static bool bridge_denoise_enabled(unsigned setting) { (void)setting; return false; }
 static int ptt_owner(void) { return owner; }
 static bool ptt_owned(int kind, uint32_t generation) { return owner == kind && generation == 99; }
 static int ptt_get_state(void) { return state; }
@@ -75,7 +78,7 @@ static void speaker_open(speaker_denoise_t *dn, int16_t *buf) {
 static void mic_open(int16_t *buf) {
     for (size_t i=0;i<110;i++) buf[i] = (int16_t)(i * 23 - 1000);
     state=PTT_TX; owner=PTT_OWNER_TALK; failed=false; writes=0; written=0; revoke_after=0;
-    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX));
+    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX, false));
     assert(rf_denoise_play_block(RF_DENOISE_HANDSET_TX,buf,110));
 }
 

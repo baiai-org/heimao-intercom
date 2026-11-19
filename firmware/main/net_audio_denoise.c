@@ -64,7 +64,7 @@ bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
         dn->requested = (flags & (1u << setting)) != 0;
         if (dn->requested) {
             dn->route = bridge_denoise_route(setting);
-            dn->active = rf_denoise_start(dn->route);
+            dn->active = rf_denoise_start(dn->route, false);
         }
     }
     if (have) {

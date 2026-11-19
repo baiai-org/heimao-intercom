@@ -153,13 +153,13 @@ int main(void) {
         owner = PTT_OWNER_TALK;
         talking = true;
         struct talk_network_denoise tx = {.generation = 1, .room = room, .mode = mode};
-        assert(rf_denoise_start(RF_DENOISE_NET_TX));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX, false));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         assert(written == 0);
         assert(rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));
         assert(written == short_length && tx.peak == 10);
         for (size_t i = 0; i < written; ++i) assert(output[i] == reference[i] + 13);
-        assert(rf_denoise_start(RF_DENOISE_NET_TX));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX, false));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         owner = PTT_OWNER_NONE;
         assert(!rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));

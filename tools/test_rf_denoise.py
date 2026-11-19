@@ -68,15 +68,19 @@ static bool collect(const int16_t *pcm, size_t n, void *ctx) {
     return true;
 }
 
-static void process(size_t n, size_t chunk) {
+static void process_with_budget(size_t n, size_t chunk, bool shared) {
     written = 0;
-    (void)rf_denoise_start(RF_DENOISE_BRIDGE);
+    (void)rf_denoise_start(RF_DENOISE_BRIDGE, shared);
     for (size_t i = 0; i < n; i += chunk) {
         size_t count = n - i < chunk ? n - i : chunk;
         assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + i, count, collect, NULL));
     }
     assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
     assert(written == n);
+}
+
+static void process(size_t n, size_t chunk) {
+    process_with_budget(n, chunk, true);
 }
 
 static void check_fallback(const int16_t *actual, size_t transition, size_t total) {
@@ -173,6 +177,14 @@ int main(int argc, char **argv) {
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
     assert(stats.frames == before + 10 && stats.overruns == 0 && stats.max_us == 4000);
 
+    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 3334;
+    process_with_budget(640, 257, false);
+    assert(!memcmp(reference, output, 640 * sizeof(*output)) && timer_calls == 10);
+    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 4001;
+    process_with_budget(640, 257, false);
+    assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
+    puts("PASS: solo consecutive 3334 us passes continue; any solo pass above 4000 us bypasses");
+
     /* A timeout before any processed output has been emitted starts in raw PCM. */
     timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 3334;
     process(640, 257);
@@ -203,14 +215,14 @@ int main(int argc, char **argv) {
     slow_at = 0;
 
     written = 0;
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE, true));
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input, 47, collect, NULL));
     cancel = true;
     assert(!rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == 0);
     cancel = false;
     process(1, 1);
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.overruns == 5 && stats.max_us == 4001 && stats.frames > 1000);
+    assert(stats.overruns == 6 && stats.max_us == 4001 && stats.frames > 1000);
     printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
            (unsigned long)stats.workspace_bytes);
     rf_denoise_prepare(RF_DENOISE_SPEAKER);
@@ -222,7 +234,7 @@ int main(int argc, char **argv) {
     memcpy(reference, output, 640 * sizeof(*output));
     int16_t playback[960];
     memcpy(playback, input, 640 * sizeof(*playback));
-    assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+    assert(rf_denoise_start(RF_DENOISE_SPEAKER, true));
     timer_calls = 0; slow_at = 6;
     assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback, 320));
     assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback + 320, 320));
@@ -243,9 +255,9 @@ int main(int argc, char **argv) {
             speaker[i] = input[i];
             mic[i] = input[count - i - 1];
         }
-        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
-        assert(rf_denoise_start(RF_DENOISE_HANDSET_TX));
-        assert(rf_denoise_start(RF_DENOISE_BRIDGE)); written = 0;
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER, true));
+        assert(rf_denoise_start(RF_DENOISE_HANDSET_TX, true));
+        assert(rf_denoise_start(RF_DENOISE_BRIDGE, true)); written = 0;
         for (size_t i = 0; i < count; ) {
             size_t n = count - i < 257 ? count - i : 257;
             assert(rf_denoise_push(RF_DENOISE_BRIDGE, mic + i, n, collect, NULL));

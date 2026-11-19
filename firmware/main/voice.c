@@ -1140,7 +1140,9 @@ static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n
         }
     } else if (s_mod_sq_open) {
         if (!dn->started) {
-            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER);
+            const bool shared_budget = dn->mode != NETCOM_MODE_LOCAL &&
+                bridge_active() && bridge_denoise_enabled(dn->mode);
+            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER, shared_budget);
             dn->started = true;
         }
         if (!dn->active) { return; }
@@ -2032,8 +2034,9 @@ static void talk_task(void *arg)
     const bool denoise_enabled = to_rf && (flags & (1u << DENOISE_SETTING_HANDSET_TX));
     const uint8_t net_setting = bridge_denoise_network_setting(tx.mode, DENOISE_NET_TX);
     const bool net_requested = net_setting && (flags & (1u << net_setting));
-    const bool net_denoising = net_requested && rf_denoise_start(RF_DENOISE_NET_TX);
-    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX);
+    const bool shared_budget = denoise_enabled && net_requested;
+    const bool net_denoising = net_requested && rf_denoise_start(RF_DENOISE_NET_TX, shared_budget);
+    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX, shared_budget);
     const bool split = network && to_rf && (denoising || net_denoising);
     eq6_t rf_eq;
     tx_history_t rf_history;

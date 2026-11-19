@@ -451,7 +451,9 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
     rx_tx_unlock();
     /* The monitor owns the DSP state. Commit revalidates the generation,
      * active route and receive guard after the expensive computation. */
-    if (starting) { (void)rf_denoise_start(RF_DENOISE_BRIDGE); }
+    if (starting) {
+        (void)rf_denoise_start(RF_DENOISE_BRIDGE, bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
+    }
     (void)rf_denoise_push(RF_DENOISE_BRIDGE, pcm, n, denoised_emit, &generation);
 }
 
