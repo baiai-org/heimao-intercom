@@ -38,7 +38,7 @@ static portMUX_TYPE s_lock_init = portMUX_INITIALIZER_UNLOCKED;
 static ptt_owner_t s_owner;
 static uint32_t s_owner_token;
 static bool s_local_audio;
-static bool s_rebooting;
+static bool s_rebooting, s_maintenance_blocked;
 #define PTT_TRACE_CAPACITY 64
 static ptt_trace_event_t s_trace[PTT_TRACE_CAPACITY];
 static uint32_t s_trace_sequence;
@@ -169,7 +169,7 @@ static void unkey_radio(void)
 bool ptt_claim(ptt_owner_t owner, uint32_t token)
 {
     ptt_control_lock();
-    bool ok = owner != PTT_OWNER_NONE && !s_dry && !s_local_audio && !s_rebooting;
+    bool ok = owner != PTT_OWNER_NONE && !s_dry && !s_local_audio && !s_rebooting && !s_maintenance_blocked;
     if (s_owner != PTT_OWNER_NONE) {
         ok = ok && s_owner == owner && s_owner_token == token;
     } else {
@@ -185,7 +185,7 @@ bool ptt_claim(ptt_owner_t owner, uint32_t token)
 bool ptt_local_audio_begin(void)
 {
     ptt_control_lock();
-    const bool ok = !s_rebooting && !s_local_audio && !s_dry && s_owner == PTT_OWNER_NONE &&
+    const bool ok = !s_rebooting && !s_maintenance_blocked && !s_local_audio && !s_dry && s_owner == PTT_OWNER_NONE &&
                     s_state == PTT_IDLE && !s_bridge_keyed;
     if (ok) { s_local_audio = true; activity_note(); }
     ptt_control_unlock();
@@ -323,7 +323,7 @@ static esp_err_t ptt_init_locked(void)
 
 static esp_err_t ptt_request_tx_locked(int max_ms)
 {
-    if (s_rebooting) { return ESP_ERR_INVALID_STATE; }
+    if (s_rebooting || s_maintenance_blocked) { return ESP_ERR_INVALID_STATE; }
     if (!s_dry && s_rf_keying && !sa818_cfg_tx_ready()) {
         ESP_LOGW(TAG, "RF TX refused: configure installed module band/profile in panel");
         return ESP_ERR_INVALID_STATE;
@@ -571,6 +571,21 @@ bool ptt_rf_keying_enabled(void) { ptt_control_lock(); bool result = ptt_rf_keyi
 void ptt_set_rf_keying(bool enabled) { ptt_control_lock(); ptt_set_rf_keying_locked(enabled); ptt_control_unlock(); }
 esp_err_t ptt_init(void) { ptt_control_lock(); esp_err_t result = ptt_init_locked(); ptt_control_unlock(); return result; }
 esp_err_t ptt_request_tx(int max_ms) { ptt_control_lock(); esp_err_t result = ptt_request_tx_locked(max_ms); ptt_control_unlock(); return result; }
+void ptt_maintenance_block(bool blocked)
+{
+    ptt_control_lock();
+    s_maintenance_blocked = blocked;
+    ptt_control_unlock();
+}
+
+bool ptt_maintenance_blocked(void)
+{
+    ptt_control_lock();
+    const bool blocked = s_maintenance_blocked;
+    ptt_control_unlock();
+    return blocked;
+}
+
 void ptt_prepare_reboot(void)
 {
     ptt_control_lock();

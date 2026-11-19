@@ -12,5 +12,8 @@ esp_err_t device_maintenance_factory_reset(void);
 bool device_maintenance_reboot_pending(void);
 /* Track non-HTTP file writers too; new writes cannot start after reboot arm. */
 bool device_maintenance_write_begin(void);
+bool device_maintenance_update_idle(void);
+bool device_maintenance_update_begin(void);
+void device_maintenance_update_end(bool reboot);
 void device_maintenance_write_end(void);
 void device_maintenance_json(char *out, size_t capacity);

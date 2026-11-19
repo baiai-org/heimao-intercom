@@ -200,6 +200,8 @@ void netcom_note_rx_carrier(bool carrier);
 /* True while a network engine (NET-P2P / relay) is started.  Note this does NOT
  * mean audio can be carried: the relay starts before the broker accepts us. */
 bool netcom_engine_running(void);
+esp_err_t netcom_update_pause(void);
+esp_err_t netcom_update_resume(void);
 
 /* True when audio fed to the engine would actually go out: mode LOCAL, or the
  * relay is connected, or (for NET-P2P) at least one peer is linked.  Talk paths

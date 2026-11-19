@@ -565,6 +565,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
         Section("本机喇叭诊断") {Text("只在手台喇叭播放，不主动键控电台。录音来自下一次实际收听。",color=secondary)
             FlowRow {listOf("arm" to "记录下一次收听","replay" to "重放录音","silence" to "数字静音","dacmute" to "DAC 静音","tone" to "低电平测试音","stop" to "停止").forEach{(op,label)->TextButton(onClick={manager.action(p.id){diagnostic(op)}}){Text(label)}}}}
         DeviceMaintenanceSection(manager,p,s,confirm)
+        BoardReleaseUpdateSection(manager,p,s,confirm)
         Section("文件与升级") {Text("维护前结束通联；文件和升级始终面向当前手台。",color=secondary)
             FlowRow {OutlinedButton(onClick=download,enabled=s.connected&&!s.maintenance){Text("导出运行固件")};Button(onClick=upload,enabled=s.connected&&!s.maintenance){Text("上传应用固件")}}
             if(s.taskResult.isNotBlank())SelectionContainer{Text(s.taskResult,color=green)}}

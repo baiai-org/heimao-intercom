@@ -104,3 +104,7 @@ CONFIG_ESP_COREDUMP_STACK_SIZE=1792
 # Sec-Fetch-*) overflows it: the server answers "Header fields are too long"
 # instead of the panel.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+# Release OTA rollback capability marker read from the installed bootloader.
+CONFIG_BOOTLOADER_PROJECT_VER=10801
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

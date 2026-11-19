@@ -128,4 +128,5 @@ jobs:
             dist/*.apk
             dist/*.exe
             dist/SHA256SUMS.txt
+          draft: true
           generate_release_notes: true

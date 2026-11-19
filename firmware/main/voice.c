@@ -2580,7 +2580,7 @@ static bool s_borrowed;
 
 static void monitor_borrow_locked(const char *who)
 {
-    if (!who) {
+    if (!who || ptt_maintenance_blocked()) {
         return;
     }
     if (!strcmp(who, "preview")) {
@@ -2616,6 +2616,14 @@ static void monitor_release_locked(const char *who)
         (void)voice_stop();
         s_borrowed = false;
     }
+}
+
+bool voice_monitor_operator_active(void)
+{
+    control_lock();
+    const bool active = s_mode == VOICE_MONITOR && !s_borrowed;
+    control_unlock();
+    return active;
 }
 
 void voice_monitor_borrow(const char *who)
@@ -3918,6 +3926,7 @@ esp_err_t voice_stop(void)
 esp_err_t voice_start(voice_mode_t mode)
 {
     control_lock();
+    if (ptt_maintenance_blocked()) { control_unlock(); return ESP_ERR_INVALID_STATE; }
     /* Check readiness and reserve the transmitter before changing the DAC.
      * A refused press must leave the existing receiver/transmission intact. */
     const uint32_t token = s_control_generation == UINT32_MAX ? 1 : s_control_generation + 1;

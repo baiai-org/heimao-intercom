@@ -23,6 +23,7 @@
 
 #include "bridge.h"
 #include "ptt.h"
+#include "app_control.h"
 #include "voice.h"
 #include "radio_led.h"
 #include "sdr.h"
@@ -467,8 +468,21 @@ static esp_err_t engine_start(const netcom_engine_t *e)
     return err;
 }
 
-esp_err_t netcom_set_mode(uint8_t mode)
+esp_err_t netcom_update_pause(void)
 {
+    return engine_stop(active_engine());
+}
+
+esp_err_t netcom_update_resume(void)
+{
+    const esp_err_t err = engine_start(active_engine());
+    bridge_mode_changed();
+    return err;
+}
+
+static esp_err_t netcom_set_mode_locked(uint8_t mode)
+{
+    if (ptt_maintenance_blocked()) { return ESP_ERR_INVALID_STATE; }
     if (mode > NETCOM_MODE_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -505,6 +519,14 @@ esp_err_t netcom_set_mode(uint8_t mode)
     ESP_LOGI(TAG, "mode -> %s (room %u, %s)", netcom_mode_name(mode), s_cfg.room,
              err == ESP_OK ? "engine up" : esp_err_to_name(err));
     bridge_mode_changed();
+    return err;
+}
+
+esp_err_t netcom_set_mode(uint8_t mode)
+{
+    if (!app_control_generation_begin(0)) { return ESP_ERR_INVALID_STATE; }
+    const esp_err_t err = netcom_set_mode_locked(mode);
+    app_control_end();
     return err;
 }
 

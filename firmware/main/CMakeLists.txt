@@ -47,6 +47,9 @@ idf_component_register(
         "factory_reset.c"
         "device_maintenance.c"
         "maintenance_http.c"
+        "release_manifest.c"
+        "release_download.c"
+        "release_update.c"
         "control_lease.c"
         "app_control.c"
         "net_http.c"
@@ -73,6 +76,7 @@ idf_component_register(
         "device_name.js"
         "rx_guard.js"
         "maintenance.js"
+        "release_update_public.pem"
         "rf_denoise.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
@@ -97,6 +101,7 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_event
+        esp_http_client
         esp_http_server
         esp_https_server   # https://<ip>/ so browsers expose the microphone
         app_update      # esp_ota_ops: the panel's firmware upload (/api/ota)
@@ -146,7 +151,7 @@ set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=adc_hal_digi_controller_config")
 
-set_source_files_properties(device_maintenance.c maintenance_http.c factory_reset.c peer_labels.c
+set_source_files_properties(device_maintenance.c maintenance_http.c factory_reset.c peer_labels.c release_update.c
     PROPERTIES COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
 
 # HTTP tasks have 10 KB stacks. Reserve at least 4 KB beyond each local frame

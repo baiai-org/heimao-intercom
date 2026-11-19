@@ -64,7 +64,7 @@
       ' · 上次释放缓冲 '+(data.released_buffer_bytes || 0)+'字节 / 解码器 '+(data.released_decoders || 0)+'个'+
       ' · 上次检查：'+(data.last_cleanup_uptime_s ? '启动后'+data.last_cleanup_uptime_s+'秒':'尚未执行')+
       ' · 内部可用 '+data.internal_free+'字节 / 最大连续 '+data.internal_largest+'字节 · PSRAM可用 '+data.psram_free+'字节'+
-      ' · 最近启动：'+({manual:'手动重启',scheduled:'定时重启',factory:'恢复出厂',other:'上电或其他原因'}[data.last_reboot] || '未知');
+      ' · 最近启动：'+({manual:'手动重启',scheduled:'定时重启',factory:'恢复出厂',update:'在线更新',other:'上电或其他原因'}[data.last_reboot] || '未知');
     if (!data.ready) note('维护配置读取失败，已停止自动维护，请检查诊断。', true);
     setControls();
   }
@@ -163,6 +163,48 @@
     };
     setControls();refresh();setInterval(refresh,10000);
   }
+  function mountOnlineUpdate() {
+    const card=el('onlineUpdate');
+    if (!card) return;
+    const status=el('onlineUpdateStatus'), notes=el('onlineUpdateNotes');
+    const check=el('onlineUpdateCheck'), install=el('onlineUpdateInstall'), later=el('onlineUpdateLater');
+    const text={
+      waiting:'等待手台联网与校时',checking:'正在检查 GitHub',no_manifest:'当前正式发布未提供更新清单',
+      current:'手台已是最新可用版本',downloading:'正在下载新版',waiting_idle:'等待手台空闲后写入备用槽',
+      staging:'正在写入备用槽',ready:'新版已下载，可立即安装或稍后处理',force_wait:'新版已下载，手台空闲后自动安装',
+      rollback_required:'新版已下载，当前引导程序需要手动安装',install_wait:'已安排安装，等待手台空闲',
+      rebooting:'正在重启并安装',rolled_back:'新版启动失败，手台已回退',error:'检查或下载未完成，可重试'
+    };
+    let active=false, state, laterHash;
+    function render(data) {
+      state=data;
+      card.hidden=false;
+      status.textContent=(data.version ? data.version+' · ' : '')+
+        (data.state==='ready' && laterHash===data.sha256 ? '已保留下载，可稍后安装' : text[data.state] || text.waiting);
+      notes.textContent=data.notes || '';
+      install.hidden=later.hidden=data.install!==true;
+      check.disabled=data.state==='rebooting';
+    }
+    async function update(op) {
+      if (active || (op && !state)) return;
+      active=true;check.disabled=install.disabled=true;
+      try {
+        render(await request('/api/online_update',op ?
+          {op,boot_id:state.boot_id,sha256:state.sha256} : undefined));
+      } catch(e) {
+        if(op) status.textContent='操作未完成，请重试。';
+      } finally {
+        active=false;check.disabled=state?.state==='rebooting';install.disabled=false;
+      }
+    }
+    check.onclick=()=>update('check');
+    install.onclick=()=>{
+      if(window.confirm('安装手台新版并重启？手台将保留原有设置并等待通联结束。'))update('install');
+    };
+    later.onclick=()=>{if(state){laterHash=state.sha256;render(state);}};
+    update();
+    setInterval(()=>{if(document.visibilityState!=='hidden')update();},5000);
+  }
   function validateName(name) {
     if ([...name].length>24 || new TextEncoder().encode(name).length>96 || /[\u0000-\u001f\u007f-\u009f]/u.test(name)) throw Error('名称最多24个字符/96字节，不能包含控制字符');
   }
@@ -186,5 +228,5 @@
       dialog.showModal();el('peerLabelInput').focus();
     }
   };
-  window.ORLControl.identity.then(d=>{identity=d;if(d.capabilities?.maintenance===2)mount();}).catch(()=>{});
+  window.ORLControl.identity.then(d=>{identity=d;if(d.capabilities?.maintenance===2){mount();mountOnlineUpdate();}}).catch(()=>{});
 })();

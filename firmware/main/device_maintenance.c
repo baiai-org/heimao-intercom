@@ -24,7 +24,7 @@
 
 static StaticSemaphore_t s_lock_storage;
 static SemaphoreHandle_t s_lock;
-enum { REBOOT_NONE, REBOOT_MANUAL, REBOOT_SCHEDULED, REBOOT_FACTORY };
+enum { REBOOT_NONE, REBOOT_MANUAL, REBOOT_SCHEDULED, REBOOT_FACTORY, REBOOT_UPDATE };
 
 static maintenance_config_t s_cfg = {.version=2, .restart_minute=240, .cleanup_enabled=1};
 static int64_t s_last_slot, s_due_slot, s_previous_utc, s_previous_ms, s_retry_at;
@@ -32,6 +32,7 @@ static bool s_restart_save_failed;
 static maintenance_policy_t s_policy;
 static esp_err_t s_storage = ESP_ERR_INVALID_STATE;
 static unsigned s_writers, s_reboot_kind, s_previous_kind;
+static bool s_update_writer;
 static int64_t s_reboot_at, s_clean_at, s_defer_at, s_label_flush_at;
 static uint32_t s_runs, s_delays, s_clean_bytes, s_decoders;
 static const char *s_result = "not_run";
@@ -75,7 +76,7 @@ esp_err_t device_maintenance_init(void)
     if (s_lock) { return s_storage; }
     s_lock = xSemaphoreCreateMutexStatic(&s_lock_storage);
     if (!s_lock) { return s_storage = ESP_ERR_NO_MEM; }
-    if (esp_reset_reason() == ESP_RST_SW && s_rtc_magic == 0x484d5231u && s_rtc_kind <= REBOOT_FACTORY) {
+    if (esp_reset_reason() == ESP_RST_SW && s_rtc_magic == 0x484d5231u && s_rtc_kind <= REBOOT_UPDATE) {
         s_previous_kind = s_rtc_kind;
     }
     s_rtc_magic = s_rtc_kind = 0;
@@ -110,7 +111,7 @@ bool device_maintenance_write_begin(void)
 {
     if (!s_lock) { return true; } /* boot-time callers before maintenance init */
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool ok = !s_reboot_kind;
+    bool ok = !s_reboot_kind && !s_update_writer;
     if (ok) { ++s_writers; }
     xSemaphoreGive(s_lock); return ok;
 }
@@ -129,13 +130,55 @@ static const char *busy_reason(void)
     if (voice_bridge_level() || voice_sdr_tail_active() || tail_preview_active() || speaker_diag_output_active()) { return "audio_pending"; }
     return "idle";
 }
+bool device_maintenance_update_idle(void)
+{
+    if (!s_lock || board_boot_button_pressed() || strcmp(busy_reason(), "idle")) { return false; }
+    if (esp_timer_get_time() - ptt_last_activity_us() < 2000000) { return false; }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool ready = s_storage == ESP_OK && !s_reboot_kind && !s_due_slot;
+    xSemaphoreGive(s_lock);
+    return ready;
+}
+
+bool device_maintenance_update_begin(void)
+{
+    if (!s_lock) { return false; }
+    ptt_control_lock();
+    bool ok = device_maintenance_update_idle();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    ok = ok && !s_reboot_kind && !s_due_slot && !s_writers && !tail_store_busy();
+    if (ok) {
+        s_update_writer = true;
+        ++s_writers;
+        ptt_maintenance_block(true);
+    }
+    xSemaphoreGive(s_lock);
+    ptt_control_unlock();
+    return ok;
+}
+
+void device_maintenance_update_end(bool reboot)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_update_writer) {
+        s_update_writer = false;
+        --s_writers;
+        if (reboot) {
+            s_reboot_kind = REBOOT_UPDATE;
+            s_reboot_at = now_ms() + 1500;
+        }
+    }
+    xSemaphoreGive(s_lock);
+}
+
 esp_err_t device_maintenance_set(const maintenance_config_t *cfg, uint32_t expected)
 {
     if (!s_lock || !maintenance_config_valid(cfg)) { return ESP_ERR_INVALID_ARG; }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = s_storage;
     if (err == ESP_OK && (expected != s_cfg.revision || expected == UINT32_MAX ||
-                          s_reboot_kind == REBOOT_MANUAL || s_reboot_kind == REBOOT_FACTORY)) {
+                          s_reboot_kind == REBOOT_MANUAL || s_reboot_kind == REBOOT_FACTORY ||
+                          s_reboot_kind == REBOOT_UPDATE || s_update_writer)) {
         err = ESP_ERR_INVALID_STATE;
     }
     if (err == ESP_OK) {
@@ -170,7 +213,7 @@ esp_err_t device_maintenance_reboot(void)
     if (!s_lock) { return ESP_ERR_INVALID_STATE; }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = ESP_OK;
-    if (s_writers || tail_store_busy() || s_reboot_kind == REBOOT_FACTORY) {
+    if (s_writers || tail_store_busy() || s_reboot_kind == REBOOT_FACTORY || s_reboot_kind == REBOOT_UPDATE) {
         err = ESP_ERR_INVALID_STATE;
     } else if (s_reboot_kind != REBOOT_MANUAL) {
         s_reboot_kind = REBOOT_MANUAL;
@@ -324,7 +367,7 @@ void device_maintenance_json(char *out, size_t capacity)
     const int64_t idle = s_policy.idle_since_ms >= 0 && now >= since && !strcmp(busy, "idle") ?
         (now - since) / 1000 : 0;
     const char *reason = s_previous_kind == REBOOT_FACTORY ? "factory" :
-        s_previous_kind == REBOOT_MANUAL ? "manual" : s_previous_kind == REBOOT_SCHEDULED ? "scheduled" : "other";
+        s_previous_kind == REBOOT_MANUAL ? "manual" : s_previous_kind == REBOOT_SCHEDULED ? "scheduled" : s_previous_kind == REBOOT_UPDATE ? "update" : "other";
     snprintf(out, capacity,
         "{\"version\":2,\"ready\":%s,\"revision\":%lu,\"cleanup_enabled\":%s,\"restart_enabled\":%s,"
         "\"restart_days\":%u,\"restart_minute\":%u,\"timezone\":\"Asia/Shanghai\","

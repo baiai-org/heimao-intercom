@@ -99,6 +99,7 @@ import kotlinx.coroutines.launch
                 }
                 Text("使用实色表面保持文字清楚，字号跟随 Android 系统设置。",color=secondary)
             }
+            else if(detail=="关于与更新")AppUpdatePage(state)
             else if(detail=="APP 发话音量")MicrophonePage(manager,state)
             else if(detail=="连接与权限")SettingsPage(profile,state,manager,appSettings,wirelessSettings,backgroundAllowed,requestBackground)
             else if(detail!=null && profile==null)EmptySession(state){detail=null;tab=2}

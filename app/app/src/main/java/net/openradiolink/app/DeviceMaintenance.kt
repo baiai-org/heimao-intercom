@@ -164,6 +164,7 @@ private fun beijingTime(utc:Long):String {
                 "manual"->"手动重启"
                 "scheduled"->"定时重启"
                 "factory"->"恢复出厂"
+                "update"->"在线更新"
                 else->"上电或其他原因"
             }
             Text("最近启动 $bootReason",color=secondary,style=MaterialTheme.typography.bodySmall)

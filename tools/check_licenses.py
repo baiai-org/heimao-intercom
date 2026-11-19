@@ -8,6 +8,8 @@ Fails when:
 Run locally:  python tools/check_licenses.py
 """
 from pathlib import Path
+import base64
+import binascii
 import re
 import subprocess
 import sys
@@ -26,6 +28,20 @@ def tracked_files():
     return [Path(line) for line in out.stdout.splitlines() if line.strip()]
 
 
+def release_verification_key(path):
+    """Permit only one P-256 SubjectPublicKeyInfo file, with no trailing PEM."""
+    try:
+        match = re.fullmatch(rb"-----BEGIN PUBLIC KEY-----\s+([A-Za-z0-9+/=\r\n]+)"
+                             rb"-----END PUBLIC KEY-----\s*", path.read_bytes())
+        if not match:
+            return False
+        key = base64.b64decode(b"".join(match.group(1).split()), validate=True)
+    except (OSError, binascii.Error):
+        return False
+    prefix = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
+    return len(key) == len(prefix) + 64 and key.startswith(prefix)
+
+
 def main():
     problems = []
     for name in REQUIRED:
@@ -36,7 +52,8 @@ def main():
     for rel in files:
         path = ROOT / rel
         if path.suffix.lower() in FORBIDDEN_SUFFIXES and not str(rel).startswith("flasher/licenses/"):
-            problems.append(f"binary/secret tracked: {rel}")
+            if rel.as_posix() != "firmware/main/release_update_public.pem" or not release_verification_key(path):
+                problems.append(f"binary/secret tracked: {rel}")
         if path.suffix.lower() not in {".c", ".h", ".py", ".kt", ".js", ".ps1", ".sh"}:
             continue
         if str(rel).split("/")[0] == "flasher":

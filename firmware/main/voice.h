@@ -69,6 +69,7 @@ esp_err_t voice_monitor_instant(void);
  * again when the last borrower is done -- unless the operator took over in
  * the meantime.  `who` is "preview" or "bridge"; two borrowers can coexist.
  */
+bool voice_monitor_operator_active(void);
 void voice_monitor_borrow(const char *who);
 void voice_monitor_release(const char *who);
 

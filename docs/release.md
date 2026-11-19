@@ -47,11 +47,11 @@ git push origin main --tags
    - 构建固件并生成 `heimao-full-<版本>.bin` 与 `heimao-app-OTA-<版本>.bin`；
    - 构建 APK；
    - 在 Windows 上构建不含内置固件的刷机工具；
-   - 生成 `SHA256SUMS.txt` 并创建 Release。
+   - 生成 `SHA256SUMS.txt` 并创建 GitHub Release 草稿，待签名清单和安装包齐备后发布。
 
 > **v1.0.0 首次发布**建议手工上传已验证的交付二进制（`3ede0b50…` full.bin、`f34ed6cc…` OTA、`6e498669…` APK），它们与源码提交 `c9d20b4` / `63ab6d3` 对应；Actions 重建的产物哈希不同（编译器、时间戳、证书与签名环境差异），不要混用。后续版本再以 Actions 产物为准。
 
-5. 发布前人工核对 Release：
+5. 按[在线更新发布说明](online-update.md)生成并上传签名清单 `update.json`，再人工核对 Release。
    - 四个二进制（APK、full、OTA、EXE）与 `SHA256SUMS.txt` 都在；
    - APK 的 versionCode 与 CHANGELOG 一致；
    - 刷机工具 `--diagnose` 报告 `embedded_firmware=false`、`bundled_firmware_files=[]`、`serial_opened=false`；
@@ -61,7 +61,7 @@ git push origin main --tags
 
 ## 安全与合规检查
 
-- `git ls-files | grep -Ei 'pem|key|jks|keystore'` 必须为空；
+- 发布清单的验证公钥可以提交。签名私钥、证书私钥和 keystore 存在仓库之外。
 - 不要提交 `firmware/main/servercert.pem` / `serverkey.pem`（`.gitignore` 已覆盖，由构建生成）；
 - 不要把内部交接文档、设备 IP、`device_id`、诊断快照带进仓库；
 - `flasher/` 之外的代码不得出现 GPL 头（CI `licence-check` 会拦）；

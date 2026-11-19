@@ -32,6 +32,7 @@
 #include "bridge.h"
 #include "frontpanel.h"
 #include "device_maintenance.h"
+#include "release_update.h"
 #include "factory_reset.h"
 #include "channels.h"
 #include "channels.h"
@@ -1987,6 +1988,7 @@ static void ptt_task(void *arg)
 
 void app_main(void)
 {
+    const bool unconfirmed_ota = release_update_watch_boot();
     /* 1. never let the radio key up or the amplifier come on by accident */
     if (board_safe_state_init() != ESP_OK) {
         ESP_LOGE(TAG, "FATAL: could not set the safe state -- halting");
@@ -1997,7 +1999,8 @@ void app_main(void)
 
     /* 2. PTT state machine next: from here on the radio can only be keyed
      *    through ptt_request_tx(), which enforces a deadline. */
-    if (ptt_init() != ESP_OK) {
+    const bool ptt_ok = ptt_init() == ESP_OK;
+    if (!ptt_ok) {
         ESP_LOGW(TAG, "ptt_init failed");
     }
 
@@ -2023,15 +2026,17 @@ void app_main(void)
         ESP_LOGW(TAG, "I2C init failed -- codec work will be unavailable");
     }
 
+    bool nvs_ok;
     /* NVS holds the radio profile; a fresh chip has no partition formatted yet. */
     {
         esp_err_t nvs = nvs_flash_init();
-        if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        if (!unconfirmed_ota && (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
             ESP_LOGW(TAG, "NVS needs a fresh partition (%s); erasing", esp_err_to_name(nvs));
             nvs_flash_erase();
             nvs = nvs_flash_init();
         }
-        if (nvs != ESP_OK) {
+        nvs_ok = nvs == ESP_OK;
+        if (!nvs_ok) {
             ESP_LOGW(TAG, "nvs_flash_init: %s (radio profile will not persist)",
                      esp_err_to_name(nvs));
         }
@@ -2103,8 +2108,9 @@ void app_main(void)
      * and the panel simply has no address.
      */
     channels_init(); /* Recover/check channel temporary files before HTTP writers exist. */
-    (void)device_maintenance_init();
-    if (net_wifi_start() == ESP_OK && net_http_start() == ESP_OK) {
+    const bool maintenance_ok = device_maintenance_init() == ESP_OK;
+    const bool recovery_ok = net_wifi_start() == ESP_OK && net_http_start() == ESP_OK;
+    if (recovery_ok) {
         if (net_wifi_connected()) {
             printf("\n  web panel: http://%s/   (WiFi \"%s\")\n\n",
                    net_wifi_ip(), net_wifi_ssid());
@@ -2141,9 +2147,12 @@ void app_main(void)
      * because it starts a task that can key the transmitter through
      * voice_start(), and nothing may do that before the PTT state machine,
      * the radio profile and the engines are all up. */
-    if (frontpanel_init() != ESP_OK) {
+    const bool frontpanel_ok = frontpanel_init() == ESP_OK;
+    if (!frontpanel_ok) {
         ESP_LOGW(TAG, "front panel init failed (LEDs/keys unavailable)");
     }
+
+    release_update_start(ptt_ok && nvs_ok && maintenance_ok && recovery_ok && frontpanel_ok);
 
     /* Maintenance only after the full station has remained idle. */
     for (;;) {

@@ -61,6 +61,7 @@
 #include "device_name.h"
 #include "device_maintenance.h"
 #include "maintenance_http.h"
+#include "release_update.h"
 #include "app_control.h"
 #include "cJSON.h"
 #include "panel_address.h"
@@ -3119,6 +3120,8 @@ static const httpd_uri_t s_routes[] = {
     { .uri = "/maintenance.js", .method = HTTP_GET, .handler = h_maintenance_script },
     { .uri = "/api/maintenance", .method = HTTP_GET, .handler = maintenance_http },
     { .uri = "/api/maintenance", .method = HTTP_POST, .handler = maintenance_http },
+    { .uri = "/api/online_update", .method = HTTP_GET, .handler = release_update_http },
+    { .uri = "/api/online_update", .method = HTTP_POST, .handler = release_update_http },
     { .uri = "/api/np2p/peer", .method = HTTP_POST, .handler = peer_labels_http },
     { .uri = "/brand-icon.png", .method = HTTP_GET, .handler = h_brand_icon },
     { .uri = "/favicon.png", .method = HTTP_GET, .handler = h_favicon },
@@ -3178,7 +3181,7 @@ static const char s_https_panel_context;
 static bool route_needs_control(const httpd_uri_t *route, httpd_req_t *req)
 {
     if (route->handler == h_rf_denoise) { return req->method == HTTP_POST; }
-    if (route->handler == maintenance_http) { return req->method == HTTP_POST; }
+    if (route->handler == maintenance_http || route->handler == release_update_http) { return req->method == HTTP_POST; }
     if (route->handler == peer_labels_http) { return true; }
     if (route->handler == h_wifi) { return route->method == HTTP_POST; }
     if (route->handler == h_scan) { return query_int(req, "force", 0, NULL) != 0; }

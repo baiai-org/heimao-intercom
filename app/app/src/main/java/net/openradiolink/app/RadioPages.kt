@@ -66,6 +66,8 @@ import java.util.Date
             SettingRow("外观","深色 / 浅色"){open("外观")}
             HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant)
             SettingRow("连接与权限","后台与手机设置"){open("连接与权限")}
+            HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant)
+            SettingRow("关于与更新",BuildConfig.VERSION_NAME){open("关于与更新")}
         }
     }
 }

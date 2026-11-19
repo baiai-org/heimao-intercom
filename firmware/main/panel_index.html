@@ -2214,6 +2214,16 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
       <div id="otaHint" style="font-size:11px;color:var(--dim);margin-top:6px;line-height:1.5">
         选择黑猫智能手台的应用 OTA 固件（.bin）：上传后自动校验并重启，升级期间不要断电。
       </div>
+      <div id="onlineUpdate" class="subcard" style="margin-top:12px" hidden>
+        <div class="subcard-head">手台在线更新</div>
+        <p id="onlineUpdateStatus" role="status"></p>
+        <p id="onlineUpdateNotes" class="hint" style="white-space:pre-wrap"></p>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <button id="onlineUpdateCheck" type="button">检查手台更新</button>
+          <button id="onlineUpdateInstall" class="pri" type="button" hidden>立即安装</button>
+          <button id="onlineUpdateLater" type="button" hidden>稍后</button>
+        </div>
+      </div>
     </div>
 
 

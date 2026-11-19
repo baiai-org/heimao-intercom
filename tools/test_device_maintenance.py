@@ -162,6 +162,11 @@ static void app_control_end(void){}
 static int ptt_get_state(void){return station_busy?1:0;}
 static bool board_ptt_is_asserted(void){return station_busy;}
 static int ptt_owner(void){return 0;}
+static int ptt_lock_depth;
+static bool update_blocked;
+static void ptt_control_lock(void){++ptt_lock_depth;}
+static void ptt_control_unlock(void){assert(ptt_lock_depth>0);--ptt_lock_depth;}
+static void ptt_maintenance_block(bool enable){assert(ptt_lock_depth>0);update_blocked=enable;}
 static bool ptt_local_audio_active(void){return false;}
 static int voice_mode(void){return 0;}
 static bool voice_rf_carrier_present(void){return false;}
@@ -237,6 +242,21 @@ int main(void) {
     assert(device_maintenance_write_begin());
     assert(device_maintenance_factory_reset()==ESP_ERR_INVALID_STATE);
     device_maintenance_write_end();
+    station_busy=true;
+    assert(!device_maintenance_update_begin() && !update_blocked);
+    station_busy=false;
+    boot_held=true;
+    assert(!device_maintenance_update_begin());
+    boot_held=false;
+    assert(device_maintenance_update_begin() && update_blocked);
+    assert(!device_maintenance_write_begin());
+    assert(device_maintenance_factory_reset()==ESP_ERR_INVALID_STATE);
+    assert(device_maintenance_reboot()==ESP_ERR_INVALID_STATE);
+    device_maintenance_tick();
+    assert(boots==1);
+    device_maintenance_update_end(false);
+    assert(device_maintenance_write_begin() && !device_maintenance_update_begin());
+    device_maintenance_write_end();
     preparing_fails=true;assert(device_maintenance_factory_reset()==77 && !device_maintenance_reboot_pending());
     preparing_fails=false;
     assert(device_maintenance_factory_reset()==0 && device_maintenance_factory_reset()==0 && prepared==2);
@@ -246,7 +266,15 @@ int main(void) {
     boot_held=true;clock_ms++;device_maintenance_tick();assert(boots==1);
     boot_held=false;clock_ms++;device_maintenance_tick();
     assert(boots==2 && latches==2 && rf_off==2 && s_rtc_kind==REBOOT_FACTORY);
-    puts("PASS service: legacy migration, cleanup, deduplicated weekly restart during a call, OTA/writer postponement, commit failure, cancellation, safe factory admission");
+    s_lock=0;s_reboot_kind=0;s_previous_utc=0;update_blocked=false;
+    assert(device_maintenance_init()==0);
+    assert(device_maintenance_update_begin() && update_blocked);
+    device_maintenance_update_end(true);
+    assert(device_maintenance_reboot_pending() && !device_maintenance_write_begin());
+    assert(device_maintenance_factory_reset()==ESP_ERR_INVALID_STATE);
+    clock_ms+=1499;device_maintenance_tick();assert(boots==2);
+    clock_ms++;device_maintenance_tick();assert(boots==3 && s_rtc_kind==REBOOT_UPDATE);
+    puts("PASS service: migration, cleanup, weekly restart, exclusive online flash, safe factory and OTA reboot");
     return 0;
 }
 '''

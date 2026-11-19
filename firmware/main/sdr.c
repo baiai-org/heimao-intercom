@@ -705,6 +705,7 @@ void sdr_ws_detach(httpd_handle_t server, int fd, uint32_t sid)
 /* ------------------------------------------------------------------ enable */
 esp_err_t sdr_set_enabled(bool on)
 {
+    if (on && ptt_maintenance_blocked()) { return ESP_ERR_INVALID_STATE; }
     if (!s_inited) { sdr_init(); }
     if (!s_rx_ring || !s_tx_ring) { return ESP_ERR_NO_MEM; }
     xSemaphoreTakeRecursive(s_control, portMAX_DELAY);

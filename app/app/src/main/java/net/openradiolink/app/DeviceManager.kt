@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 class OrlApp:Application() {
     val manager by lazy { DeviceManager(this) }
+    internal val updater by lazy { AppReleaseUpdater(this) }
     override fun onCreate() { super.onCreate();manager.scope.launch { manager.store.load() } }
 }
 
@@ -169,9 +170,20 @@ class DeviceManager(private val context: Context) {
         if(busy())return null
         return session.perform(block)
     }
-    fun pttDown(id: String) { slot.current?.takeIf{it.profile.id==id && !view.value.maintenance}?.beginPress() }
+    private var appInstallReserved=false
+    internal fun updateBusy():Boolean {
+        fun SessionView.active()=maintenance || ptt || pttPending || listening
+        return view.value.active() || slot.current?.view?.value?.active()==true
+    }
+    internal fun reserveAppInstall():Boolean {
+        if(appInstallReserved || updateBusy())return false
+        appInstallReserved=true
+        return true
+    }
+    internal fun releaseAppInstall() { appInstallReserved=false }
+    fun pttDown(id: String) { if(appInstallReserved)return;slot.current?.takeIf{it.profile.id==id && !view.value.maintenance}?.beginPress() }
     fun pttUp(id: String) { slot.current?.takeIf{it.profile.id==id}?.cancelPress() }
-    fun toggleListening(id: String)=action(id) { if(view.value.listening)stopListening() else startListening() }
+    fun toggleListening(id: String)=action(id) { if(view.value.listening)stopListening() else if(!appInstallReserved)startListening() }
     fun saveDraft(id: String,key: String,value: String) { scope.launch { runCatching { store.draft(id,key,value) }.onFailure { message(it.message ?: "草稿保存失败") } } }
     fun discover(enabled: Boolean) {
         discoveryForList=enabled

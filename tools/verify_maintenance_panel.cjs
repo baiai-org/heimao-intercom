@@ -15,6 +15,7 @@ const maint={...identity,ok:true,version:2,ready:true,revision:0,boot_id:'boot-a
 (async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});const results=[];
 try{for(const mobile of [false,true]){
  const page=await browser.newPage({viewport:mobile?{width:390,height:844}:{width:1280,height:1000}}),state=structuredClone(status),m=structuredClone(maint),writes=[],errors=[];
+ const update={...identity,ok:true,boot_id:"boot-a",state:"ready",version:"r11-109",notes:"测试说明",sha256:"a".repeat(64),install:true};
  let failSave=false,failLabel=false,busyCleanup=false,failFactory=false,confirmAccept=true,rebootReads=0;
  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>confirmAccept?d.accept():d.dismiss());
  await page.route('**/*',async route=>{
@@ -30,6 +31,16 @@ try{for(const mobile of [false,true]){
   else if(['/api/ctcss','/api/dcs','/api/channels'].includes(p))j=[];
   else if(p==='/api/rf_denoise')j={ok:false,err:'此测试仅模拟设备维护'};
   else if(p==='/api/np2p/denied')j={ready:true,count:0,limit:64,entries:[]};
+  else if(p==='/api/online_update'){
+   if(route.request().method()==='POST'){
+    assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+    const b=route.request().postDataJSON();writes.push({path:p,...b});
+    assert.equal(b.boot_id,update.boot_id);assert.equal(b.sha256,update.sha256);
+    if(b.op==='install')Object.assign(update,{install:false,state:"install_wait"});
+    else assert.equal(b.op,"check");
+   }
+   j=update;
+  }
   else if(p==='/api/maintenance'){
    if(route.request().method()==='POST'){
     assert.equal(route.request().headers()['x-orl-device'],identity.device_id);const b=route.request().postDataJSON();writes.push({path:p,...b});
@@ -62,6 +73,9 @@ try{for(const mobile of [false,true]){
   return route.fulfill({status:code,contentType:'application/json',body:JSON.stringify(j)});
  });
  await page.goto('http://heimao.test/');await page.waitForFunction(()=>window._st&&document.querySelector('#maintenanceSave')&&!document.querySelector('#maintenanceSave').disabled);
+ const online=page.locator('#onlineUpdate');
+ await online.waitFor({state:'attached'});
+ await page.waitForFunction(()=>document.querySelector('#onlineUpdateStatus').textContent.includes('新版已下载'));
  assert.equal(writes.length,0);assert.equal(await page.locator('#maintenanceReboot').count(),1);assert.equal(await page.locator('[data-np-rename]').count(),16);
  // Use the real navigation; the device tab is under More on mobile.
  async function devicePage(){
@@ -97,7 +111,21 @@ try{for(const mobile of [false,true]){
  assert.equal(await page.locator('#peerLabelInput').inputValue(),'山顶 <>&" 互联');assert.equal(writes.at(-1).id,selected);
  failLabel=false;await page.locator('#peerLabelSave').click();await page.waitForFunction(()=>!document.querySelector('#peerLabelDialog'));
  assert.equal(state.np2p.peers.find(x=>x.id===selected).name,'山顶 <>&" 互联');assert.equal(await page.locator('#npPeerList script').count(),0);
- await devicePage();await page.screenshot({path:path.join(out,mobile?'maintenance-mobile.png':'maintenance-desktop.png'),fullPage:true});
+ await devicePage();
+ assert.equal(await online.isVisible(),true);
+ assert.equal(await page.locator('#onlineUpdateNotes').textContent(),'测试说明');
+ await page.locator('#onlineUpdateLater').click();
+ assert.match(await page.locator('#onlineUpdateStatus').textContent(),/稍后安装/);
+ assert.equal(writes.filter(x=>x.path==='/api/online_update').length,0);
+ await page.locator('#onlineUpdateCheck').click();
+ await page.waitForFunction(()=>!document.querySelector('#onlineUpdateCheck').disabled);
+ assert.equal(writes.filter(x=>x.op==='check').length,1);
+ confirmAccept=false;await page.locator('#onlineUpdateInstall').click();
+ assert.equal(writes.filter(x=>x.op==='install').length,0);
+ confirmAccept=true;await page.locator('#onlineUpdateInstall').click();
+ await page.waitForFunction(()=>document.querySelector('#onlineUpdateStatus').textContent.includes('已安排安装'));
+ assert.equal(writes.filter(x=>x.op==='install').length,1);
+ await page.screenshot({path:path.join(out,mobile?'maintenance-mobile.png':'maintenance-desktop.png'),fullPage:true});
  await page.locator('#maintenanceReboot').click();await page.waitForFunction(()=>document.querySelector('#maintenanceMessage').textContent.includes('已重新上线'),{timeout:15000});
  assert.equal(writes.filter(x=>x.op==='reboot').length,1);assert.equal(m.boot_id,'boot-b');
  await devicePage();
@@ -110,7 +138,7 @@ try{for(const mobile of [false,true]){
  assert.equal(writes.filter(x=>x.op==='factory_reset').length,2);
  assert.equal(await page.locator('#facWipe').isDisabled(),true);
  assert.equal(errors.length,0);
- results.push({viewport:mobile?'mobile':'desktop',draftsAcrossLayouts:true,failedSavePreserved:true,stablePeerIdentityAfterReorder:true,cleanupBusyAndSuccess:true,bootConfirmedOnce:true,factoryCancelBusyAndAccepted:true,writes,errors});await page.close();
+ results.push({viewport:mobile?'mobile':'desktop',draftsAcrossLayouts:true,failedSavePreserved:true,stablePeerIdentityAfterReorder:true,cleanupBusyAndSuccess:true,bootConfirmedOnce:true,factoryCancelBusyAndAccepted:true,onlineUpdateConfirmedOnce:true,writes,errors});await page.close();
  }
  fs.writeFileSync(path.join(out,'maintenance-panel-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results,null,2));
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

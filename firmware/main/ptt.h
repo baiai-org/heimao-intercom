@@ -66,6 +66,8 @@ bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on);
 void ptt_release(ptt_owner_t owner, uint32_t token);
 /* Reboot-only latch: release both domains and refuse future TX until boot. */
 void ptt_prepare_reboot(void);
+void ptt_maintenance_block(bool blocked);
+bool ptt_maintenance_blocked(void);
 /* Last short TX/RX/audio edge, including activity between maintenance ticks. */
 int64_t ptt_last_activity_us(void);
 
