@@ -37,7 +37,7 @@ function runtime() {
     escHtml: text => String(text ?? '').replace(/[&<>"']/g, '_'),
     log: (...args) => state.logs.push(args), wifiIcon: () => '', setSegMeter() {},
     renderChannels: () => {state.renders++;}, syncBridge() {}, applyMode() {},
-    renderRadio: r => {context.window._radio = r;}, renderNp2p() {}, tailModesRestore() {},
+    renderRadio: r => {context.window._radio = r;}, renderNp2p() {},
     holdSyncUntil: Infinity, txOn: false, txEnd: 0, monOn: false, SDR: {on: false}, last: '',
     fetch: (url, options) => {state.requests.push({url, options}); return state.fetch(url, options);},
     setTimeout: (fn, ms) => {const id = ++state.id; state.timers.set(id, {fn, ms}); return id;},
@@ -48,6 +48,7 @@ function runtime() {
     part('let tonesReady', 'function showSub()') +
     part('async function loadBridgeChans()', 'const rxGuardViews') +
     part('const CH_MAX = 99;', '/* Filtered client-side:') +
+    part('const tailModeControls', "$('ixTailSel').onchange") +
     part('async function refresh() {', 'setInterval(refreshMeter,') +
     '\nglobalThis.api = {panelReadJson, loadPanelLists, loadChannels, loadBridgeChans, refresh,' +
     'flags: () => ({tonesReady,dcsReady,channelsReady,panelOnline,panelRefreshBusy})};', context);

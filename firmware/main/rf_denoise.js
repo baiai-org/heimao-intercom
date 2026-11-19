@@ -63,7 +63,6 @@
     text(get('connection'), readError || (saved ? '' : '正在读取降噪设置…'));
     if (!saved) return;
     const {mode, levels} = saved;
-    text(get('mode'), modes[mode]);
     text(get('networkPresetLabel'), modes[mode]);
     get('networkPresetRow').hidden = mode === 0;
     renderPreset(get('localPreset'), mode, levels, true);

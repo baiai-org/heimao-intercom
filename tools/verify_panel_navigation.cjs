@@ -215,7 +215,7 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   const save=card.locator('[data-dn=save]'), undo=card.locator('[data-dn=undo]');
   const selectMode=async mode=>{
    status.intercom.mode=mode;
-   await page.waitForFunction(m=>document.querySelector('#rfDenoiseCard [data-dn=mode]').textContent===m,
+    await page.waitForFunction(m=>document.querySelector('#rfDenoiseCard [data-dn=networkPresetLabel]').textContent===m,
     ['本地模拟','公网直连','MQTT 网络中继'][mode]);
   };
   const saved=()=>page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('已保存'));
