@@ -13,6 +13,7 @@
 | 配网 DNS | `firmware/components/dns_server` | ESP-IDF 示例 | Unlicense OR CC0-1.0 | 本地集成 |
 | minimp3 | `firmware/main/minimp3.h` | lieff/minimp3 | CC0-1.0 | 未修改 |
 | Opus | `esphome/micro-opus`（Component Manager） | espressif/esphome | BSD-3-Clause | 未修改 |
+| SpeexDSP 1.2.1 | `firmware/components/speexdsp` | Xiph.Org | BSD-3-Clause | 定点预处理器及 KISS FFT 子集，裁去残余回声入口，见组件内 README 与 COPYING |
 | G.711 / G.722 | `firmware/main/g711.c`、`g722.c` | ITU 建议 / 公共领域实现 | 见文件头 | 未修改 |
 
 ## Android APP

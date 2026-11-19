@@ -15,6 +15,8 @@ const denied=[];let failPolicySave=false;
 status.np2p={access_version:1,access_ready:true,denied_count:0,denied_limit:64,pub:'192.0.2.10',port:7821,nat:'not-port-preserving',stun_age_s:14,rtt_ms:51,hub:false,peer_limit:16,peer_count:16,
  peers:Array.from({length:16},(_,i)=>({name:'p'+i,ip:i<8?'192.0.2.'+(i+20):'2001:db8::'+i,port:54321+i,state:'linked',rtt_ms:30,rx:100,tx:100,drop:0}))};
 let rejectChannel=false,refuseStop=false,stops=0;
+let failDenoiseSave=false, denoiseWrites=0;
+const denoise={ok:true,p2p:false,mqtt:false,active_mode:0,state:0,frames:0,max_us:0,overruns:0};
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
 (async()=>{
@@ -28,12 +30,23 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    if(url.hostname!=='heimao.test')return route.abort();
    const p=url.pathname;let json;
    if(p==='/')return route.fulfill({contentType:'text/html; charset=utf-8',body:fs.readFileSync(path.join(main,'panel_index.html'))});
-   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js'};
+   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js','/rf-denoise.js':'rf_denoise.js'};
    if(scripts[p])return route.fulfill({contentType:'application/javascript',body:fs.readFileSync(path.join(main,scripts[p]))});
    if(p==='/api/device')json=identity;
    else if(p==='/api/talk'){assert.equal(url.searchParams.get('on'),'0');stops++;if(!refuseStop)status.ptt="IDLE";json={ok:!refuseStop};}
    else if(p==='/api/sdr_ptt'){assert.equal(url.searchParams.get('on'),'0');json={ok:true,sid:Number(url.searchParams.get('sid')),tx:Number(url.searchParams.get('tx')),id:Number(url.searchParams.get('id')),ptt:refuseStop};}
    else if(p==='/api/status')json=status;
+   else if(p==='/api/rf_denoise'){
+    if(route.request().method()==='POST'){
+     assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+     const {mode,enabled,expected}=route.request().postDataJSON();
+     const key=mode===1?'p2p':'mqtt';
+     assert.equal(expected,denoise[key]);denoiseWrites++;
+     if(failDenoiseSave)return route.fulfill({status:503,json:{ok:false}});
+     denoise[key]=enabled;denoise.state=denoise.p2p||denoise.mqtt?1:0;
+    }
+    json={...denoise,device_id:identity.device_id};
+   }
    else if(p==='/api/np2p/denied')json={ready:true,count:denied.length,limit:64,entries:denied};
    else if(p==='/api/radio')json=radio;
    else if(p==='/api/live')json={ptt:'IDLE',rf_key:0,rf_tx:0,ic_mode:status.intercom.mode,rssi:80,peak:200,mod_sq:1};
@@ -112,6 +125,24 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    assert.equal(await page.locator('#brT1').isVisible(),mode===1);assert.equal(await page.locator('#brT2').isVisible(),mode===2);}
   await page.locator('[data-page=audio]').click();await page.getByRole('button',{name:'尾音',exact:true}).click();assert(await page.locator('#ixTailFile').count());
   await page.getByRole('button',{name:'均衡器',exact:true}).click();assert(await page.locator('#eqReset').isVisible());
+  await page.getByRole('button',{name:'降噪',exact:true}).click();
+  const denoiseP2P=page.locator('#rfDenoiseP2P'),denoiseMQTT=page.locator('#rfDenoiseMqtt');
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseP2P').getAttribute('aria-pressed')==='false');
+  assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
+  await denoiseP2P.click();
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseP2P').getAttribute('aria-pressed')==='true');
+  assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
+  failDenoiseSave=true;await denoiseMQTT.click();
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('未确认保存'));
+  assert(await denoiseMQTT.isDisabled());assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
+  failDenoiseSave=false;await page.locator('#rfDenoiseRead').click();await denoiseMQTT.click();
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseMqtt').getAttribute('aria-pressed')==='true');
+  assert.equal(denoiseWrites,3);
+  await page.locator('#rfDenoiseCard').screenshot({path:path.join(output,'denoise-desktop.png')});
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.locator('#rfDenoiseCard').screenshot({path:path.join(output,'denoise-mobile.png')});
+  await page.setViewportSize({width:1440,height:900});
   await page.locator('[data-page=device]').click();assert(await page.locator('#fpk0').isVisible());assert(await page.locator('#handsetNameInput').isVisible());
   await page.locator('[data-page=talk]').click();
   await page.mouse.move(0,0);assert.equal(await page.locator('[data-page=talk]').getAttribute('aria-current'),'page');
@@ -140,6 +171,7 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   assert.equal(await page.locator('body').getAttribute('data-panel-layout'),'simple');
   refuseStop=false;await toggle.click();await page.waitForFunction(()=>document.body.dataset.panelLayout==='detail');
   assert(await page.locator('#ftx').isVisible());assert(await page.locator('#eqReset').isVisible());assert(await page.locator('#brT1').isVisible());
+  assert(await page.locator('#rfDenoiseCard').isVisible());
   assert.equal(await page.locator('.panel-nav').count(),0);
   assert.equal(await page.locator('#npPeerList .np2p-peerrow').count(),16);
   assert.equal(await page.locator('#ftx').inputValue(),'433.5050');

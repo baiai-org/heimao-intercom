@@ -516,12 +516,14 @@ esp_err_t netcom_set_room(uint16_t room)
     if (room == s_cfg.room) {
         return ESP_OK;
     }
+    bridge_rx_room_change(true);
     s_cfg.room = room;
     esp_err_t err = netcom_cfg_save(&s_cfg);
     const netcom_engine_t *e = s_engine[s_cfg.mode];
     if (e && e->on_room_change) {
         e->on_room_change(room);
     }
+    bridge_rx_room_change(false);
     ESP_LOGI(TAG, "room -> %u", room);
     return err;
 }

@@ -486,6 +486,61 @@ static void url_decode(char *s)
     *o = '\0';
 }
 
+static esp_err_t h_rf_denoise(httpd_req_t *req)
+{
+    if (req->method == HTTP_POST) {
+        char id[24];
+        if (httpd_req_get_hdr_value_str(req, "X-ORL-Device", id, sizeof(id)) != ESP_OK ||
+            strcmp(id, device_identity_id())) {
+            httpd_resp_set_status(req, "409 Conflict");
+            return send_result(req, false, "设备身份已变化，请重新打开面板");
+        }
+        cJSON *body = app_read_json(req);
+        if (!body) { return ESP_FAIL; }
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(body, "mode");
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(body, "enabled");
+        const cJSON *expected = cJSON_GetObjectItemCaseSensitive(body, "expected");
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        if (cJSON_IsNumber(mode) && (mode->valuedouble == NETCOM_MODE_NETP2P ||
+                mode->valuedouble == NETCOM_MODE_RELAY) &&
+            cJSON_IsBool(enabled) && cJSON_IsBool(expected)) {
+            err = bridge_denoise_set((uint8_t)mode->valuedouble,
+                                     cJSON_IsTrue(enabled), cJSON_IsTrue(expected));
+        }
+        cJSON_Delete(body);
+        if (err != ESP_OK) {
+            if (err == ESP_ERR_INVALID_ARG) {
+                httpd_resp_set_status(req, "400 Bad Request");
+                return send_result(req, false, "降噪设置无效");
+            }
+            httpd_resp_set_status(req, err == ESP_ERR_INVALID_STATE ?
+                "409 Conflict" : "503 Service Unavailable");
+            return send_result(req, false, "未确认保存，请重新读取当前设置");
+        }
+    }
+    rf_denoise_stats_t stats;
+    uint8_t flags, active_mode;
+    bridge_denoise_status(&flags, &active_mode, &stats);
+    char reply[320];
+    snprintf(reply, sizeof(reply),
+        "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
+        "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}",
+        device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
+        flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
+        (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
+        (unsigned long)stats.overruns, (unsigned long)stats.workspace_bytes);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json(req, reply);
+}
+
+static esp_err_t h_rf_denoise_script(httpd_req_t *req)
+{
+    extern const char rf_denoise_script[] asm("_binary_rf_denoise_js_start");
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, rf_denoise_script, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t h_provision(httpd_req_t *req)
 {
     if (req->method != HTTP_POST) {
@@ -3017,6 +3072,9 @@ extern const uint8_t servercert_pem_start[] asm("_binary_servercert_pem_start");
 extern const uint8_t serverkey_pem_start[]  asm("_binary_serverkey_pem_start");
 
 static const httpd_uri_t s_routes[] = {
+    { .uri = "/rf-denoise.js", .method = HTTP_GET, .handler = h_rf_denoise_script },
+    { .uri = "/api/rf_denoise", .method = HTTP_GET, .handler = h_rf_denoise },
+    { .uri = "/api/rf_denoise", .method = HTTP_POST, .handler = h_rf_denoise },
     { .uri = "/maintenance.js", .method = HTTP_GET, .handler = h_maintenance_script },
     { .uri = "/api/maintenance", .method = HTTP_GET, .handler = maintenance_http },
     { .uri = "/api/maintenance", .method = HTTP_POST, .handler = maintenance_http },
@@ -3078,6 +3136,7 @@ static const char s_https_panel_context;
 
 static bool route_needs_control(const httpd_uri_t *route, httpd_req_t *req)
 {
+    if (route->handler == h_rf_denoise) { return req->method == HTTP_POST; }
     if (route->handler == maintenance_http) { return req->method == HTTP_POST; }
     if (route->handler == peer_labels_http) { return true; }
     if (route->handler == h_wifi) { return route->method == HTTP_POST; }

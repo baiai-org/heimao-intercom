@@ -40,6 +40,8 @@ static const char *TAG = "bridge";
 #define NVS_NS   "orl"
 #define KEY_EN   "bren"
 #define KEY_CHAN "brchan"
+#define KEY_DENOISE "rfdenoise1"
+#define DENOISE_MODES ((1u << NETCOM_MODE_NETP2P) | (1u << NETCOM_MODE_RELAY))
 
 static atomic_bool s_en;
 static atomic_int s_chan;      /* 1-based preset index; 0 = none */
@@ -55,6 +57,12 @@ static SemaphoreHandle_t s_state_mux;
  */
 static SemaphoreHandle_t s_rx_tx_mux;
 static bridge_rx_stats_t s_rx;
+static atomic_uchar s_denoise_modes;
+static uint32_t s_rx_generation;
+static uint8_t s_rx_denoise_mode;
+static uint16_t s_rx_room;
+static int s_rx_chan;
+static bool s_rx_room_changing;
 
 static void rx_tx_lock(void)
 {
@@ -93,8 +101,13 @@ static void bridge_rx_end_locked(bool with_tail)
             }
         }
     }
+    if (!s_rx_denoise_mode ||
+        (netcom_mode() == s_rx_denoise_mode && netcom_room() == s_rx_room)) {
         netcom_tx_end();
+    }
     s_rx.open = false;
+    s_rx_denoise_mode = 0;
+    ++s_rx_generation;
     ++s_rx.ends;
     ptt_trace_note(PTT_TRACE_RFNET_OFF, netcom_mode(), s_rx.ends, with_tail ? 1 : 0);
     ESP_LOGI(TAG, "RF->NET PTT end");
@@ -103,7 +116,7 @@ static void bridge_rx_end_locked(bool with_tail)
 void bridge_rx_end(void)
 {
     rx_tx_lock();
-    bridge_rx_end_locked(true);
+    bridge_rx_end_locked(!s_rx_denoise_mode);
     rx_tx_unlock();
 }
 
@@ -111,6 +124,57 @@ void bridge_rx_inhibit(void)
 {
     rx_tx_lock();
     bridge_rx_end_locked(false);
+    rx_tx_unlock();
+}
+
+void bridge_rx_room_change(bool changing)
+{
+    rx_tx_lock();
+    s_rx_room_changing = changing;
+    if (changing && s_rx_denoise_mode) { bridge_rx_end_locked(false); }
+    rx_tx_unlock();
+}
+
+esp_err_t bridge_denoise_set(uint8_t mode, bool enabled, bool expected)
+{
+    if (mode != NETCOM_MODE_NETP2P && mode != NETCOM_MODE_RELAY) { return ESP_ERR_INVALID_ARG; }
+    if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint8_t bit = (uint8_t)(1u << mode);
+    const uint8_t before = atomic_load(&s_denoise_modes);
+    const uint8_t updated = enabled ? before | bit : before & (uint8_t)~bit;
+    esp_err_t err = ESP_OK;
+    if (before != updated) {
+        nvs_handle_t h;
+        err = ((before & bit) != 0) != expected ? ESP_ERR_INVALID_STATE :
+              nvs_open(NVS_NS, NVS_READWRITE, &h);
+        if (err == ESP_OK) {
+            err = nvs_set_u8(h, KEY_DENOISE, updated);
+            if (err == ESP_OK) { err = nvs_commit(h); }
+            nvs_close(h);
+        }
+    }
+    if (err == ESP_OK) {
+        if (enabled) { rf_denoise_prepare(); }
+        atomic_store(&s_denoise_modes, updated);
+    }
+    xSemaphoreGive(s_state_mux);
+    return err;
+}
+
+void bridge_denoise_status(uint8_t *flags, uint8_t *active_mode, rf_denoise_stats_t *stats)
+{
+    rx_tx_lock();
+    *flags = atomic_load(&s_denoise_modes);
+    *active_mode = s_rx_denoise_mode;
+    rf_denoise_stats(stats);
+    if (!*active_mode) {
+        stats->state = !*flags ? RF_DENOISE_OFF : stats->workspace_bytes ?
+            RF_DENOISE_ARMED : RF_DENOISE_MEMORY_BYPASS;
+    } else if (stats->state == RF_DENOISE_OFF) {
+        stats->state = RF_DENOISE_ARMED;
+    }
     rx_tx_unlock();
 }
 
@@ -147,6 +211,7 @@ void bridge_init(void)
     if (!s_rx_tx_mux) {
         ESP_LOGE(TAG, "RF->NET edge mutex allocation failed");
     }
+    uint8_t denoise = 0;
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         uint8_t en = 0, chan = 0;
@@ -156,7 +221,12 @@ void bridge_init(void)
         if (nvs_get_u8(h, KEY_CHAN, &chan) == ESP_OK) {
             s_chan = (int)chan;
         }
+        (void)nvs_get_u8(h, KEY_DENOISE, &denoise);
         nvs_close(h);
+    }
+    if ((denoise & ~DENOISE_MODES) == 0 && denoise) {
+        rf_denoise_prepare();
+        atomic_store(&s_denoise_modes, denoise);
     }
     ESP_LOGI(TAG, "init: en=%d chan=%d", s_en ? 1 : 0, s_chan);
 }
@@ -193,7 +263,7 @@ void bridge_apply(void)
         const bool was_active = s_active;
         /* Block new samples before sending the end marker or stopping capture. */
         s_active = false;
-        bridge_rx_end_locked(true);
+        bridge_rx_end_locked(!s_rx_denoise_mode);
         rx_tx_unlock();
         if (was_active) {
             if (ptt_bridge_keyed()) {
@@ -243,17 +313,57 @@ esp_err_t bridge_channel_selected(int index, bool bind_bridge)
     return ESP_OK;
 }
 
+static bool denoised_route_ready(void)
+{
+    return s_active && !s_rx_room_changing && s_rx_denoise_mode == netcom_mode() &&
+           s_rx_room == netcom_room() && s_rx_chan == s_chan && netcom_engine_running() &&
+           sa818_cfg_tx_ready() && !ptt_bridge_keyed() &&
+           !(rx_guard_blocked() & RX_GUARD_OUT_NET);
+}
+
+static bool denoised_emit(const int16_t *pcm, size_t n, void *context)
+{
+    const uint32_t generation = *(const uint32_t *)context;
+    rx_tx_lock();
+    const bool same_stream = s_rx.open && s_rx_generation == generation;
+    const bool allowed = same_stream && denoised_route_ready();
+    if (allowed) { netcom_tx_sample(pcm, n, true); }
+    else if (same_stream) { bridge_rx_end_locked(false); }
+    rx_tx_unlock();
+    return allowed;
+}
+
 void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled)
 {
     rx_tx_lock();
     const bool inhibited = (rx_guard_blocked() & RX_GUARD_OUT_NET) != 0;
-    if (!s_active || !sa818_cfg_tx_ready() || !enabled || !squelch_open || ptt_bridge_keyed() ||
-        inhibited) {
-        bridge_rx_end_locked(!inhibited);
+    const bool allowed = s_active && sa818_cfg_tx_ready() && enabled &&
+                         !ptt_bridge_keyed() && !inhibited;
+    uint32_t generation = s_rx_generation;
+    if (s_rx_denoise_mode && (!allowed || !denoised_route_ready())) {
+        bridge_rx_end_locked(false);
         rx_tx_unlock();
         return;
     }
-    if (!pcm || n == 0) {
+    if (!allowed || !squelch_open) {
+        const bool drain = allowed && s_rx_denoise_mode;
+        if (!drain) {
+            bridge_rx_end_locked(!inhibited);
+            rx_tx_unlock();
+            return;
+        }
+        rx_tx_unlock();
+        const bool drained = rf_denoise_finish(denoised_emit, &generation);
+        rx_tx_lock();
+        if (s_rx.open && s_rx_generation == generation) {
+            bridge_rx_end_locked(drained && denoised_route_ready());
+        }
+        rx_tx_unlock();
+        return;
+    }
+    const uint8_t mode = netcom_mode();
+    const bool configured = (atomic_load(&s_denoise_modes) & (1u << mode)) != 0;
+    if (!pcm || !n || (configured && s_rx_room_changing)) {
         rx_tx_unlock();
         return;
     }
@@ -263,15 +373,30 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
      * reports (it can open on the board's own transmission) must not be
      * forwarded back into the room -- that is a feedback loop.
      */
-    if (!s_rx.open) {
+    const bool starting = !s_rx.open;
+    if (starting) {
+        if (configured) {
+            s_rx_denoise_mode = mode;
+            s_rx_room = netcom_room();
+            s_rx_chan = s_chan;
+        }
         s_rx.open = true;
         s_rx.start_ms = esp_timer_get_time() / 1000;
         ++s_rx.starts;
         ptt_trace_note(PTT_TRACE_RFNET_ON, netcom_mode(), s_rx.starts, 0);
         ESP_LOGI(TAG, "RF->NET PTT start");
     }
-    netcom_tx_sample(pcm, n, squelch_open);
+    const bool denoise = s_rx_denoise_mode != 0;
+    if (!denoise) {
+        netcom_tx_sample(pcm, n, true);
+        rx_tx_unlock();
+        return;
+    }
     rx_tx_unlock();
+    /* The monitor owns the DSP state. Commit revalidates the generation,
+     * active route and receive guard after the expensive computation. */
+    if (starting) { rf_denoise_start(); }
+    (void)rf_denoise_push(pcm, n, denoised_emit, &generation);
 }
 
 void bridge_channel_deleted(int index)

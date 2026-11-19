@@ -56,6 +56,7 @@ idf_component_register(
         "netp2pnet.c"
         "netrelay.c"
         "bridge.c"   # analog <-> network bridge (NET-P2P / relay)
+        "rf_denoise.c"
         "sdr.c"      # SDR: radio <-> browser web audio over /ws/sdr
         "frontpanel.c"  # front panel: 3 LEDs + PTT/function keys
         "radio_led.c"   # RF steady / real network voice 5 Hz activity
@@ -69,6 +70,7 @@ idf_component_register(
         "device_name.js"
         "rx_guard.js"
         "maintenance.js"
+        "rf_denoise.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
         "serverkey.pem"
@@ -98,6 +100,7 @@ idf_component_register(
         dns_server      # vendored captive-portal DNS redirect (see components/)
         mdns            # vendored mDNS responder -> http://orl.local/
         es8311          # vendored under firmware/components/es8311 (see PATCH.md)
+        speexdsp        # fixed-point RF -> network denoise
         mqtt            # esp-mqtt client for the EMQX relay engine (netrelay.c)
         mbedtls         # HMAC-SHA256 PSK handshake in the NET-P2P engine (netp2pnet.c)
         lwip            # sockets + getaddrinfo for the NET-P2P engine (netp2pnet.c)
@@ -145,5 +148,5 @@ set_source_files_properties(device_maintenance.c maintenance_http.c peer_labels.
 # for routing, TLS and newlib formatting, and retain compiler stack reports.
 set_source_files_properties(net_http.c PROPERTIES
     COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
-set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c PROPERTIES
+set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c bridge.c rf_denoise.c PROPERTIES
     COMPILE_OPTIONS "-fstack-usage")

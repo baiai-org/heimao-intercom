@@ -1047,10 +1047,10 @@ int voice_take_meter_out(void)
 /* The speaker pop mute must never erase audio sent to the network/phone.
  * One hardware-COS confirmation block may be replayed only after valid COS,
  * with both capture-time and current receive-guard masks applied. */
-static void rf_forward_one(const int16_t *pcm, size_t n, bool open, uint8_t blocked)
+static void rf_forward_one(const int16_t *pcm, size_t n, bool open, bool rf_audio, uint8_t blocked)
 {
     if (blocked & RX_GUARD_OUT_NET) { bridge_rx_inhibit(); }
-    else { bridge_rx_tap(pcm, n, open, open); }
+    else { bridge_rx_tap(pcm, n, open, rf_audio); }
     int16_t phone[OUT_MAX];
     memcpy(phone, pcm, n * sizeof(*pcm));
     (void)gain_mul(phone, n, s_net_rx_gain);
@@ -1064,10 +1064,10 @@ static void rf_forward_block(const int16_t *pcm, size_t n, bool rf_audio,
     const uint8_t mode = netcom_mode();
     if (s_rf_prefix_n && open && block_start >= s_rf_prefix_us &&
         block_start - s_rf_prefix_us <= 64000 && mode == s_rf_prefix_mode) {
-        rf_forward_one(s_rf_prefix, s_rf_prefix_n, true, blocked | s_rf_prefix_blocked);
+        rf_forward_one(s_rf_prefix, s_rf_prefix_n, true, true, blocked | s_rf_prefix_blocked);
     }
     s_rf_prefix_n = 0;
-    rf_forward_one(pcm, n, open, blocked);
+    rf_forward_one(pcm, n, open, rf_audio, blocked);
     if (rf_audio && !s_mod_sq_open && s_sq_gpio >= 0 && s_sq_gpio_run == 1 && n <= OUT_MAX) {
         memcpy(s_rf_prefix, pcm, n * sizeof(*pcm));
         s_rf_prefix_n = n; s_rf_prefix_blocked = blocked; s_rf_prefix_us = block_start;
