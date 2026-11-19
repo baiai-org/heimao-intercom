@@ -74,6 +74,20 @@ static void process(size_t n, size_t chunk) {
     assert(written == n);
 }
 
+static void check_fallback(const int16_t *actual, size_t transition, size_t total) {
+    const int count = total - transition < 80 ? (int)(total - transition) : 80;
+    assert(count >= 2 && actual[transition] == reference[transition]);
+    assert(!memcmp(reference, actual, transition * sizeof(*actual)));
+    for (int i = 1; i < count - 1; ++i) {
+        const size_t index = transition + i;
+        const int32_t expected = ((count - 1 - i) * (int32_t)reference[index] +
+                                  i * (int32_t)input[index]) / (count - 1);
+        assert(actual[index] == expected);
+    }
+    const size_t raw = transition + count - 1;
+    assert(!memcmp(input + raw, actual + raw, (total - raw) * sizeof(*actual)));
+}
+
 static void compare_waves(const char *src, const char *dst, int frame, int db) {
     assert(frame == 160 || frame == 256 || frame == 320);
     void *arena = malloc(65536);
@@ -139,8 +153,7 @@ int main(int argc, char **argv) {
         assert(!memcmp(reference, output, n * sizeof(*output)));
     }
 
-    /* Bad deadline on either a complete frame or the partial-frame drain.
-       The pending raw interval and every following sample come out once. */
+    /* A timeout before any processed output has been emitted starts in raw PCM. */
     timer_calls = 0; slow_at = 4;
     process(640, 257);
     assert(!memcmp(input, output, 640 * sizeof(*output)));
@@ -152,6 +165,21 @@ int main(int argc, char **argv) {
     assert(!memcmp(input, output, 47 * sizeof(*output)));
     slow_at = 0;
 
+    process(640, 257);
+    memcpy(reference, output, 640 * sizeof(*output));
+    timer_calls = 0; slow_at = 6;
+    process(640, 257);
+    check_fallback(output, 160, 640);
+    assert(timer_calls == 6); // Stop processing after the first late frame.
+
+    slow_at = 0;
+    process(367, 71);
+    memcpy(reference, output, 367 * sizeof(*output));
+    timer_calls = 0; slow_at = 8;
+    process(367, 71);
+    check_fallback(output, 320, 367);
+    slow_at = 0;
+
     written = 0;
     assert(rf_denoise_start(RF_DENOISE_BRIDGE));
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input, 47, collect, NULL));
@@ -161,12 +189,31 @@ int main(int argc, char **argv) {
     process(1, 1);
     rf_denoise_stats_t stats;
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.overruns == 3 && stats.max_us == 3000 && stats.frames > 1000);
+    assert(stats.overruns == 5 && stats.max_us == 3000 && stats.frames > 1000);
     printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
            (unsigned long)stats.workspace_bytes);
     rf_denoise_prepare(RF_DENOISE_SPEAKER);
     rf_denoise_prepare(RF_DENOISE_HANDSET_TX);
     assert(live_allocations == 9);
+
+    /* A fixed-rate DAC route keeps the same lead and drains exactly once. */
+    process(640, 257);
+    memcpy(reference, output, 640 * sizeof(*output));
+    int16_t playback[960];
+    memcpy(playback, input, 640 * sizeof(*playback));
+    assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+    timer_calls = 0; slow_at = 6;
+    assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback, 320));
+    assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback + 320, 320));
+    assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
+    assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, playback + 640, 320) == 320);
+    assert(!rf_denoise_play_pending(RF_DENOISE_SPEAKER));
+    for (size_t i = 0; i < 320; ++i) { assert(!playback[i]); }
+    check_fallback(playback + 320, 160, 640);
+    rf_denoise_stop(RF_DENOISE_SPEAKER);
+    slow_at = 0;
+    puts("PASS: sample-aligned 5 ms deadline transition in streaming and DAC playback, including short final frame");
+
     for (size_t count = 1; count <= 640; ++count) {
         process(count, 72);
         memcpy(reference, output, count * sizeof(*output));

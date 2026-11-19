@@ -5,4 +5,5 @@ idf_component_register(
     INCLUDE_DIRS "." "upstream/include"
     PRIV_INCLUDE_DIRS "upstream/libspeexdsp")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE HAVE_CONFIG_H)
-target_compile_options(${COMPONENT_LIB} PRIVATE -fstack-usage -Wno-unused-parameter)
+# The preprocessor runs inline in the real-time audio path.
+target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -fstack-usage -Wno-unused-parameter)

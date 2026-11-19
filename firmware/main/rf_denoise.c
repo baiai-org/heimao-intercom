@@ -10,6 +10,7 @@ enum {
     FRAME_SAMPLES = 160,
     SUPPRESSION_DB = -6,
     FRAME_BUDGET_US = 2500,
+    BYPASS_FADE_SAMPLES = FRAME_SAMPLES / 2,
     ARENA_BYTES = 24 * 1024,
     PLAY_DELAY = 2 * FRAME_SAMPLES,
     PLAY_CAPACITY = PLAY_DELAY + RF_DENOISE_MAX_BLOCK,
@@ -31,6 +32,7 @@ typedef struct {
     _Atomic(workspace_t *) prepared;
     workspace_t *work;
     bool bypass;
+    bool wet_emitted;
     size_t input_n;
     size_t previous_n;
     size_t head;
@@ -80,6 +82,7 @@ bool rf_denoise_start(rf_denoise_route_t route)
     stream_t *stream = &s_streams[route];
     stream->work = atomic_load(&stream->prepared);
     stream->bypass = !stream->work;
+    stream->wet_emitted = false;
     stream->input_n = stream->previous_n = stream->head = stream->queued = 0;
     stream->lead = PLAY_DELAY;
     if (stream->work) {
@@ -94,6 +97,7 @@ void rf_denoise_stop(rf_denoise_route_t route)
     stream_t *stream = &s_streams[route];
     stream->work = NULL;
     stream->bypass = true;
+    stream->wet_emitted = false;
     stream->input_n = stream->previous_n = stream->head = stream->queued = stream->lead = 0;
     atomic_store(&stream->state, RF_DENOISE_OFF);
 }
@@ -112,6 +116,31 @@ static bool run_frame(stream_t *stream)
     return false;
 }
 
+static bool emit_previous(stream_t *stream, size_t count, bool on_time,
+                          rf_denoise_emit_t emit, void *context)
+{
+    if (!count) { return true; }
+    workspace_t *work = stream->work;
+    const int16_t *pcm = work->output;
+    if (!on_time) {
+        if (stream->wet_emitted && count > 1) {
+            // The completed output and the saved raw frame describe the same samples.
+            const int last = (int)(count < BYPASS_FADE_SAMPLES ? count : BYPASS_FADE_SAMPLES) - 1;
+            for (int i = 1; i < last; ++i) {
+                const int32_t mixed = (last - i) * (int32_t)work->output[i] +
+                                      i * (int32_t)work->previous[i];
+                work->output[i] = (int16_t)(mixed / last);
+            }
+            memcpy(work->output + last, work->previous + last, (count - last) * sizeof(*pcm));
+        } else {
+            pcm = work->previous;
+        }
+    }
+    if (!emit(pcm, count, context)) { return false; }
+    stream->wet_emitted = on_time;
+    return true;
+}
+
 static bool submit_frame(stream_t *stream, rf_denoise_emit_t emit, void *context)
 {
     workspace_t *work = stream->work;
@@ -120,8 +149,7 @@ static bool submit_frame(stream_t *stream, rf_denoise_emit_t emit, void *context
     const bool on_time = run_frame(stream);
 
     /* The overlap/add result aligns with the previous input frame. */
-    const int16_t *previous = on_time ? work->output : work->previous;
-    if (stream->previous_n && !emit(previous, stream->previous_n, context)) { return false; }
+    if (!emit_previous(stream, stream->previous_n, on_time, emit, context)) { return false; }
     if (!on_time) {
         const size_t count = stream->input_n;
         stream->input_n = stream->previous_n = 0;
@@ -160,7 +188,7 @@ bool rf_denoise_finish(rf_denoise_route_t route, rf_denoise_emit_t emit, void *c
     const bool on_time = run_frame(stream);
     const size_t count = stream->previous_n;
     stream->previous_n = 0;
-    return emit(on_time ? work->output : work->previous, count, context);
+    return emit_previous(stream, count, on_time, emit, context);
 }
 
 static bool queue_pcm(const int16_t *pcm, size_t n, void *context)
