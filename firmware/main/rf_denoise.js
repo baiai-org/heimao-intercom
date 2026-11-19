@@ -3,7 +3,7 @@
   const card = document.getElementById('rfDenoiseCard');
   const get = name => card.querySelector('[data-dn="' + name + '"]');
   const inputs = [...card.querySelectorAll('[data-path]')];
-  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '处理超时 · 暂用原声'];
+  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '当前使用原声'];
   const modes = ['本地模拟', '公网直连', 'MQTT 网络中继'];
   const pathNames = ['手台发话 → 本机射频', '手台发话 → 网络', '射频来话 → 本机喇叭',
     '射频来话 → 网络转发', '网络来话 → 本机喇叭', '网络来话 → 模拟桥接'];
@@ -65,7 +65,7 @@
       text(get(name), label);
     }
     const stats = [saved.handset_stats, saved.network_stats[0], saved.speaker_stats,
-      saved, saved.network_stats[1], saved.network_stats[2]];
+      saved.bridge_stats || saved, saved.network_stats[1], saved.network_stats[2]];
     const rows = inputs.map((input, index) => {
       const bit = bitFor(input.dataset.path, mode);
       if (!bit) return '';
@@ -73,8 +73,15 @@
       const enabled = Boolean(flags & bit);
       const state = !enabled ? 0 : item?.state || 1;
       return pathNames[index] + ' · ' + (states[state] || states[1]) +
-        (item?.frames ? ' · ' + item.frames + ' 帧 · 最高 ' + item.max_us + ' μs · 超时 ' + item.overruns : '');
+        (item?.input_frames ? ' · 当前或最近话段 ' + item.input_frames + ' 帧 · 输出降噪 ' +
+          item.wet_frames + ' · 原声 ' + item.dry_frames + ' · 队列满 ' + item.queue_full +
+          ' · 恢复 ' + item.recoveries : '') +
+        (item?.frames ? ' · 累计计算 ' + item.frames + ' 帧 · 计算最长 ' + item.max_us +
+          ' μs · 迟到 ' + item.overruns + (Number.isInteger(item.wait_max_us) ?
+            ' · 排队最长 ' + item.wait_max_us + ' μs' : '') : '');
     }).filter(Boolean);
+    if (saved.i2s) rows.push('I2S 累计 · 接收欠载 ' + saved.i2s.receive_stalls +
+      ' · 短写 ' + saved.i2s.short_writes + ' · 错误 ' + saved.i2s.errors);
     const list = get('stats');
     if (list.dataset.summary !== rows.join('\n')) {
       list.dataset.summary = rows.join('\n');

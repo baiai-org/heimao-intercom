@@ -16,9 +16,11 @@ status.np2p={access_version:1,access_ready:true,denied_count:0,denied_limit:64,p
  peers:Array.from({length:16},(_,i)=>({name:'p'+i,ip:i<8?'192.0.2.'+(i+20):'2001:db8::'+i,port:54321+i,state:'linked',rtt_ms:30,rx:100,tx:100,drop:0}))};
 let rejectChannel=false,refuseStop=false,stops=0;
 let failDenoiseSave=false, denoiseWrites=0, failDenoiseRead=false, holdDenoiseRead=null, loseDenoiseReply=false;
-const idleDenoise={state:0,frames:0,max_us:0,overruns:0};
+const idleDenoise={state:0,frames:0,max_us:0,overruns:0,wait_max_us:0,
+ input_frames:0,wet_frames:0,dry_frames:0,queue_full:0,recoveries:0};
 const denoise={ok:true,flags:0,active_mode:0,...idleDenoise,
- speaker_stats:{...idleDenoise},handset_stats:{...idleDenoise},
+ speaker_stats:{...idleDenoise},handset_stats:{...idleDenoise},bridge_stats:{...idleDenoise},
+ i2s:{receive_stalls:0,short_writes:0,errors:0},
  network_stats:[{...idleDenoise},{...idleDenoise},{...idleDenoise}]};
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
@@ -174,7 +176,13 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   assert(await input('netTx').isChecked() && await input('netRf').isChecked());
   assert.equal(await page.evaluate(()=>window.dnToggles),0);
   status.bridge.keyed=1;
+  Object.assign(denoise.network_stats[2],{state:2,frames:38,max_us:10099,overruns:1,
+   wait_max_us:6120,input_frames:40,wet_frames:37,dry_frames:3,queue_full:0,recoveries:1});
   await page.waitForFunction(()=>document.querySelector('[data-dn=bridgeNote]').textContent.includes('使用射频出口'));
+  await card.getByText('运行详情', {exact:true}).click();
+  assert(await card.getByText(/网络来话 → 模拟桥接.*输出降噪 37.*原声 3.*恢复 1.*排队最长 6120/).isVisible());
+  assert(await card.getByText(/I2S 累计 · 接收欠载 0/).isVisible());
+  await card.getByText('运行详情', {exact:true}).click();
   await card.screenshot({path:path.join(output,'denoise-desktop.png')});
   status.bridge.keyed=0;
   await input('forward').check();

@@ -81,13 +81,24 @@ static void test_rx(uint8_t mode) {
             assert(net_audio_denoise_pending(&dn, 100) == enabled);
             fill_block(block, 320);
             assert(net_audio_denoise_render(&dn, mode, ended, true, true, block, 110));
-            assert(!memcmp(block, enabled ? reference : input + 320, sizeof(block)));
+            if (enabled) {
+                assert(!memcmp(block, zero, 160 * sizeof(*block)));
+                assert(!memcmp(block + 160, reference, 160 * sizeof(*block)));
+            } else {
+                assert(!memcmp(block, input + 320, sizeof(block)));
+            }
             assert(!net_audio_denoise_render(&dn, mode, ended, false, false, block, 130));
             assert(net_audio_denoise_pending(&dn, 130) == enabled);
             assert(net_audio_denoise_render(&dn, mode, ended, false, true, block, 145) == enabled);
-            if (enabled) assert(!memcmp(block, reference + 320, sizeof(block)));
-            assert(!net_audio_denoise_pending(&dn, 145));
-            assert(!net_audio_denoise_render(&dn, mode, ended, false, true, block, 165));
+            if (enabled) {
+                assert(!memcmp(block, reference + 160, sizeof(block)));
+                assert(net_audio_denoise_pending(&dn, 145));
+                assert(net_audio_denoise_render(&dn, mode, ended, false, true, block, 165));
+                assert(!memcmp(block, reference + 480, 160 * sizeof(*block)));
+                assert(!memcmp(block + 160, zero, 160 * sizeof(*block)));
+            }
+            assert(!net_audio_denoise_pending(&dn, 165));
+            assert(!net_audio_denoise_render(&dn, mode, ended, false, true, block, 185));
         }
     }
     flags = speaker | rf;
@@ -153,13 +164,13 @@ int main(void) {
         owner = PTT_OWNER_TALK;
         talking = true;
         struct talk_network_denoise tx = {.generation = 1, .room = room, .mode = mode};
-        assert(rf_denoise_start(RF_DENOISE_NET_TX, false));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         assert(written == 0);
         assert(rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));
         assert(written == short_length && tx.peak == 10);
         for (size_t i = 0; i < written; ++i) assert(output[i] == reference[i] + 13);
-        assert(rf_denoise_start(RF_DENOISE_NET_TX, false));
+        assert(rf_denoise_start(RF_DENOISE_NET_TX));
         assert(rf_denoise_push(RF_DENOISE_NET_TX, input, short_length, talk_network_emit, &tx));
         owner = PTT_OWNER_NONE;
         assert(!rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx));

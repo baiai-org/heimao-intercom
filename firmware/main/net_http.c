@@ -502,6 +502,23 @@ static bool denoise_number(const cJSON *item, uint32_t max, uint32_t *value)
     return true;
 }
 
+static bool append_denoise_stats(char *reply, size_t capacity, size_t *used,
+                                 const char *prefix, const rf_denoise_stats_t *stats)
+{
+    const int n = snprintf(reply + *used, capacity - *used,
+        "%s{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
+        "\"wait_max_us\":%lu,\"input_frames\":%lu,\"wet_frames\":%lu,\"dry_frames\":%lu,"
+        "\"queue_full\":%lu,\"recoveries\":%lu}",
+        prefix, (unsigned)stats->state, (unsigned long)stats->frames, (unsigned long)stats->max_us,
+        (unsigned long)stats->overruns, (unsigned long)stats->workspace_bytes,
+        (unsigned long)stats->wait_max_us, (unsigned long)stats->input_frames,
+        (unsigned long)stats->wet_frames, (unsigned long)stats->dry_frames,
+        (unsigned long)stats->queue_full, (unsigned long)stats->recoveries);
+    if (n < 0 || (size_t)n >= capacity - *used) { return false; }
+    *used += (size_t)n;
+    return true;
+}
+
 static esp_err_t h_rf_denoise(httpd_req_t *req)
 {
     if (req->method == HTTP_POST) {
@@ -548,14 +565,15 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
     const bool handset_on = (flags & (1u << DENOISE_SETTING_HANDSET_TX)) != 0;
     local_denoise_stats(RF_DENOISE_SPEAKER, speaker_on, &speaker);
     local_denoise_stats(RF_DENOISE_HANDSET_TX, handset_on, &handset);
-    char reply[1600];
-    size_t used = snprintf(reply, sizeof(reply),
+    audio_i2s_diag_t i2s;
+    audio_i2s_diag_get(&i2s);
+    char reply[2700];
+    const int root = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
         "\"mode\":%u,\"flags\":%lu,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
         "\"speaker\":%s,\"handset\":%s,"
-        "\"speaker_stats\":{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu},"
-        "\"handset_stats\":{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}",
+        "\"i2s\":{\"receive_stalls\":%lu,\"short_writes\":%lu,\"errors\":%lu}",
         device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
         (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
@@ -563,22 +581,31 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         (unsigned)mode, (unsigned long)flags, netcom_rf_tx() ? "true" : "false",
         bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
-        (unsigned)speaker.state, (unsigned long)speaker.frames, (unsigned long)speaker.max_us,
-        (unsigned long)speaker.overruns, (unsigned long)speaker.workspace_bytes,
-        (unsigned)handset.state, (unsigned long)handset.frames, (unsigned long)handset.max_us,
-        (unsigned long)handset.overruns, (unsigned long)handset.workspace_bytes);
-    used += snprintf(reply + used, sizeof(reply) - used, ",\"network_stats\":[");
-    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_TX);
-    for (uint8_t i = 0; first && i < 3; ++i) {
-        const uint8_t setting = first + i;
-        rf_denoise_stats_t path;
-        local_denoise_stats(bridge_denoise_route(setting), (flags & (1u << setting)) != 0, &path);
-        used += snprintf(reply + used, sizeof(reply) - used,
-            "%s{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}",
-            i ? "," : "", (unsigned)path.state, (unsigned long)path.frames,
-            (unsigned long)path.max_us, (unsigned long)path.overruns, (unsigned long)path.workspace_bytes);
+        (unsigned long)i2s.receive_queue_stalls, (unsigned long)i2s.short_writes, (unsigned long)i2s.errors);
+    if (root < 0 || (size_t)root >= sizeof(reply)) { return httpd_resp_send_500(req); }
+    size_t used = (size_t)root;
+    if (!append_denoise_stats(reply, sizeof(reply), &used, ",\"speaker_stats\":", &speaker) ||
+        !append_denoise_stats(reply, sizeof(reply), &used, ",\"handset_stats\":", &handset) ||
+        !append_denoise_stats(reply, sizeof(reply), &used, ",\"bridge_stats\":", &stats)) {
+        return httpd_resp_send_500(req);
     }
-    snprintf(reply + used, sizeof(reply) - used, "]}");
+    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_TX);
+    if (!first) {
+        const char close[] = ",\"network_stats\":[]}";
+        if (sizeof(close) > sizeof(reply) - used) { return httpd_resp_send_500(req); }
+        memcpy(reply + used, close, sizeof(close));
+    } else {
+        for (uint8_t i = 0; i < 3; ++i) {
+            const uint8_t setting = first + i;
+            rf_denoise_stats_t path;
+            local_denoise_stats(bridge_denoise_route(setting), (flags & (1u << setting)) != 0, &path);
+            if (!append_denoise_stats(reply, sizeof(reply), &used, i ? "," : ",\"network_stats\":[", &path)) {
+                return httpd_resp_send_500(req);
+            }
+        }
+        if (sizeof(reply) - used < sizeof("]}")) { return httpd_resp_send_500(req); }
+        memcpy(reply + used, "]}", sizeof("]}"));
+    }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return send_json(req, reply);
 }

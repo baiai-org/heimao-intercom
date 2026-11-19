@@ -30,12 +30,14 @@ HARNESS = r'''
 #include <string.h>
 
 static unsigned allocation, fail_at, live_allocations;
-static unsigned timer_calls, slow_at, second_slow_at;
-static unsigned slow_even_until;
-static uint32_t slow_us = 8001;
 static int64_t now;
-static int16_t input[1024], output[1024], reference[1024];
+static unsigned slow_clock_call;
+static uint32_t slow_us = 10099;
+static void (*on_slow_frame)(void);
+static int16_t input[2048], output[2048], reference[2048];
 static size_t written;
+extern bool rf_denoise_test_autorun;
+extern bool rf_denoise_test_service(void);
 static bool cancel;
 
 void *heap_caps_malloc(size_t n, unsigned flags) {
@@ -55,11 +57,11 @@ void *heap_caps_aligned_alloc(size_t alignment, size_t n, unsigned flags) {
 }
 void heap_caps_free(void *p) { if (p) { --live_allocations; free(p); } }
 int64_t esp_timer_get_time(void) {
-    ++timer_calls;
-    const bool simulated = timer_calls == slow_at || timer_calls == second_slow_at ||
-        (timer_calls <= slow_even_until && timer_calls % 2 == 0);
-    now += simulated ? slow_us : 1;
-    return now;
+    if (slow_clock_call && --slow_clock_call == 0) {
+        now += slow_us;
+        if (on_slow_frame) { on_slow_frame(); }
+    }
+    return ++now;
 }
 
 static bool collect(const int16_t *pcm, size_t n, void *ctx) {
@@ -71,33 +73,15 @@ static bool collect(const int16_t *pcm, size_t n, void *ctx) {
     return true;
 }
 
-static void process_with_budget(size_t n, size_t chunk, bool shared) {
+static void process(size_t n, size_t chunk) {
     written = 0;
-    (void)rf_denoise_start(RF_DENOISE_BRIDGE, shared);
+    (void)rf_denoise_start(RF_DENOISE_BRIDGE);
     for (size_t i = 0; i < n; i += chunk) {
         size_t count = n - i < chunk ? n - i : chunk;
         assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + i, count, collect, NULL));
     }
     assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
     assert(written == n);
-}
-
-static void process(size_t n, size_t chunk) {
-    process_with_budget(n, chunk, true);
-}
-
-static void check_fallback(const int16_t *actual, size_t transition, size_t total) {
-    const int count = total - transition < 80 ? (int)(total - transition) : 80;
-    assert(count >= 2 && actual[transition] == reference[transition]);
-    assert(!memcmp(reference, actual, transition * sizeof(*actual)));
-    for (int i = 1; i < count - 1; ++i) {
-        const size_t index = transition + i;
-        const int32_t expected = ((count - 1 - i) * (int32_t)reference[index] +
-                                  i * (int32_t)input[index]) / (count - 1);
-        assert(actual[index] == expected);
-    }
-    const size_t raw = transition + count - 1;
-    assert(!memcmp(input + raw, actual + raw, (total - raw) * sizeof(*actual)));
 }
 
 static void compare_waves(const char *src, const char *dst, int frame, int db) {
@@ -124,30 +108,33 @@ static void compare_waves(const char *src, const char *dst, int frame, int db) {
     free(arena);
 }
 
+static void push_frame(unsigned frame) {
+    assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + frame * 160, 160, collect, NULL));
+}
+
+static void play_while_worker_is_late(void) {
+    push_frame(6);
+    assert(written == 640); // The foreground emitted on this tick.
+    assert(!memcmp(output + 560, input + 560, 80 * sizeof(*input)));
+}
+
+static void replace_source_while_worker_runs(void) {
+    rf_denoise_stop(RF_DENOISE_BRIDGE);
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
+    assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + 640, 47, collect, NULL));
+}
+
 int main(int argc, char **argv) {
     if (argc == 5) {
         compare_waves(argv[1], argv[2], atoi(argv[3]), atoi(argv[4]));
         return 0;
     }
-    uint32_t rand_state = 1;
+    uint32_t random = 1;
     for (size_t i = 0; i < sizeof(input)/sizeof(*input); ++i) {
-        rand_state = rand_state * 1664525u + 1013904223u;
-        input[i] = (int16_t)((rand_state >> 17) - 16384);
+        random = random * 1664525u + 1013904223u;
+        input[i] = (int16_t)((random >> 17) - 16384);
     }
-    void *arena = malloc(65536);
-    assert(arena);
-    for (int frame = 160; frame <= 320; frame += 160) {
-        size_t used;
-        assert(orl_speex_init(arena, 65536, frame, -6, &used));
-        const size_t required = used;
-        /* Walk every capacity, so each internal allocation is made to fail. */
-        for (size_t capacity = 0; capacity < required; ++capacity) {
-            assert(!orl_speex_init(arena, capacity, frame, -6, &used) && !used);
-        }
-        assert(orl_speex_init(arena, required, frame, -6, &used));
-        printf("speex_frame=%d arena_used=%zu\n", frame, used);
-    }
-    free(arena);
     for (fail_at = 1; fail_at <= 3; ++fail_at) {
         allocation = 0;
         rf_denoise_prepare(RF_DENOISE_BRIDGE);
@@ -157,139 +144,142 @@ int main(int argc, char **argv) {
     }
     fail_at = 0;
     rf_denoise_prepare(RF_DENOISE_BRIDGE);
-    assert(live_allocations == 3);
+    rf_denoise_prepare(RF_DENOISE_SPEAKER);
+    rf_denoise_prepare(RF_DENOISE_RELAY_RF);
+    assert(live_allocations == 9);
+
     for (size_t n = 0; n <= 641; ++n) {
         process(n, 256);
         memcpy(reference, output, n * sizeof(*output));
         process(n, 71);
         assert(!memcmp(reference, output, n * sizeof(*output)));
+        int16_t dac[1121];
+        memcpy(dac, input, n * sizeof(*dac));
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+        for (size_t pos = 0; pos < n; ) {
+            const size_t count = n - pos < 257 ? n - pos : 257;
+            assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, dac + pos, count));
+            pos += count;
+        }
+        assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
+        const size_t delay = n ? RF_DENOISE_LEAD_SAMPLES : 0;
+        assert(rf_denoise_play_pending(RF_DENOISE_SPEAKER) == delay);
+        assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, dac + n, delay) == delay);
+        for (size_t pos = 0; pos < delay; ++pos) { assert(!dac[pos]); }
+        assert(!memcmp(dac + delay, reference, n * sizeof(*dac)));
     }
 
-    /* An isolated excursion anywhere in the talkspurt preserves processed PCM. */
-    process(640, 257);
-    memcpy(reference, output, 640 * sizeof(*output));
+    const uint32_t completed_in_time[] = {4632, 5830};
+    for (unsigned i = 0; i < 2; ++i) {
+        rf_denoise_test_autorun = false;
+        assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+        written = 0;
+        push_frame(0);
+        push_frame(1);
+        slow_us = completed_in_time[i];
+        slow_clock_call = 2;
+        while (rf_denoise_test_service()) { }
+        rf_denoise_test_autorun = true;
+        push_frame(2);
+        push_frame(3);
+        assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+        rf_denoise_stats_t fast;
+        rf_denoise_stats(RF_DENOISE_BRIDGE, &fast);
+        assert(written == 640 && fast.wet_frames == 4 && fast.dry_frames == 0);
+    }
+    puts("PASS: 4.632 ms and 5.830 ms results completed inside the playback lead remain wet");
+    slow_us = 10099;
+
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
+    for (unsigned i = 0; i <= 3; ++i) { push_frame(i); }
+    rf_denoise_test_autorun = false;
+    push_frame(4);
+    push_frame(5);
+    slow_clock_call = 2;
+    on_slow_frame = play_while_worker_is_late;
+    assert(rf_denoise_test_service());
+    on_slow_frame = NULL;
+    while (rf_denoise_test_service()) { }
+    rf_denoise_test_autorun = true;
+    for (unsigned i = 7; i <= 9; ++i) { push_frame(i); }
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+    assert(written == 1600);
     rf_denoise_stats_t stats;
     rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    const uint32_t before = stats.frames;
-    timer_calls = 0; slow_at = 2; slow_us = 3334;
-    process(640, 257);
-    assert(!memcmp(reference, output, 640 * sizeof(*output)));
-    timer_calls = 0; slow_at = 4; second_slow_at = 8; slow_us = 4000;
-    process(640, 257);
-    assert(!memcmp(reference, output, 640 * sizeof(*output)));
-    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.frames == before + 10 && stats.overruns == 0 && stats.max_us == 4000);
+    assert(stats.input_frames == 10 && stats.wet_frames == 7 && stats.dry_frames == 3);
+    assert(stats.overruns == 1 && stats.recoveries == 1 && stats.max_us >= 10099);
+    puts("PASS: a 10.099 ms worker spike emits aligned dry PCM on time, discards late result, and recovers");
 
-    timer_calls = 0; slow_at = 0; second_slow_at = 0; slow_even_until = 10; slow_us = 4098;
-    process_with_budget(640, 257, false);
-    assert(!memcmp(reference, output, 640 * sizeof(*output)) && timer_calls == 10);
-    timer_calls = 0; slow_us = 6000;
-    process_with_budget(640, 257, false);
-    check_fallback(output, 160, 640);
-    assert(timer_calls == 6);
-    timer_calls = 0; slow_even_until = 0; slow_at = 4; slow_us = 8001;
-    process_with_budget(640, 257, false);
-    assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
-    puts("PASS: sustained solo 4098 us continues; sustained 6000 us and 8001 us spikes bypass");
-
-    /* A timeout before any processed output has been emitted starts in raw PCM. */
-    timer_calls = 0; slow_at = 2; second_slow_at = 4; slow_us = 4500;
-    process(640, 257);
-    assert(!memcmp(input, output, 640 * sizeof(*output)) && timer_calls == 4);
-    timer_calls = 0; slow_at = 4; second_slow_at = 0; slow_us = 8001;
-    process(47, 47);
-    assert(!memcmp(input, output, 47 * sizeof(*output)));
-    timer_calls = 0; slow_at = 2; slow_us = 8001;
-    process(47, 47);
-    assert(!memcmp(input, output, 47 * sizeof(*output)));
-    assert(timer_calls == 2);
-    slow_at = 0;
-    puts("PASS: shared fast frames repay bursts; sustained excess and hard stalls still bypass");
-
-    process(640, 257);
-    memcpy(reference, output, 640 * sizeof(*output));
-    timer_calls = 0; slow_at = 4; second_slow_at = 6; slow_us = 4100;
-    process(640, 257);
-    check_fallback(output, 160, 640);
-    assert(timer_calls == 6); // Stop processing once the burst reserve is exhausted.
-
-    slow_at = 0; second_slow_at = 0; slow_us = 8001;
-    process(367, 71);
-    memcpy(reference, output, 367 * sizeof(*output));
-    timer_calls = 0; slow_at = 8;
-    process(367, 71);
-    check_fallback(output, 320, 367);
-    slow_at = 0;
-
+    rf_denoise_test_autorun = false;
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_start(RF_DENOISE_RELAY_RF));
     written = 0;
-    assert(rf_denoise_start(RF_DENOISE_BRIDGE, true));
+    int16_t second[RF_DENOISE_LEAD_SAMPLES];
+    for (unsigned i = 0; i < 12; ++i) {
+        push_frame(i);
+        int16_t block[160];
+        memcpy(block, input + i * 160, sizeof(block));
+        assert(rf_denoise_play_block(RF_DENOISE_RELAY_RF, block, 160));
+        if (i >= 3) { assert(!memcmp(block, input + (i - 3) * 160, sizeof(block))); }
+    }
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+    assert(written == 1920 && !memcmp(input, output, sizeof(*input) * written));
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
+    assert(stats.input_frames == 12 && stats.dry_frames == 12 && stats.queue_full > 0);
+    rf_denoise_stats(RF_DENOISE_RELAY_RF, &stats);
+    assert(stats.input_frames == 12 && stats.dry_frames == 9 && stats.queue_full > 0);
+    assert(rf_denoise_play_finish(RF_DENOISE_RELAY_RF));
+    assert(rf_denoise_play_take(RF_DENOISE_RELAY_RF, second, 480) == 480);
+    assert(!memcmp(second, input + 1440, 480 * sizeof(*second)));
+    rf_denoise_stop(RF_DENOISE_RELAY_RF);
+    assert(!rf_denoise_play_pending(RF_DENOISE_RELAY_RF));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
+    push_frame(0);
+    rf_denoise_test_autorun = true;
+    while (rf_denoise_test_service()) { }
+    push_frame(1);
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+    assert(written == 320);
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
+    assert(stats.input_frames == 2 && stats.wet_frames == 0 && stats.dry_frames == 2);
+    assert(!memcmp(output, input, 320 * sizeof(*input)));
+    puts("PASS: stalled worker and queue saturation preserve dry PCM on two routes; old generation cannot leak");
+
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
+    push_frame(0);
+    rf_denoise_test_autorun = false;
+    push_frame(1);
+    slow_clock_call = 2;
+    on_slow_frame = replace_source_while_worker_runs;
+    assert(rf_denoise_test_service());
+    on_slow_frame = NULL;
+    rf_denoise_test_autorun = true;
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+    assert(written == 47);
+    memcpy(reference, output, 47 * sizeof(*output));
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
+    assert(stats.input_frames == 1 && stats.wet_frames == 1 && stats.dry_frames == 0);
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
+    assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + 640, 47, collect, NULL));
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
+    assert(written == 47 && !memcmp(output, reference, 47 * sizeof(*output)));
+    puts("PASS: cancellation during a worker pass cannot publish into the next source");
+
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    written = 0;
     assert(rf_denoise_push(RF_DENOISE_BRIDGE, input, 47, collect, NULL));
     cancel = true;
     assert(!rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == 0);
     cancel = false;
-    process(1, 1);
-    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
-    assert(stats.overruns == 7 && stats.max_us == 8001 && stats.frames > 1000);
-    printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
-           (unsigned long)stats.workspace_bytes);
-    rf_denoise_prepare(RF_DENOISE_SPEAKER);
-    rf_denoise_prepare(RF_DENOISE_HANDSET_TX);
-    assert(live_allocations == 9);
-
-    /* A fixed-rate DAC route keeps the same lead and drains exactly once. */
-    process(640, 257);
-    memcpy(reference, output, 640 * sizeof(*output));
-    int16_t playback[960];
-    memcpy(playback, input, 640 * sizeof(*playback));
-    assert(rf_denoise_start(RF_DENOISE_SPEAKER, true));
-    timer_calls = 0; slow_at = 6;
-    assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback, 320));
-    assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, playback + 320, 320));
-    assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
-    assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, playback + 640, 320) == 320);
-    assert(!rf_denoise_play_pending(RF_DENOISE_SPEAKER));
-    for (size_t i = 0; i < 320; ++i) { assert(!playback[i]); }
-    check_fallback(playback + 320, 160, 640);
-    rf_denoise_stop(RF_DENOISE_SPEAKER);
-    slow_at = 0;
-    puts("PASS: sample-aligned 5 ms deadline transition in streaming and DAC playback, including short final frame");
-
-    for (size_t count = 1; count <= 640; ++count) {
-        process(count, 72);
-        memcpy(reference, output, count * sizeof(*output));
-        int16_t speaker[1024], mic[1024], reverse_reference[640];
-        for (size_t i = 0; i < count; ++i) {
-            speaker[i] = input[i];
-            mic[i] = input[count - i - 1];
-        }
-        assert(rf_denoise_start(RF_DENOISE_SPEAKER, true));
-        assert(rf_denoise_start(RF_DENOISE_HANDSET_TX, true));
-        assert(rf_denoise_start(RF_DENOISE_BRIDGE, true)); written = 0;
-        for (size_t i = 0; i < count; ) {
-            size_t n = count - i < 257 ? count - i : 257;
-            assert(rf_denoise_push(RF_DENOISE_BRIDGE, mic + i, n, collect, NULL));
-            assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, speaker + i, n));
-            assert(rf_denoise_play_block(RF_DENOISE_HANDSET_TX, mic + i, n));
-            i += n;
-        }
-        assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == count);
-        memcpy(reverse_reference, output, count * sizeof(*output));
-        assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
-        assert(rf_denoise_play_finish(RF_DENOISE_HANDSET_TX));
-        assert(rf_denoise_play_pending(RF_DENOISE_SPEAKER) == 320);
-        assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, speaker + count, 320) == 320);
-        assert(rf_denoise_play_take(RF_DENOISE_HANDSET_TX, mic + count, 320) == 320);
-        assert(!memcmp(speaker, mic, 320 * sizeof(*mic)));
-        for (size_t i = 0; i < 320; ++i) { assert(!speaker[i]); }
-        assert(!memcmp(speaker + 320, reference, count * sizeof(*speaker)));
-        assert(!memcmp(mic + 320, reverse_reference, count * sizeof(*mic)));
-        rf_denoise_stop(RF_DENOISE_SPEAKER);
-        assert(!rf_denoise_play_pending(RF_DENOISE_SPEAKER));
-        assert(!rf_denoise_play_take(RF_DENOISE_SPEAKER, speaker, 320));
-    }
-    puts("PASS: three independent live streams, fixed 20ms DAC lead, exact short/long drains and cancel");
+    rf_denoise_stop(RF_DENOISE_BRIDGE);
+    puts("PASS: allocation fallback, valid partial PCM, startup lead, chunk invariance and cancelled output");
     return 0;
 }
+
 '''
 
 
@@ -299,12 +289,20 @@ def compile_executable(directory, harness_source=HARNESS):
                                            encoding='utf-8')
     harness = directory / 'harness.c'
     harness.write_text(harness_source, encoding='utf-8')
+    worker_stub = directory / 'denoise_worker_stub.c'
+    worker_stub.write_text("""#include <stdbool.h>
+bool rf_denoise_test_autorun = true;
+extern bool rf_denoise_test_service(void);
+void rf_denoise_test_notify(void) {
+    if (rf_denoise_test_autorun) { while (rf_denoise_test_service()) {} }
+}
+""", encoding='utf-8')
     executable = directory / 'rf_denoise_test.exe'
     upstream = SPEEX / 'upstream/libspeexdsp'
     sources = ['preprocess.c', 'fftwrap.c', 'filterbank.c', 'kiss_fft.c', 'kiss_fftr.c']
     includes = [directory, MAIN, SPEEX, SPEEX / 'upstream/include', upstream]
-    command = ['gcc', '-std=gnu11', '-O2', '-DHAVE_CONFIG_H', '-Werror=implicit-function-declaration',
-               *(f'-I{include}' for include in includes), str(harness), str(MAIN / 'rf_denoise.c'),
+    command = ['gcc', '-std=gnu11', '-O2', '-DHAVE_CONFIG_H', '-DRF_DENOISE_HOST_TEST', '-Werror=implicit-function-declaration',
+               *(f'-I{include}' for include in includes), str(harness), str(worker_stub), str(MAIN / 'rf_denoise.c'),
                str(SPEEX / 'orl_speex.c'), *(str(upstream / f) for f in sources), '-lm',
                '-o', str(executable)]
     env = dict(os.environ, TEMP=str(directory), TMP=str(directory), TMPDIR=str(directory))

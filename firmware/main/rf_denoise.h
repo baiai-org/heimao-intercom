@@ -16,6 +16,8 @@ typedef struct {
     uint32_t max_us;
     uint32_t overruns;
     uint32_t workspace_bytes;
+    uint32_t wait_max_us;
+    uint32_t input_frames, wet_frames, dry_frames, queue_full, recoveries;
     rf_denoise_state_t state;
 } rf_denoise_stats_t;
 
@@ -30,24 +32,28 @@ typedef enum {
     RF_DENOISE_P2P_RF,
     RF_DENOISE_RELAY_SPEAKER,
     RF_DENOISE_RELAY_RF,
+    RF_DENOISE_RELAY_BRIDGE,
+    RF_DENOISE_RELAY_TX,
     RF_DENOISE_ROUTE_COUNT,
 } rf_denoise_route_t;
 
 #define RF_DENOISE_MAX_BLOCK 320u
+#define RF_DENOISE_LEAD_SAMPLES 480u
 
 /* Boot/control task only, serialized by the caller. The workspace is retained
  * for subsequent comparisons and published once. */
 void rf_denoise_prepare(rf_denoise_route_t route);
 /* One audio task owns each route. An unprepared route emits unmodified PCM. */
-/* shared_budget when two denoisers may run in the same audio task per block. */
-bool rf_denoise_start(rf_denoise_route_t route, bool shared_budget);
+bool rf_denoise_start(rf_denoise_route_t route);
+/* Invalidate outstanding work without touching the audio owner's buffers. */
+void rf_denoise_invalidate(rf_denoise_route_t route);
 void rf_denoise_stop(rf_denoise_route_t route);
 bool rf_denoise_push(rf_denoise_route_t route, const int16_t *pcm, size_t n,
                      rf_denoise_emit_t emit, void *context);
 bool rf_denoise_finish(rf_denoise_route_t route, rf_denoise_emit_t emit, void *context);
 void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *out);
 
-/* Local DAC routes use fixed-size playback, including a 20 ms startup lead.
+/* Local DAC routes use fixed-size playback, including a 30 ms startup lead.
  * Call finish once, then take the remaining PCM before releasing playback. */
 bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n);
 bool rf_denoise_play_finish(rf_denoise_route_t route);

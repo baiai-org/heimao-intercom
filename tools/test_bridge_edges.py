@@ -178,9 +178,10 @@ esp_err_t sa818_cfg_load(sa818_cfg_t *cfg) { *cfg = current; return ESP_OK; }
 int netcom_mode(void) { return mode; }
 uint16_t netcom_room(void) { return 1; }
 void rf_denoise_prepare(rf_denoise_route_t route) { assert(route < RF_DENOISE_ROUTE_COUNT); }
-bool rf_denoise_start(rf_denoise_route_t route, bool shared_budget) {
-    (void)shared_budget;
-    assert(route == RF_DENOISE_BRIDGE && !*s_rx_tx_mux);
+void rf_denoise_stop(rf_denoise_route_t route) { (void)route; }
+void rf_denoise_invalidate(rf_denoise_route_t route) { (void)route; }
+bool rf_denoise_start(rf_denoise_route_t route) {
+    assert((route == RF_DENOISE_BRIDGE || route == RF_DENOISE_RELAY_BRIDGE) && *s_rx_tx_mux);
     queued_samples = 0;
     return true;
 }

@@ -78,7 +78,7 @@ static void speaker_open(speaker_denoise_t *dn, int16_t *buf) {
 static void mic_open(int16_t *buf) {
     for (size_t i=0;i<110;i++) buf[i] = (int16_t)(i * 23 - 1000);
     state=PTT_TX; owner=PTT_OWNER_TALK; failed=false; writes=0; written=0; revoke_after=0;
-    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX, false));
+    assert(rf_denoise_start(RF_DENOISE_HANDSET_TX));
     assert(rf_denoise_play_block(RF_DENOISE_HANDSET_TX,buf,110));
 }
 
@@ -121,9 +121,9 @@ int main(void) {
     }
     eq6_t eq; tx_history_t history;
     mic_open(pcm);
-    assert(talk_denoise_drain(99,pcm,&eq,&history) && written==320 && writes==2);
+    assert(talk_denoise_drain(99,pcm,&eq,&history) && written==RF_DENOISE_LEAD_SAMPLES && writes==2);
     talk_denoise_drain_dac(99,pcm);
-    assert(written==320+AUDIO_I2S_BUFFER_SAMPLES);
+    assert(written==RF_DENOISE_LEAD_SAMPLES+AUDIO_I2S_BUFFER_SAMPLES);
     mic_open(pcm); revoke_after=1;
     assert(!talk_denoise_drain(99,pcm,&eq,&history) && written==256);
     talk_denoise_drain_dac(99,pcm); assert(written==256);

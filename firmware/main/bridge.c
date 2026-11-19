@@ -108,6 +108,7 @@ static void bridge_rx_end_locked(bool with_tail)
         (netcom_mode() == s_rx_denoise_mode && netcom_room() == s_rx_room)) {
         netcom_tx_end();
     }
+    if (s_rx_denoise_mode) { rf_denoise_invalidate(bridge_denoise_route(s_rx_denoise_mode)); }
     s_rx.open = false;
     s_rx_denoise_mode = 0;
     ++s_rx_generation;
@@ -154,10 +155,10 @@ uint32_t bridge_denoise_mode_mask(uint8_t mode)
 rf_denoise_route_t bridge_denoise_route(uint8_t setting)
 {
     static const rf_denoise_route_t routes[] = {
-        RF_DENOISE_ROUTE_COUNT, RF_DENOISE_BRIDGE, RF_DENOISE_BRIDGE,
+        RF_DENOISE_ROUTE_COUNT, RF_DENOISE_BRIDGE, RF_DENOISE_RELAY_BRIDGE,
         RF_DENOISE_SPEAKER, RF_DENOISE_HANDSET_TX,
         RF_DENOISE_NET_TX, RF_DENOISE_P2P_SPEAKER, RF_DENOISE_P2P_RF,
-        RF_DENOISE_NET_TX, RF_DENOISE_RELAY_SPEAKER, RF_DENOISE_RELAY_RF,
+        RF_DENOISE_RELAY_TX, RF_DENOISE_RELAY_SPEAKER, RF_DENOISE_RELAY_RF,
     };
     return setting < sizeof(routes) / sizeof(*routes) ? routes[setting] : RF_DENOISE_ROUTE_COUNT;
 }
@@ -221,9 +222,10 @@ void bridge_denoise_status(uint32_t *flags, uint8_t *active_mode, rf_denoise_sta
     rx_tx_lock();
     *flags = atomic_load(&s_denoise_modes);
     *active_mode = s_rx_denoise_mode;
-    rf_denoise_stats(RF_DENOISE_BRIDGE, stats);
-    if (!*active_mode) {
-        stats->state = !(*flags & DENOISE_MODES) ? RF_DENOISE_OFF : stats->workspace_bytes ?
+    const uint8_t mode = netcom_mode();
+    rf_denoise_stats(mode == NETCOM_MODE_RELAY ? RF_DENOISE_RELAY_BRIDGE : RF_DENOISE_BRIDGE, stats);
+    if (*active_mode != mode || mode == NETCOM_MODE_LOCAL) {
+        stats->state = !(*flags & (1u << mode)) ? RF_DENOISE_OFF : stats->workspace_bytes ?
             RF_DENOISE_ARMED : RF_DENOISE_MEMORY_BYPASS;
     } else if (stats->state == RF_DENOISE_OFF) {
         stats->state = RF_DENOISE_ARMED;
@@ -408,8 +410,10 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
             rx_tx_unlock();
             return;
         }
+        const rf_denoise_route_t route = bridge_denoise_route(s_rx_denoise_mode);
         rx_tx_unlock();
-        const bool drained = rf_denoise_finish(RF_DENOISE_BRIDGE, denoised_emit, &generation);
+        const bool drained = rf_denoise_finish(route, denoised_emit, &generation);
+        rf_denoise_stop(route);
         rx_tx_lock();
         if (s_rx.open && s_rx_generation == generation) {
             bridge_rx_end_locked(drained && denoised_route_ready());
@@ -442,19 +446,15 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         ptt_trace_note(PTT_TRACE_RFNET_ON, netcom_mode(), s_rx.starts, 0);
         ESP_LOGI(TAG, "RF->NET PTT start");
     }
-    const bool denoise = s_rx_denoise_mode != 0;
-    if (!denoise) {
+    if (!s_rx_denoise_mode) {
         netcom_tx_sample(pcm, n, true);
         rx_tx_unlock();
         return;
     }
+    const rf_denoise_route_t route = bridge_denoise_route(s_rx_denoise_mode);
+    if (starting) { (void)rf_denoise_start(route); }
     rx_tx_unlock();
-    /* The monitor owns the DSP state. Commit revalidates the generation,
-     * active route and receive guard after the expensive computation. */
-    if (starting) {
-        (void)rf_denoise_start(RF_DENOISE_BRIDGE, bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
-    }
-    (void)rf_denoise_push(RF_DENOISE_BRIDGE, pcm, n, denoised_emit, &generation);
+    if (!rf_denoise_push(route, pcm, n, denoised_emit, &generation)) { rf_denoise_stop(route); }
 }
 
 void bridge_channel_deleted(int index)

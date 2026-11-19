@@ -1145,9 +1145,7 @@ static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n
         }
     } else if (s_mod_sq_open) {
         if (!dn->started) {
-            const bool shared_budget = dn->mode != NETCOM_MODE_LOCAL &&
-                bridge_active() && bridge_denoise_enabled(dn->mode);
-            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER, shared_budget);
+            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER);
             dn->started = true;
         }
         if (!dn->active) { return; }
@@ -2034,9 +2032,9 @@ static void talk_task(void *arg)
     const bool denoise_enabled = to_rf && (flags & (1u << DENOISE_SETTING_HANDSET_TX));
     const uint8_t net_setting = bridge_denoise_network_setting(tx.mode, DENOISE_NET_TX);
     const bool net_requested = net_setting && (flags & (1u << net_setting));
-    const bool shared_budget = denoise_enabled && net_requested;
-    const bool net_denoising = net_requested && rf_denoise_start(RF_DENOISE_NET_TX, shared_budget);
-    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX, shared_budget);
+    const rf_denoise_route_t net_route = bridge_denoise_route(net_setting);
+    const bool net_denoising = net_requested && rf_denoise_start(net_route);
+    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX);
     const bool split = network && to_rf && (denoising || net_denoising);
     eq6_t rf_eq;
     tx_history_t rf_history;
@@ -2067,7 +2065,7 @@ static void talk_task(void *arg)
         if (split) { memcpy(rf_pcm, buf, got * sizeof(*buf)); }
         if (net_denoising) {
             tx.peak = 0;
-            if (!rf_denoise_push(RF_DENOISE_NET_TX, buf, got, talk_network_emit, &tx)) {
+            if (!rf_denoise_push(net_route, buf, got, talk_network_emit, &tx)) {
                 ptt_released = true;
                 break;
             }
@@ -2141,8 +2139,8 @@ static void talk_task(void *arg)
      * Runs before s_task_running is cleared: voice_stop() only releases the
      * PTT once this task has exited, and in local mode the DAC is still ours.
      */
-    if (net_denoising) { (void)rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx); }
-    if (net_requested) { rf_denoise_stop(RF_DENOISE_NET_TX); }
+    if (net_denoising) { (void)rf_denoise_finish(net_route, talk_network_emit, &tx); }
+    if (net_requested) { rf_denoise_stop(net_route); }
     const bool drained = captured_for_denoise &&
         talk_denoise_drain(generation, buf, dac_eq, dac_history);
     if (captured_for_denoise && !drained) { ptt_release(PTT_OWNER_TALK, generation); }
