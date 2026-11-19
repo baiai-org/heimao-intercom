@@ -133,6 +133,7 @@ import java.util.Date
     }
     Section("均衡器") {
         Equalizer(manager,p,s)
+        DenoiseEditor(manager,p,s)
     }
     Section("尾音") {
         val tails=listOf("关闭","单音 Beep","业余无线电 K-CHOO","宝峰 ROGER","摩托罗拉 MDC-1200","Icom IDAS *","Icom IDAS #","泉盛 UV-K5 双音","自定义音频")

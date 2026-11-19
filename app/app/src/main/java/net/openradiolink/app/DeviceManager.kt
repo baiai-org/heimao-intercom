@@ -164,10 +164,10 @@ class DeviceManager(private val context: Context) {
             view.value=SessionView();context.stopService(Intent(context,SessionService::class.java))
         }
     }
-    fun action(id: String,block: suspend BoardSession.()->Unit) {
-        val session=slot.current?.takeIf { it.profile.id==id } ?: return
-        if(busy())return
-        session.perform(block)
+    fun action(id: String,block: suspend BoardSession.()->Unit): Job? {
+        val session=slot.current?.takeIf { it.profile.id==id } ?: return null
+        if(busy())return null
+        return session.perform(block)
     }
     fun pttDown(id: String) { slot.current?.takeIf{it.profile.id==id && !view.value.maintenance}?.beginPress() }
     fun pttUp(id: String) { slot.current?.takeIf{it.profile.id==id}?.cancelPress() }
