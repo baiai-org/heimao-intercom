@@ -43,6 +43,9 @@ extern "C" {
 /* One network packet carries one Opus frame: 20 ms at the 16 kHz stream rate. */
 #define AUDIO_PKT_MS           20
 #define AUDIO_PKT_SAMPLES      (AUDIO_SAMPLE_RATE_HZ * AUDIO_PKT_MS / 1000)
+/* Samples that can already have been accepted by the DAC driver. */
+#define AUDIO_I2S_BUFFER_MS    48
+#define AUDIO_I2S_BUFFER_SAMPLES (AUDIO_SAMPLE_RATE_HZ * AUDIO_I2S_BUFFER_MS / 1000)
 /* 256 fs = 3.072 MHz at 12 kHz, which is the ES8311's preferred MCLK ratio. */
 #define AUDIO_MCLK_MULTIPLE    256
 
@@ -60,6 +63,8 @@ esp_err_t audio_i2s_set_enabled(bool on);
 
 /* Write `count` mono 16-bit frames to the codec's DAC (blocking). */
 esp_err_t audio_i2s_write(const int16_t *samples, size_t count);
+/* Short enqueue deadline for audio that is already being released. */
+esp_err_t audio_i2s_write_until(const int16_t *samples, size_t count, int64_t deadline_us);
 
 typedef struct {
     uint64_t requested_frames, written_frames, dma_frames, dma_callbacks;

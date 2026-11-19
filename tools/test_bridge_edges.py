@@ -97,6 +97,7 @@ static sa818_cfg_t current;
 static int channel_count = 1;
 static bool storage_fail;
 static uint8_t denoise_stored;
+static uint8_t local_denoise_stored;
 static bool protect_during_finish;
 static size_t queued_samples;
 void rx_guard_init(void) {}
@@ -120,13 +121,15 @@ esp_err_t nvs_open(const char *ns, int rw, nvs_handle_t *h) {
 esp_err_t nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *v) {
     (void)h;
     *v = strcmp(key, "brchan") == 0 ? 1 :
-        strcmp(key, "rfdenoise1") == 0 ? denoise_stored : 0;
+        strcmp(key, "rfdenoise1") == 0 ? denoise_stored :
+        strcmp(key, "auddn_local1") == 0 ? local_denoise_stored : 0;
     return ESP_OK;
 }
 esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t v) {
     (void)h;
     if (storage_fail) { return ESP_ERR_INVALID_STATE; }
     if (strcmp(key, "rfdenoise1") == 0) { denoise_stored = v; }
+    if (strcmp(key, "auddn_local1") == 0) { local_denoise_stored = v; }
     return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
@@ -150,20 +153,26 @@ esp_err_t sa818_cfg_update(const sa818_cfg_t *cfg, char *log, size_t n) {
 esp_err_t sa818_cfg_load(sa818_cfg_t *cfg) { *cfg = current; return ESP_OK; }
 int netcom_mode(void) { return mode; }
 uint16_t netcom_room(void) { return 1; }
-void rf_denoise_prepare(void) {}
-void rf_denoise_start(void) { assert(!*s_rx_tx_mux); queued_samples = 0; }
-bool rf_denoise_push(const int16_t *p, size_t n, rf_denoise_emit_t emit, void *ctx) {
+void rf_denoise_prepare(rf_denoise_route_t route) { assert(route < RF_DENOISE_ROUTE_COUNT); }
+bool rf_denoise_start(rf_denoise_route_t route) {
+    assert(route == RF_DENOISE_BRIDGE && !*s_rx_tx_mux);
+    queued_samples = 0;
+    return true;
+}
+bool rf_denoise_push(rf_denoise_route_t route, const int16_t *p, size_t n, rf_denoise_emit_t emit, void *ctx) {
     (void)p; (void)emit; (void)ctx;
-    assert(!*s_rx_tx_mux);
+    assert(route == RF_DENOISE_BRIDGE && !*s_rx_tx_mux);
     queued_samples += n;
     return true;
 }
-bool rf_denoise_finish(rf_denoise_emit_t emit, void *ctx) {
-    assert(!*s_rx_tx_mux);
+bool rf_denoise_finish(rf_denoise_route_t route, rf_denoise_emit_t emit, void *ctx) {
+    assert(route == RF_DENOISE_BRIDGE && !*s_rx_tx_mux);
     if (protect_during_finish) inhibited = RX_GUARD_OUT_NET;
     return !queued_samples || emit(pcm, queued_samples, ctx);
 }
-void rf_denoise_stats(rf_denoise_stats_t *stats) { *stats = (rf_denoise_stats_t){0}; }
+void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *stats) {
+    (void)route; *stats = (rf_denoise_stats_t){0};
+}
 bool netcom_engine_running(void) { return engine_up; }
 void netcom_tx_sample(const int16_t *p, size_t n, bool ptt) {
     assert(ptt && ((n == 5 && memcmp(p, pcm, sizeof(pcm)) == 0) ||
@@ -316,6 +325,18 @@ int main(void) {
     tap(true, true);
     bridge_rx_room_change(false);
     assert(event_n == at + 1 && events[at] == 'E' && !s_rx.open);
+    assert(!bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
+    assert(!bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    assert(bridge_denoise_set(DENOISE_SETTING_SPEAKER, true, false) == ESP_OK);
+    assert(bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
+    assert(!bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    assert(bridge_denoise_set(DENOISE_SETTING_HANDSET_TX, true, false) == ESP_OK);
+    assert(denoise_stored == 2 && local_denoise_stored == 24);
+    assert(bridge_denoise_set(DENOISE_SETTING_SPEAKER, false, true) == ESP_OK);
+    bridge_init();
+    assert(bridge_denoise_enabled(1) && !bridge_denoise_enabled(2));
+    assert(!bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
+    assert(bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
     puts("PASS: RX inhibit drops PCM without a synthetic tail; normal tail preserved; squelch edge, repeated close, empty block, capture stop, preview, "
          "half-duplex, disable race, mode switch, RF profile preservation; common channel application, "
          "same-channel retune, profile matching, bridge follow/preselection, busy and storage failure; "

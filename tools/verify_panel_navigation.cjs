@@ -15,8 +15,10 @@ const denied=[];let failPolicySave=false;
 status.np2p={access_version:1,access_ready:true,denied_count:0,denied_limit:64,pub:'192.0.2.10',port:7821,nat:'not-port-preserving',stun_age_s:14,rtt_ms:51,hub:false,peer_limit:16,peer_count:16,
  peers:Array.from({length:16},(_,i)=>({name:'p'+i,ip:i<8?'192.0.2.'+(i+20):'2001:db8::'+i,port:54321+i,state:'linked',rtt_ms:30,rx:100,tx:100,drop:0}))};
 let rejectChannel=false,refuseStop=false,stops=0;
-let failDenoiseSave=false, denoiseWrites=0;
-const denoise={ok:true,p2p:false,mqtt:false,active_mode:0,state:0,frames:0,max_us:0,overruns:0};
+let failDenoiseSave=false, denoiseWrites=0, failDenoiseRead=false, holdDenoiseRead=null;
+const idleDenoise={state:0,frames:0,max_us:0,overruns:0};
+const denoise={ok:true,p2p:false,mqtt:false,speaker:false,handset:false,active_mode:0,...idleDenoise,
+ speaker_stats:{...idleDenoise},handset_stats:{...idleDenoise}};
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
 (async()=>{
@@ -40,12 +42,16 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
     if(route.request().method()==='POST'){
      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
      const {mode,enabled,expected}=route.request().postDataJSON();
-     const key=mode===1?'p2p':'mqtt';
+     const key=['','p2p','mqtt','speaker','handset'][mode];
      assert.equal(expected,denoise[key]);denoiseWrites++;
      if(failDenoiseSave)return route.fulfill({status:503,json:{ok:false}});
      denoise[key]=enabled;denoise.state=denoise.p2p||denoise.mqtt?1:0;
     }
-    json={...denoise,device_id:identity.device_id};
+    json={...denoise,mode:status.intercom.mode,rf_tx:!!status.rf_tx,bridge_active:!!status.bridge.active,device_id:identity.device_id};
+    if(route.request().method()==='GET'){
+     if(failDenoiseRead)return route.fulfill({status:503,json:{ok:false}});
+     if(holdDenoiseRead)await holdDenoiseRead;
+    }
    }
    else if(p==='/api/np2p/denied')json={ready:true,count:denied.length,limit:64,entries:denied};
    else if(p==='/api/radio')json=radio;
@@ -125,24 +131,57 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    assert.equal(await page.locator('#brT1').isVisible(),mode===1);assert.equal(await page.locator('#brT2').isVisible(),mode===2);}
   await page.locator('[data-page=audio]').click();await page.getByRole('button',{name:'尾音',exact:true}).click();assert(await page.locator('#ixTailFile').count());
   await page.getByRole('button',{name:'均衡器',exact:true}).click();assert(await page.locator('#eqReset').isVisible());
-  await page.getByRole('button',{name:'降噪',exact:true}).click();
+  assert(await page.locator('#eqReset').evaluate(el=>el.closest('.card').contains(document.getElementById('rfDenoiseCard'))));
   const denoiseP2P=page.locator('#rfDenoiseP2P'),denoiseMQTT=page.locator('#rfDenoiseMqtt');
+  const speaker=page.locator('#rfDenoiseSpeaker'),handsetTx=page.locator('#rfDenoiseHandset');
   await page.waitForFunction(()=>document.querySelector('#rfDenoiseP2P').getAttribute('aria-pressed')==='false');
-  assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
+  assert(!await denoiseMQTT.isVisible());
+  await page.evaluate(()=>{window.dnToggles=0;new MutationObserver(list=>{
+   window.dnToggles+=list.length;
+  }).observe(document.querySelector('#rfDenoiseP2P'),{attributes:true,attributeFilter:['disabled']});});
+  let finishOldGet;
+  holdDenoiseRead=new Promise(resolve=>{finishOldGet=resolve;});
+  await page.waitForRequest(req=>req.url().endsWith('/api/rf_denoise')&&req.method()==='GET');
+  await denoiseP2P.focus();
+  assert(!await denoiseP2P.isDisabled());
+  assert.equal(await denoiseP2P.evaluate(el=>getComputedStyle(el).opacity),'1');
+  assert(await denoiseP2P.evaluate(el=>document.activeElement===el));
   await denoiseP2P.click();
   await page.waitForFunction(()=>document.querySelector('#rfDenoiseP2P').getAttribute('aria-pressed')==='true');
-  assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
-  failDenoiseSave=true;await denoiseMQTT.click();
-  await page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('未确认保存'));
-  assert(await denoiseMQTT.isDisabled());assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
-  failDenoiseSave=false;await page.locator('#rfDenoiseRead').click();await denoiseMQTT.click();
+  holdDenoiseRead=null;finishOldGet();
+  await page.waitForTimeout(150);
+  assert.equal(await denoiseP2P.getAttribute('aria-pressed'),'true');
+  assert.equal(await page.evaluate(()=>window.dnToggles),0);
+  failDenoiseSave=true;
+  status.intercom.mode=2;
+  await denoiseMQTT.waitFor({state:'visible'});
+  await denoiseMQTT.click();
+  await page.waitForFunction(()=>document.querySelector('[data-dn-key=mqtt] small').textContent.includes('保存未确认'));
+  assert(!await denoiseMQTT.isDisabled());assert.equal(await denoiseMQTT.getAttribute('aria-pressed'),'false');
+  failDenoiseSave=false;await denoiseMQTT.click();
   await page.waitForFunction(()=>document.querySelector('#rfDenoiseMqtt').getAttribute('aria-pressed')==='true');
   assert.equal(denoiseWrites,3);
+  status.intercom.mode=0;
+  await denoiseMQTT.waitFor({state:'hidden'});
+  await speaker.click();
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseSpeaker').getAttribute('aria-pressed')==='true');
+  await page.locator('#eqTabMic').click();
+  assert(await handsetTx.isVisible() && !await speaker.isVisible());
+  assert.equal(await handsetTx.getAttribute('aria-pressed'),'false');
+  await handsetTx.click();
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseHandset').getAttribute('aria-pressed')==='true');
+  failDenoiseRead=true;
+  await page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('暂未更新'));
+  assert.equal(await handsetTx.getAttribute('aria-pressed'),'true');
+  assert(!await handsetTx.isDisabled());
+  failDenoiseRead=false;
   await page.locator('#rfDenoiseCard').screenshot({path:path.join(output,'denoise-desktop.png')});
   await page.setViewportSize({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.locator('#rfDenoiseCard').screenshot({path:path.join(output,'denoise-mobile.png')});
   await page.setViewportSize({width:1440,height:900});
+  status.intercom.mode=1;
+  await page.locator('#eqTabSpk').click();
   await page.locator('[data-page=device]').click();assert(await page.locator('#fpk0').isVisible());assert(await page.locator('#handsetNameInput').isVisible());
   await page.locator('[data-page=talk]').click();
   await page.mouse.move(0,0);assert.equal(await page.locator('[data-page=talk]').getAttribute('aria-current'),'page');

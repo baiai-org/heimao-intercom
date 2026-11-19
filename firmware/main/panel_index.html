@@ -981,6 +981,12 @@ button:hover:not(:disabled) {
 }
 button:active:not(:disabled) { transform: translateY(1px); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
+.eq-denoise { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+.eq-denoise-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 12px; align-items: center; margin: 8px 0; }
+.eq-denoise-row[hidden] { display: none; }
+.eq-denoise-row button { min-width: 66px; min-height: 40px; }
+.eq-denoise-row small { grid-column: 1 / -1; color: var(--dim); }
+.eq-denoise-status { color: var(--dim); font-size: .9em; }
 button.pri {
   background: var(--cyan-dim);
   border-color: rgba(0, 229, 255, 0.42);
@@ -2109,8 +2115,8 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
 
       <div class="eq-tabs">
         <div class="eq-dir-seg">
-          <button type="button" id="eqTabSpk" class="on">喇叭接收输出 (SPK)</button>
-          <button type="button" id="eqTabMic">麦克风发射输入 (MIC)</button>
+          <button type="button" id="eqTabSpk" class="on">接收（SPK）</button>
+          <button type="button" id="eqTabMic">发射（MIC）</button>
         </div>
         <div class="eq-presets">
           <button type="button" data-eqp="voice">人声清晰</button>
@@ -2139,6 +2145,35 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <div class="eq-col"><span class="val" id="eq_mic_presV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_pres" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.2k</span><span class="eq-band-name">临场</span></div>
         <div class="eq-col"><span class="val" id="eq_mic_airV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_air" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.8k</span><span class="eq-band-name">空气</span></div>
       </div>
+      <section class="eq-denoise" id="rfDenoiseCard" aria-label="降噪">
+        <div class="subcard-head">降噪 <small>下一话段生效</small></div>
+        <div id="eqDenoiseRx">
+          <div class="eq-denoise-row" data-dn-key="speaker" data-dn-mode="3">
+            <span>射频接收 → 本机喇叭</span>
+            <button type="button" id="rfDenoiseSpeaker" aria-label="本机喇叭降噪" disabled>关闭</button>
+            <small></small>
+          </div>
+          <div class="eq-denoise-row" data-dn-key="p2p" data-dn-mode="1" hidden>
+            <span>射频接收 → 公网直连转发</span>
+            <button type="button" id="rfDenoiseP2P" aria-label="公网直连转发降噪" disabled>关闭</button>
+            <small></small>
+          </div>
+          <div class="eq-denoise-row" data-dn-key="mqtt" data-dn-mode="2" hidden>
+            <span>射频接收 → MQTT 转发</span>
+            <button type="button" id="rfDenoiseMqtt" aria-label="MQTT 转发降噪" disabled>关闭</button>
+            <small></small>
+          </div>
+        </div>
+        <div id="eqDenoiseTx" hidden>
+          <div class="eq-denoise-row" data-dn-key="handset" data-dn-mode="4">
+            <span>手台麦克风 → 射频</span>
+            <button type="button" id="rfDenoiseHandset" aria-label="手台发射降噪" disabled>关闭</button>
+            <small></small>
+          </div>
+          <p id="eqDenoiseTxInactive" hidden>启用本机射频发射后可调节此项。</p>
+        </div>
+        <div id="rfDenoiseStatus" class="eq-denoise-status" role="status">正在读取降噪设置…</div>
+      </section>
     </div>
 
     <!-- Right: Real-time Event & Telemetry Console -->
@@ -2168,16 +2203,6 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
 
   </section>
 
-  <section class="card" id="rfDenoiseCard" data-mob-sec="audio">
-    <h2>射频接收 → 网络降噪</h2>
-    <p>轻度降噪按网络模式保存，从下一个话段生效。</p>
-    <div class="row">
-      <button type="button" id="rfDenoiseP2P" disabled>公网直连</button>
-      <button type="button" id="rfDenoiseMqtt" disabled>MQTT 中继</button>
-      <button type="button" id="rfDenoiseRead">刷新状态</button>
-    </div>
-    <p id="rfDenoiseStatus" role="status">正在读取降噪设置…</p>
-  </section>
 </main>
 
 <!-- ==================== STICKY MOBILE HANDHELD DOCK ==================== -->
@@ -3111,6 +3136,8 @@ $('eqTabSpk').onclick = () => {
   $('eqTabMic').className = '';
   $('eqBankSpk').style.display = 'grid';
   $('eqBankMic').style.display = 'none';
+  $('eqDenoiseRx').hidden = false;
+  $('eqDenoiseTx').hidden = true;
 };
 $('eqTabMic').onclick = () => {
   activeEqDir = 'mic';
@@ -3118,6 +3145,8 @@ $('eqTabMic').onclick = () => {
   $('eqTabSpk').className = '';
   $('eqBankMic').style.display = 'grid';
   $('eqBankSpk').style.display = 'none';
+  $('eqDenoiseRx').hidden = true;
+  $('eqDenoiseTx').hidden = false;
 };
 
 /* EQ Presets & Immediate Zero Reset */
@@ -4444,7 +4473,6 @@ refresh();
   document.getElementById('npPub').closest('.mode-stage').append(advanced);
   const rf=document.querySelector('[data-mob-sec="rf"]'),ch=document.querySelector('[data-mob-sec="ch"]');move(rf,'radio');move(ch,'radio');
   const audio=document.querySelector('[data-mob-sec="audio"]'),eq=document.getElementById('eqReset').closest('.card');
-  const denoise=document.getElementById('rfDenoiseCard');
   const keys=card('实体按键');const first=document.getElementById('fpk0').closest('.row');keys.append(first.previousElementSibling);
   for(let i=0;i<4;i++)keys.append(document.getElementById('fpk'+i).closest('.row'));pages.device.append(keys);
   const volume=card('手台音量');const vr=document.getElementById('spkVol').closest('.row');volume.append(vr.previousElementSibling,vr);pages.talk.append(volume);
@@ -4452,11 +4480,11 @@ refresh();
   const end=document.getElementById('ixTailInfo').closest('.row');
   while(start){const next=start.nextElementSibling;tail.append(start);if(start===end)break;start=next;}
   audio.querySelector('h2').textContent='音频增益';eq.querySelector('h2').textContent='均衡器';rf.querySelector('h2').textContent='射频参数';ch.querySelector('h2').textContent='预设信道';
-  move(audio,'audio');move(tail,'audio');move(eq,'audio');move(denoise,'audio');
+  move(audio,'audio');move(tail,'audio');move(eq,'audio');
   const maintenance=document.getElementById('log').closest('.card');maintenance.querySelector('h2').textContent='日志、升级与恢复';move(maintenance,'device');
   const link=card('网络管理');link.innerHTML='<h3>网络管理</h3><a href="/setup">打开 Wi-Fi 与网络设置</a>';pages.device.append(link);
   function subnav(page,items){const tabs=document.createElement('div');tabs.className='panel-subnav';pages[page].children[0].after(tabs);items.forEach(([title,el],i)=>{const b=document.createElement('button');b.textContent=title;b.classList.toggle('on',i===0);tabs.append(b);el.hidden=i!==0;b.onclick=()=>{for(const [,node] of items)node.hidden=node!==el;for(const button of tabs.children)button.classList.toggle('on',button===b);};});}
-  subnav('radio',[['射频参数',rf],['预设信道',ch]]);subnav('audio',[['增益',audio],['尾音',tail],['均衡器',eq],['降噪',denoise]]);
+  subnav('radio',[['射频参数',rf],['预设信道',ch]]);subnav('audio',[['增益',audio],['尾音',tail],['均衡器',eq]]);
   // Empty legacy wrappers are hidden only after all existing nodes have been moved.
   old.forEach(el=>el.hidden=true);
   document.querySelector('.mobile-ptt')?.setAttribute('hidden','');

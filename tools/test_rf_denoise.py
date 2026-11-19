@@ -65,12 +65,12 @@ static bool collect(const int16_t *pcm, size_t n, void *ctx) {
 
 static void process(size_t n, size_t chunk) {
     written = 0;
-    rf_denoise_start();
+    (void)rf_denoise_start(RF_DENOISE_BRIDGE);
     for (size_t i = 0; i < n; i += chunk) {
         size_t count = n - i < chunk ? n - i : chunk;
-        assert(rf_denoise_push(input + i, count, collect, NULL));
+        assert(rf_denoise_push(RF_DENOISE_BRIDGE, input + i, count, collect, NULL));
     }
-    assert(rf_denoise_finish(collect, NULL));
+    assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL));
     assert(written == n);
 }
 
@@ -124,13 +124,13 @@ int main(int argc, char **argv) {
     free(arena);
     for (fail_at = 1; fail_at <= 3; ++fail_at) {
         allocation = 0;
-        rf_denoise_prepare();
+        rf_denoise_prepare(RF_DENOISE_BRIDGE);
         assert(live_allocations == 0);
         process(1023, 257);
         assert(!memcmp(input, output, sizeof(*output) * written));
     }
     fail_at = 0;
-    rf_denoise_prepare();
+    rf_denoise_prepare(RF_DENOISE_BRIDGE);
     assert(live_allocations == 3);
     for (size_t n = 0; n <= 641; ++n) {
         process(n, 256);
@@ -153,28 +153,65 @@ int main(int argc, char **argv) {
     slow_at = 0;
 
     written = 0;
-    rf_denoise_start();
-    assert(rf_denoise_push(input, 47, collect, NULL));
+    assert(rf_denoise_start(RF_DENOISE_BRIDGE));
+    assert(rf_denoise_push(RF_DENOISE_BRIDGE, input, 47, collect, NULL));
     cancel = true;
-    assert(!rf_denoise_finish(collect, NULL) && written == 0);
+    assert(!rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == 0);
     cancel = false;
     process(1, 1);
     rf_denoise_stats_t stats;
-    rf_denoise_stats(&stats);
+    rf_denoise_stats(RF_DENOISE_BRIDGE, &stats);
     assert(stats.overruns == 3 && stats.max_us == 3000 && stats.frames > 1000);
     printf("PASS: bounded OOM cleanup, chunk-invariant PCM, short drain, deadline bypass, canceled output, reset (%lu bytes)\n",
            (unsigned long)stats.workspace_bytes);
+    rf_denoise_prepare(RF_DENOISE_SPEAKER);
+    rf_denoise_prepare(RF_DENOISE_HANDSET_TX);
+    assert(live_allocations == 9);
+    for (size_t count = 1; count <= 640; ++count) {
+        process(count, 72);
+        memcpy(reference, output, count * sizeof(*output));
+        int16_t speaker[1024], mic[1024], reverse_reference[640];
+        for (size_t i = 0; i < count; ++i) {
+            speaker[i] = input[i];
+            mic[i] = input[count - i - 1];
+        }
+        assert(rf_denoise_start(RF_DENOISE_SPEAKER));
+        assert(rf_denoise_start(RF_DENOISE_HANDSET_TX));
+        assert(rf_denoise_start(RF_DENOISE_BRIDGE)); written = 0;
+        for (size_t i = 0; i < count; ) {
+            size_t n = count - i < 257 ? count - i : 257;
+            assert(rf_denoise_push(RF_DENOISE_BRIDGE, mic + i, n, collect, NULL));
+            assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, speaker + i, n));
+            assert(rf_denoise_play_block(RF_DENOISE_HANDSET_TX, mic + i, n));
+            i += n;
+        }
+        assert(rf_denoise_finish(RF_DENOISE_BRIDGE, collect, NULL) && written == count);
+        memcpy(reverse_reference, output, count * sizeof(*output));
+        assert(rf_denoise_play_finish(RF_DENOISE_SPEAKER));
+        assert(rf_denoise_play_finish(RF_DENOISE_HANDSET_TX));
+        assert(rf_denoise_play_pending(RF_DENOISE_SPEAKER) == 320);
+        assert(rf_denoise_play_take(RF_DENOISE_SPEAKER, speaker + count, 320) == 320);
+        assert(rf_denoise_play_take(RF_DENOISE_HANDSET_TX, mic + count, 320) == 320);
+        assert(!memcmp(speaker, mic, 320 * sizeof(*mic)));
+        for (size_t i = 0; i < 320; ++i) { assert(!speaker[i]); }
+        assert(!memcmp(speaker + 320, reference, count * sizeof(*speaker)));
+        assert(!memcmp(mic + 320, reverse_reference, count * sizeof(*mic)));
+        rf_denoise_stop(RF_DENOISE_SPEAKER);
+        assert(!rf_denoise_play_pending(RF_DENOISE_SPEAKER));
+        assert(!rf_denoise_play_take(RF_DENOISE_SPEAKER, speaker, 320));
+    }
+    puts("PASS: three independent live streams, fixed 20ms DAC lead, exact short/long drains and cancel");
     return 0;
 }
 '''
 
 
-def compile_executable(directory):
+def compile_executable(directory, harness_source=HARNESS):
     (directory / 'esp_heap_caps.h').write_text(HEAP_STUB, encoding='utf-8')
     (directory / 'esp_timer.h').write_text('#include <stdint.h>\nint64_t esp_timer_get_time(void);\n',
                                            encoding='utf-8')
     harness = directory / 'harness.c'
-    harness.write_text(HARNESS, encoding='utf-8')
+    harness.write_text(harness_source, encoding='utf-8')
     executable = directory / 'rf_denoise_test.exe'
     upstream = SPEEX / 'upstream/libspeexdsp'
     sources = ['preprocess.c', 'fftwrap.c', 'filterbank.c', 'kiss_fft.c', 'kiss_fftr.c']

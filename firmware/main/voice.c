@@ -1075,6 +1075,82 @@ static void rf_forward_block(const int16_t *pcm, size_t n, bool rf_audio,
     }
 }
 
+typedef struct {
+    bool enabled;
+    bool started;
+    bool active;
+    bool finished;
+    uint8_t mode;
+    unsigned profile_revision;
+    size_t dma_left;
+    int64_t close_us;
+} speaker_denoise_t;
+
+/* Keep the amplifier on only long enough to play already admitted samples.
+ * COS itself and all other outputs still observe their original edges. */
+static void speaker_denoise_end(speaker_denoise_t *dn)
+{
+    if (dn->close_us && !s_mod_sq_open && !s_preview_amp && !s_bridge_inj_amp) {
+        board_amp_enable(false);
+        s_amp_settle = AMP_SETTLE_SAMPLES;
+    }
+    if (dn->started) { rf_denoise_stop(RF_DENOISE_SPEAKER); }
+    *dn = (speaker_denoise_t){0};
+}
+
+static void speaker_denoise_cos_closed(speaker_denoise_t *dn)
+{
+    if (dn->active) {
+        dn->close_us = esp_timer_get_time() + 100000;
+        return;
+    }
+    speaker_denoise_end(dn);
+    board_amp_enable(false);
+    s_amp_settle = AMP_SETTLE_SAMPLES;
+}
+
+static bool speaker_denoise_route(const speaker_denoise_t *dn)
+{
+    sa818_cfg_status_t status;
+    sa818_cfg_status(&status);
+    return status.ready && status.applied_revision == dn->profile_revision &&
+           netcom_mode() == dn->mode && ptt_owner() == PTT_OWNER_NONE &&
+           !(rx_guard_blocked() & RX_GUARD_OUT_SPK);
+}
+
+static void speaker_denoise_render(speaker_denoise_t *dn, int16_t *pcm, size_t n, bool eligible)
+{
+    if (!dn->enabled) { return; }
+    if (!eligible || !speaker_denoise_route(dn) ||
+        (dn->close_us && esp_timer_get_time() >= dn->close_us)) {
+        if (dn->started || !s_mod_sq_open) { speaker_denoise_end(dn); }
+        return;
+    }
+    if (dn->close_us) {
+        if (!dn->finished) {
+            dn->finished = rf_denoise_play_finish(RF_DENOISE_SPEAKER);
+            if (!dn->finished) { speaker_denoise_end(dn); return; }
+        }
+        const size_t count = rf_denoise_play_take(RF_DENOISE_SPEAKER, pcm, n);
+        memset(pcm + count, 0, (n - count) * sizeof(*pcm));
+        if (!rf_denoise_play_pending(RF_DENOISE_SPEAKER)) {
+            if (!dn->dma_left) { dn->dma_left = AUDIO_I2S_BUFFER_SAMPLES; }
+            const size_t zeros = n - count;
+            dn->dma_left -= zeros < dn->dma_left ? zeros : dn->dma_left;
+        }
+    } else if (s_mod_sq_open) {
+        if (!dn->started) {
+            dn->active = rf_denoise_start(RF_DENOISE_SPEAKER);
+            dn->started = true;
+        }
+        if (!dn->active) { return; }
+        if (!rf_denoise_play_block(RF_DENOISE_SPEAKER, pcm, n)) {
+            memset(pcm, 0, n * sizeof(*pcm));
+            speaker_denoise_end(dn);
+        }
+    }
+}
+
 static void monitor_task(void *arg)
 {
     (void)arg;
@@ -1084,6 +1160,8 @@ static void monitor_task(void *arg)
     unsigned win_blocks = 0;
     int decim = 0;
     bool diagnostic_previous = false;
+    speaker_denoise_t denoise = {0};
+    _Static_assert(OUT_MAX <= RF_DENOISE_MAX_BLOCK, "RF capture exceeds DAC denoise queue");
 
     if (adc_dma_start() != ESP_OK) {
         s_adc_error = true;
@@ -1098,6 +1176,7 @@ static void monitor_task(void *arg)
         speaker_diag_tick();
         if (speaker_diag_output_active()) {
             if (!diagnostic_previous) {
+                speaker_denoise_end(&denoise);
                 bridge_rx_end();
                 sdr_rx_push(NULL, 0, false);
             }
@@ -1137,6 +1216,9 @@ static void monitor_task(void *arg)
          */
         esp_err_t err = adc_continuous_read(s_adc_dma, raw, ADC_READ_BYTES, &got, 20);
         if (err != ESP_OK) {
+            if (denoise.close_us && esp_timer_get_time() >= denoise.close_us) {
+                speaker_denoise_end(&denoise);
+            }
             ++s_stats.underruns;
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
@@ -1207,6 +1289,7 @@ static void monitor_task(void *arg)
          * it.  Skipped during the output-chain noise test, where the
          * amplifier is pinned on by the test itself.
          */
+        const bool was_open = s_mod_sq_open;
         if (!s_amp_noise_test) {
             const uint32_t blk_raw_mean = (n > 0) ? (blk_raw_sum / (uint32_t)n) : 0;
             s_bias_raw = (int)blk_raw_mean;
@@ -1247,8 +1330,12 @@ static void monitor_task(void *arg)
                     ptt_trace_note(want ? PTT_TRACE_COS_ON : PTT_TRACE_COS_OFF,
                                    (unsigned)netcom_mode(), (uint32_t)s_sq_gpio, 0);
                     if (!want) { sa818_cfg_arm_refresh(); }   /* an over just ended */
-                    board_amp_enable(want);
-                    s_amp_settle = AMP_SETTLE_SAMPLES;
+                    if (want) {
+                        board_amp_enable(true);
+                        s_amp_settle = AMP_SETTLE_SAMPLES;
+                    } else {
+                        speaker_denoise_cos_closed(&denoise);
+                    }
                     ESP_LOGI(TAG, "module squelch %s (hardware COS gpio %d)",
                              want ? "OPEN" : "closed", s_sq_gpio);
                 }
@@ -1292,11 +1379,20 @@ static void monitor_task(void *arg)
                 s_mod_sq_open = false;
                 s_mod_sq_on_run = 0;
                 s_sq_quiet_ms = 0;
-                board_amp_enable(false);
-                s_amp_settle = AMP_SETTLE_SAMPLES;   /* hide the bias step down */
+                speaker_denoise_cos_closed(&denoise);
                 ESP_LOGI(TAG, "module squelch closed -- amplifier off");
             }
             }   /* end software-inference path */
+        }
+        if (s_mod_sq_open && !was_open) {
+            speaker_denoise_end(&denoise);
+            denoise.enabled = bridge_denoise_enabled(DENOISE_SETTING_SPEAKER);
+            if (denoise.enabled) {
+                sa818_cfg_status_t status;
+                sa818_cfg_status(&status);
+                denoise.mode = netcom_mode();
+                denoise.profile_revision = status.applied_revision;
+            }
         }
 
         /* Fixed panel gain.  Saturation is only the int16 representation
@@ -1561,11 +1657,18 @@ static void monitor_task(void *arg)
              */
             int16_t diag_common[OUT_MAX];
             memcpy(diag_common, out, (size_t)m * sizeof(int16_t));
+            const bool speaker_guard = (rx_blocked & RX_GUARD_OUT_SPK) != 0;
+            speaker_denoise_render(&denoise, out, (size_t)m,
+                rf_audio && !speaker_settling && !speaker_guard && !s_amp_noise_test && s_ab_gate_ms <= 0);
             if (!ptt_bridge_keyed()) {
                 voice_speaker_apply(out, (size_t)m);
             }
             if (rf_audio && (speaker_settling || (rx_blocked & RX_GUARD_OUT_SPK))) {
                 memset(out, 0, (size_t)m * sizeof(int16_t));
+            }
+            if (denoise.active && !speaker_denoise_route(&denoise)) {
+                memset(out, 0, (size_t)m * sizeof(int16_t));
+                speaker_denoise_end(&denoise);
             }
             const bool diag_receive = s_mod_sq_open && !previewing &&
                 !injected && !sdr_tailing && ptt_owner() == PTT_OWNER_NONE;
@@ -1574,7 +1677,13 @@ static void monitor_task(void *arg)
                 (uint32_t)(esp_timer_get_time() - block_start));
 
             const int64_t write_start = esp_timer_get_time();
-            const esp_err_t write_err = audio_i2s_write(out, (size_t)m);
+            const esp_err_t write_err = denoise.close_us ?
+                audio_i2s_write_until(out, (size_t)m, denoise.close_us) : audio_i2s_write(out, (size_t)m);
+            if ((denoise.close_us && denoise.finished && !denoise.dma_left &&
+                 !rf_denoise_play_pending(RF_DENOISE_SPEAKER)) ||
+                (write_err != ESP_OK && denoise.active)) {
+                speaker_denoise_end(&denoise);
+            }
             voice_bridge_network_written();
             if (write_err == ESP_OK) {
                 ++s_stats.blocks;
@@ -1651,6 +1760,7 @@ static void monitor_task(void *arg)
             win_blocks = 0;
         }
     }
+    speaker_denoise_end(&denoise);
     speaker_diag_monitor_end();
     audio_i2s_diag_receive(false);
     /* Capture can stop without a final closed-squelch block (e.g. TALK takes
@@ -1752,9 +1862,13 @@ static int tx_gain_apply(int16_t *buf, size_t n) { return gain_mul(buf, n, s_tx_
  * to the audio on its way to the radio.  RBJ high shelf, fs = 8 kHz.
  */
 static bool s_tx_preemph = true;
-static float s_lo_z1, s_lo_z2, s_hi_z1, s_hi_z2;
+typedef struct {
+    float lo_z1, lo_z2, hi_z1, hi_z2;
+    float lim_env;
+} tx_history_t;
+static tx_history_t s_tx_history;
 
-static void tx_preemph(int16_t *buf, size_t n)
+static void tx_preemph(int16_t *buf, size_t n, tx_history_t *history)
 {
     if (!buf || n == 0 || !s_tx_preemph) {
         return;
@@ -1762,14 +1876,14 @@ static void tx_preemph(int16_t *buf, size_t n)
     for (size_t i = 0; i < n; ++i) {
         float x = (float)buf[i];
         /* Low shelf 500 Hz, -11 dB: takes the mud out of the transmit voice. */
-        float y = 0.839355f * x + s_lo_z1;
-        s_lo_z1 = -1.340531f * x - (-1.267241f) * y + s_lo_z2;
-        s_lo_z2 = 0.558700f * x - 0.471344f * y;
+        float y = 0.839355f * x + history->lo_z1;
+        history->lo_z1 = -1.340531f * x - (-1.267241f) * y + history->lo_z2;
+        history->lo_z2 = 0.558700f * x - 0.471344f * y;
         /* High shelf 1.8 kHz, +9 dB: the slope a de-emphasising receiver expects. */
         x = y;
-        y = 1.760160f * x + s_hi_z1;
-        s_hi_z1 = -0.841128f * x - 0.118540f * y + s_hi_z2;
-        s_hi_z2 = 0.373566f * x - 0.174058f * y;
+        y = 1.760160f * x + history->hi_z1;
+        history->hi_z1 = -0.841128f * x - 0.118540f * y + history->hi_z2;
+        history->hi_z2 = 0.373566f * x - 0.174058f * y;
         buf[i] = (int16_t)clamp16((int)(y >= 0 ? y + 0.5f : y - 0.5f));
     }
 }
@@ -1783,41 +1897,42 @@ static void tx_preemph(int16_t *buf, size_t n)
  * instantaneous (the envelope jumps to the sample), release is ~50 ms.
  */
 #define TX_LIMIT_CEIL 29204.0f          /* 32767 * 10^(-1/20) */
-static float s_lim_env;
-
-static void tx_limit(int16_t *buf, size_t n)
+static void tx_limit(int16_t *buf, size_t n, tx_history_t *history)
 {
     if (!buf || n == 0) {
         return;
     }
     for (size_t i = 0; i < n; ++i) {
         const float a = buf[i] < 0 ? -(float)buf[i] : (float)buf[i];
-        if (a > s_lim_env) {
-            s_lim_env = a;                       /* instant attack */
+        if (a > history->lim_env) {
+            history->lim_env = a;                       /* instant attack */
         } else {
-            s_lim_env = s_lim_env * 0.9993f + a * 0.0007f;  /* ~50 ms release */
+            history->lim_env = history->lim_env * 0.9993f + a * 0.0007f;
         }
         float g = 1.0f;
-        if (s_lim_env > TX_LIMIT_CEIL) {
-            g = TX_LIMIT_CEIL / s_lim_env;
+        if (history->lim_env > TX_LIMIT_CEIL) {
+            g = TX_LIMIT_CEIL / history->lim_env;
         }
         const float y = (float)buf[i] * g;
         buf[i] = (int16_t)clamp16((int)(y >= 0 ? y + 0.5f : y - 0.5f));
     }
 }
 
-/* Browser PCM uses the same microphone EQ and fixed TX gain as ordinary TALK.
- * The caller may fan this one processed buffer out to network and local RF. */
-int voice_apply_tx_processing(int16_t *buf, size_t n)
+static int talk_shape(int16_t *buf, size_t n, eq6_t *eq, tx_history_t *history)
 {
     if (!buf || n == 0) {
         return 0;
     }
-    eq6_run(&s_eq_mic, buf, n);
-    tx_preemph(buf, n);
+    eq6_run(eq, buf, n);
+    tx_preemph(buf, n, history);
     const int peak = tx_gain_apply(buf, n);
-    tx_limit(buf, n);
+    tx_limit(buf, n, history);
     return peak;
+}
+
+int voice_apply_tx_processing(int16_t *buf, size_t n)
+{
+    return talk_shape(buf, n, &s_eq_mic, &s_tx_history);
 }
 
 /* Phone/browser PCM: same microphone EQ, but the network TX multiplier.
@@ -1829,9 +1944,9 @@ int voice_apply_net_tx_processing(int16_t *buf, size_t n)
         return 0;
     }
     eq6_run(&s_eq_mic, buf, n);
-    tx_preemph(buf, n);
+    tx_preemph(buf, n, &s_tx_history);
     const int peak = gain_mul(buf, n, s_net_tx_gain);
-    tx_limit(buf, n);
+    tx_limit(buf, n, &s_tx_history);
     return peak;
 }
 
@@ -1850,11 +1965,57 @@ static int s_tx_log_blocks;
  * running, the previously granted window expires and the transmitter is
  * released -- the safety property is preserved by construction.
  */
+static bool talk_denoise_owned(uint32_t generation)
+{
+    return ptt_get_state() == PTT_TX && ptt_owned(PTT_OWNER_TALK, generation) &&
+           ptt_rf_keying_enabled() && sa818_cfg_tx_ready();
+}
+
+static bool talk_denoise_drain(uint32_t generation, int16_t *buf, eq6_t *eq, tx_history_t *history)
+{
+    if (!talk_denoise_owned(generation) || !rf_denoise_play_finish(RF_DENOISE_HANDSET_TX)) { return false; }
+    const int64_t deadline = esp_timer_get_time() + 80000;
+    size_t n;
+    while ((n = rf_denoise_play_take(RF_DENOISE_HANDSET_TX, buf, BLOCK_FRAMES)) != 0) {
+        talk_shape(buf, n, eq, history);
+        if (!talk_denoise_owned(generation) || audio_i2s_write_until(buf, n, deadline) != ESP_OK) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void talk_denoise_drain_dac(uint32_t generation, int16_t *buf)
+{
+    memset(buf, 0, BLOCK_FRAMES * sizeof(*buf));
+    const int64_t deadline = esp_timer_get_time() + 80000;
+    for (size_t left = AUDIO_I2S_BUFFER_SAMPLES; left && talk_denoise_owned(generation);) {
+        const size_t n = left < BLOCK_FRAMES ? left : BLOCK_FRAMES;
+        if (audio_i2s_write_until(buf, n, deadline) != ESP_OK) { return; }
+        left -= n;
+    }
+}
+
 static void talk_task(void *arg)
 {
     const uint32_t generation = (uint32_t)(uintptr_t)arg;
     int16_t buf[BLOCK_FRAMES * 2];
     bool ptt_released = false;
+    _Static_assert(BLOCK_FRAMES <= RF_DENOISE_MAX_BLOCK, "mic capture exceeds DAC denoise queue");
+    const bool network = netcom_mode() != NETCOM_MODE_LOCAL;
+    const bool denoise_enabled = (!network || s_rf_also) &&
+        bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX);
+    const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX);
+    const bool split = denoising && network;
+    eq6_t rf_eq;
+    tx_history_t rf_history;
+    if (split) {
+        rf_eq = s_eq_mic;
+        rf_history = s_tx_history;
+    }
+    eq6_t *dac_eq = split ? &rf_eq : &s_eq_mic;
+    tx_history_t *dac_history = split ? &rf_history : &s_tx_history;
+    bool captured_for_denoise = false;
 
     while (!s_stop) {
         size_t got = 0;
@@ -1866,7 +2027,37 @@ static void talk_task(void *arg)
         s_stats.samples += (unsigned)got;
         /* Match the browser TX source to this established TALK path: the
          * operator's microphone EQ, then one fixed TX gain. */
-        const int out_peak = voice_apply_tx_processing(buf, got);
+        int out_peak;
+        if (denoising) {
+            int16_t *rf_pcm = buf + BLOCK_FRAMES;
+            memcpy(rf_pcm, buf, got * sizeof(*buf));
+            if (split) {
+                /* Match the existing network PCM and submit it before the DAC work. */
+                out_peak = voice_apply_tx_processing(buf, got);
+                netcom_tx_sample(buf, got, ptt_get_state() == PTT_TX);
+                if (memcmp(rf_eq.db, s_eq_mic.db, sizeof(rf_eq.db)) != 0) {
+                    rf_eq = s_eq_mic;
+                    eq6_reset_state(&rf_eq);
+                }
+            }
+            if (!talk_denoise_owned(generation) ||
+                !rf_denoise_play_block(RF_DENOISE_HANDSET_TX, rf_pcm, got)) {
+                ptt_release(PTT_OWNER_TALK, generation);
+                ptt_released = true;
+                break;
+            }
+            const int rf_peak = talk_shape(rf_pcm, got, dac_eq, dac_history);
+            if (!split) { out_peak = rf_peak; }
+            if (!talk_denoise_owned(generation) ||
+                audio_i2s_write_until(rf_pcm, got, esp_timer_get_time() + 40000) != ESP_OK) {
+                ptt_release(PTT_OWNER_TALK, generation);
+                ptt_released = true;
+                break;
+            }
+            captured_for_denoise = true;
+        } else {
+            out_peak = voice_apply_tx_processing(buf, got);
+        }
         if (out_peak > s_stats.peak_in) { s_stats.peak_in = out_peak; }
         if (++s_tx_log_blocks >= 62) {
             s_tx_log_blocks = 0;
@@ -1881,11 +2072,11 @@ static void talk_task(void *arg)
              * unless the operator asked for a simultaneous local transmission,
              * in which case we take the DAC over (voice_dac_held_by_talk()).
              */
-            netcom_tx_sample(buf, (size_t)got, ptt_get_state() == PTT_TX);
-            if (s_rf_also) {
+            if (!split) { netcom_tx_sample(buf, (size_t)got, ptt_get_state() == PTT_TX); }
+            if (s_rf_also && !denoising) {
                 (void)audio_i2s_write(buf, got);   /* same audio on air */
             }
-        } else {
+        } else if (!denoising) {
             audio_i2s_write(buf, got);
         }
         ++s_stats.blocks;
@@ -1919,6 +2110,10 @@ static void talk_task(void *arg)
      * Runs before s_task_running is cleared: voice_stop() only releases the
      * PTT once this task has exited, and in local mode the DAC is still ours.
      */
+    const bool drained = captured_for_denoise &&
+        talk_denoise_drain(generation, buf, dac_eq, dac_history);
+    if (captured_for_denoise && !drained) { ptt_release(PTT_OWNER_TALK, generation); }
+    if (denoise_enabled) { rf_denoise_stop(RF_DENOISE_HANDSET_TX); }
     {
         const int tid = tail_get();
         const size_t total = tail_samples(tid);
@@ -1974,6 +2169,7 @@ static void talk_task(void *arg)
              */
         }
     }
+    if (drained) { talk_denoise_drain_dac(generation, buf); }
     /* Every network talk needs an end marker, including TAIL_OFF and a
      * skipped/empty tail. Otherwise peers retain PTT until its timeout. */
     if (netcom_mode() != NETCOM_MODE_LOCAL) {

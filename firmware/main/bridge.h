@@ -71,8 +71,11 @@ void bridge_rx_inhibit(void);
 
 /* Pause the denoised RF stream while changing the active P2P room. */
 void bridge_rx_room_change(bool changing);
-/* Stored independently for P2P and MQTT and latched for each talkspurt. */
+/* Network selectors use their NETCOM_MODE values for r11-95 compatibility. */
+enum { DENOISE_SETTING_SPEAKER = 3, DENOISE_SETTING_HANDSET_TX = 4 };
+/* Stored independently by path and latched for each talkspurt. */
 esp_err_t bridge_denoise_set(uint8_t mode, bool enabled, bool expected);
+bool bridge_denoise_enabled(uint8_t setting);
 void bridge_denoise_status(uint8_t *flags, uint8_t *active_mode, rf_denoise_stats_t *stats);
 
 /* Read-only stream-edge diagnostics; timestamps are local uptime in ms. */

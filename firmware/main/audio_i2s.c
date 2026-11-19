@@ -133,10 +133,9 @@ esp_err_t audio_i2s_start_clock_only(void)
      * shrank every time the rate went up, eating the very margin the comment
      * above argues for.
      */
-#define I2S_RING_MS     48
 #define I2S_DESC_NUM    6
     chan_cfg.dma_desc_num  = I2S_DESC_NUM;
-    chan_cfg.dma_frame_num = (AUDIO_SAMPLE_RATE_HZ * I2S_RING_MS / 1000) / I2S_DESC_NUM;
+    chan_cfg.dma_frame_num = AUDIO_I2S_BUFFER_SAMPLES / I2S_DESC_NUM;
 
     /* Duplex: the RX side shares the TX clock domain. */
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_tx, &s_rx);
@@ -258,7 +257,14 @@ esp_err_t audio_i2s_set_enabled(bool on)
  */
 #define I2S_FRAME_CHUNK 256
 
-esp_err_t audio_i2s_write(const int16_t *samples, size_t count)
+static uint32_t dac_remaining_ms(int64_t deadline_us)
+{
+    if (!deadline_us) { return 1000; }
+    const int64_t remaining = deadline_us - esp_timer_get_time();
+    return remaining > 0 ? (uint32_t)(remaining / 1000) : 0;
+}
+
+esp_err_t audio_i2s_write_until(const int16_t *samples, size_t count, int64_t deadline_us)
 {
     if (!s_tx || !s_running || !s_write_lock) {
         return ESP_ERR_INVALID_STATE;
@@ -284,19 +290,23 @@ esp_err_t audio_i2s_write(const int16_t *samples, size_t count)
     s_last_write_start = start;
     portEXIT_CRITICAL(&s_diag_mux);
     /* Serialize before filling the shared stereo conversion array. */
-    xSemaphoreTake(s_write_lock, portMAX_DELAY);
+    const bool locked = xSemaphoreTake(s_write_lock, deadline_us ?
+        pdMS_TO_TICKS(dac_remaining_ms(deadline_us)) : portMAX_DELAY) == pdTRUE;
     static int16_t frames[I2S_FRAME_CHUNK * 2];
-    esp_err_t err = ESP_OK;
+    esp_err_t err = locked ? ESP_OK : ESP_ERR_TIMEOUT;
 
-    while (count > 0) {
-        const size_t n = (count > I2S_FRAME_CHUNK) ? I2S_FRAME_CHUNK : count;
+    const size_t chunk = deadline_us ? AUDIO_I2S_BUFFER_SAMPLES / I2S_DESC_NUM : I2S_FRAME_CHUNK;
+    while (err == ESP_OK && count > 0) {
+        const uint32_t timeout_ms = dac_remaining_ms(deadline_us);
+        if (deadline_us && !timeout_ms) { err = ESP_ERR_TIMEOUT; break; }
+        const size_t n = count > chunk ? chunk : count;
         for (size_t i = 0; i < n; ++i) {
             frames[2 * i]     = samples[i];   /* left  */
             frames[2 * i + 1] = samples[i];   /* right */
         }
         size_t written = 0;
         err = i2s_channel_write(s_tx, frames, n * 2 * sizeof(int16_t),
-                                &written, pdMS_TO_TICKS(1000));
+                                &written, deadline_us ? timeout_ms : pdMS_TO_TICKS(1000));
         const size_t expected = n * 2 * sizeof(int16_t);
         portENTER_CRITICAL(&s_diag_mux);
         s_diag.written_frames += written / (2 * sizeof(int16_t));
@@ -309,7 +319,7 @@ esp_err_t audio_i2s_write(const int16_t *samples, size_t count)
         samples += n;
         count   -= n;
     }
-    xSemaphoreGive(s_write_lock);
+    if (locked) { xSemaphoreGive(s_write_lock); }
     const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - start);
     portENTER_CRITICAL(&s_diag_mux);
     --s_writers;
@@ -317,6 +327,11 @@ esp_err_t audio_i2s_write(const int16_t *samples, size_t count)
     if (elapsed > s_diag.write_max_us) { s_diag.write_max_us = elapsed; }
     portEXIT_CRITICAL(&s_diag_mux);
     return err;
+}
+
+esp_err_t audio_i2s_write(const int16_t *samples, size_t count)
+{
+    return audio_i2s_write_until(samples, count, 0);
 }
 
 esp_err_t audio_i2s_read(int16_t *samples, size_t count, size_t *read_out)
