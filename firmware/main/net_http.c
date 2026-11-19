@@ -494,6 +494,14 @@ static void local_denoise_stats(rf_denoise_route_t route, bool enabled, rf_denoi
     }
 }
 
+static bool denoise_number(const cJSON *item, uint32_t max, uint32_t *value)
+{
+    if (!cJSON_IsNumber(item) || !(item->valuedouble >= 0 && item->valuedouble <= max) ||
+        item->valuedouble != item->valueint) { return false; }
+    *value = (uint32_t)item->valueint;
+    return true;
+}
+
 static esp_err_t h_rf_denoise(httpd_req_t *req)
 {
     if (req->method == HTTP_POST) {
@@ -508,13 +516,17 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         const cJSON *mode = cJSON_GetObjectItemCaseSensitive(body, "mode");
         const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(body, "enabled");
         const cJSON *expected = cJSON_GetObjectItemCaseSensitive(body, "expected");
+        const cJSON *mask = cJSON_GetObjectItemCaseSensitive(body, "mask");
+        uint32_t m, bits, before, values;
         esp_err_t err = ESP_ERR_INVALID_ARG;
-        if (cJSON_IsNumber(mode) && (mode->valuedouble == NETCOM_MODE_NETP2P ||
-                mode->valuedouble == NETCOM_MODE_RELAY || mode->valuedouble == DENOISE_SETTING_SPEAKER ||
-                mode->valuedouble == DENOISE_SETTING_HANDSET_TX) &&
-            cJSON_IsBool(enabled) && cJSON_IsBool(expected)) {
-            err = bridge_denoise_set((uint8_t)mode->valuedouble,
-                                     cJSON_IsTrue(enabled), cJSON_IsTrue(expected));
+        if (mask && denoise_number(mode, NETCOM_MODE_MAX, &m) &&
+            denoise_number(mask, DENOISE_CONFIG_MASK, &bits) &&
+            denoise_number(expected, DENOISE_CONFIG_MASK, &before) &&
+            denoise_number(cJSON_GetObjectItemCaseSensitive(body, "values"), DENOISE_CONFIG_MASK, &values)) {
+            err = bridge_denoise_update(m, bits, before, values);
+        } else if (!mask && denoise_number(mode, DENOISE_SETTING_HANDSET_TX, &m) &&
+                   cJSON_IsBool(enabled) && cJSON_IsBool(expected)) {
+            err = bridge_denoise_set(m, cJSON_IsTrue(enabled), cJSON_IsTrue(expected));
         }
         cJSON_Delete(body);
         if (err != ESP_OK) {
@@ -528,29 +540,45 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         }
     }
     rf_denoise_stats_t stats, speaker, handset;
-    uint8_t flags, active_mode;
+    uint32_t flags;
+    uint8_t active_mode;
+    const uint8_t mode = netcom_mode();
     bridge_denoise_status(&flags, &active_mode, &stats);
     const bool speaker_on = (flags & (1u << DENOISE_SETTING_SPEAKER)) != 0;
     const bool handset_on = (flags & (1u << DENOISE_SETTING_HANDSET_TX)) != 0;
     local_denoise_stats(RF_DENOISE_SPEAKER, speaker_on, &speaker);
     local_denoise_stats(RF_DENOISE_HANDSET_TX, handset_on, &handset);
-    char reply[720];
-    snprintf(reply, sizeof(reply),
+    char reply[1600];
+    size_t used = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
-        "\"mode\":%u,\"rf_tx\":%s,\"bridge_active\":%s,\"speaker\":%s,\"handset\":%s,"
+        "\"mode\":%u,\"flags\":%lu,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
+        "\"speaker\":%s,\"handset\":%s,"
         "\"speaker_stats\":{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu},"
-        "\"handset_stats\":{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}}",
+        "\"handset_stats\":{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}",
         device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
         (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
         (unsigned long)stats.overruns, (unsigned long)stats.workspace_bytes,
-        (unsigned)netcom_mode(), netcom_rf_tx() ? "true" : "false", bridge_active() ? "true" : "false",
+        (unsigned)mode, (unsigned long)flags, netcom_rf_tx() ? "true" : "false",
+        bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
         (unsigned)speaker.state, (unsigned long)speaker.frames, (unsigned long)speaker.max_us,
         (unsigned long)speaker.overruns, (unsigned long)speaker.workspace_bytes,
         (unsigned)handset.state, (unsigned long)handset.frames, (unsigned long)handset.max_us,
         (unsigned long)handset.overruns, (unsigned long)handset.workspace_bytes);
+    used += snprintf(reply + used, sizeof(reply) - used, ",\"network_stats\":[");
+    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_TX);
+    for (uint8_t i = 0; first && i < 3; ++i) {
+        const uint8_t setting = first + i;
+        rf_denoise_stats_t path;
+        local_denoise_stats(bridge_denoise_route(setting), (flags & (1u << setting)) != 0, &path);
+        used += snprintf(reply + used, sizeof(reply) - used,
+            "%s{\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu}",
+            i ? "," : "", (unsigned)path.state, (unsigned long)path.frames,
+            (unsigned long)path.max_us, (unsigned long)path.overruns, (unsigned long)path.workspace_bytes);
+    }
+    snprintf(reply + used, sizeof(reply) - used, "]}");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return send_json(req, reply);
 }

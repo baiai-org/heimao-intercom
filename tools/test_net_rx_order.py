@@ -183,9 +183,9 @@ static void begin(int protection){
  rx_guard_context(MODE,false);assert(rx_guard_configure(MODE,protection==700?"1,700,7,1":protection==5000?"1,5000,7,1":"1,10000,7,1")==ESP_OK);
  rx_guard_context(MODE,true);reset_engine();s_rx_ptt=false;s_last_play_ms=0;s_tail_played=false;s_rx_hang_ms=0;
 }
-static void active(void){s_rx_ptt=true;s_rx_ptt_ms=now_ms();bridge_key_update(false);assert(rf_pin);}
+static void active(void){s_rx_ptt=true;s_rx_ptt_ms=now_ms();bridge_key_update(false,false);assert(rf_pin);}
 static void finish_valid(void){
- receive(0,101,false);assert(pull_audio());bridge_key_update(true);assert(!s_rx_ptt);advance(251);bridge_key_update(false);
+ receive(0,101,false);assert(pull_audio());bridge_key_update(true,false);assert(!s_rx_ptt);advance(251);bridge_key_update(false,false);
  assert(!rf_pin && guard().blocked==1);
 }
 int main(void){
@@ -196,49 +196,49 @@ int main(void){
   begin(protection);seed_stream(0,101,100);active();advance(20);finish_valid();
   assert(guard().remaining_ms==(unsigned)protection);unsigned before=late_count();
   advance(10);receive(0,100,true);assert(late_count()==before+1);assert(!s_rx_ptt);
-  unsigned blocked_before=guard().blocked;bridge_key_update(false);
+  unsigned blocked_before=guard().blocked;bridge_key_update(false,false);
   assert(blocked_before==1 && !rf_pin && guard().blocked==1);
   printf("PASS %s late_ON guard_ms=%d rejected/no_rekey\n",ENGINE,protection);
  }
  begin(700);seed_stream(0,110,109);active();receive(0,105,false);
- assert(late_count()==1 && s_rx_ptt);advance(251);bridge_key_update(false);assert(rf_pin);
+ assert(late_count()==1 && s_rx_ptt);advance(251);bridge_key_update(false,false);assert(rf_pin);
  printf("PASS %s late_OFF keeps current PTT\n",ENGINE);
 
  begin(700);seed_stream(0,101,100);active();advance(20);finish_valid();advance(300);
- receive(0,100,true);assert(late_count()==1 && !s_rx_ptt);bridge_key_update(false);assert(!rf_pin);
+ receive(0,100,true);assert(late_count()==1 && !s_rx_ptt);bridge_key_update(false,false);assert(!rf_pin);
  printf("PASS %s old_ON after buffer idle rejected\n",ENGINE);
 
  begin(700);seed_stream(0,101,100);active();advance(20);finish_valid();advance(10);
- receive(0,102,false);receive(0,103,true);bridge_key_update(false);assert(!rf_pin);
+ receive(0,102,false);receive(0,103,true);bridge_key_update(false,false);assert(!rf_pin);
  printf("PASS %s closed epoch rejects newer ON and repeated OFF\n",ENGINE);
 
- begin(700);seed_stream(0,101,100);active();advance(20);receive(1,1,false);bridge_key_update(false);assert(s_rx_ptt && rf_pin);
+ begin(700);seed_stream(0,101,100);active();advance(20);receive(1,1,false);bridge_key_update(false,false);assert(s_rx_ptt && rf_pin);
  printf("PASS %s other sender OFF does not stop selected sender\n",ENGINE);
 
  begin(700);seed_stream(0,101,100);active();advance(20);finish_valid();
- for(int k=0;k<100;k++){advance(20);bridge_key_update(false);assert(!rf_pin);}
+ for(int k=0;k<100;k++){advance(20);bridge_key_update(false,false);assert(!rf_pin);}
  printf("PASS %s ordered end releases once\n",ENGINE);
 
  // New/retired epochs: fast short over drains from its own first frame.
  begin(700);seed_stream(0,101,100);active();advance(20);finish_valid();
- wire_epoch=11;receive(0,102,true);bridge_key_update(false);assert(rf_pin);
+ wire_epoch=11;receive(0,102,true);bridge_key_update(false,false);assert(rf_pin);
  receive(0,103,false);assert(pull_audio());assert(pull_audio());assert(!pull_audio());
- bridge_key_update(true);advance(251);bridge_key_update(false);assert(!rf_pin);
- wire_epoch=10;receive(0,104,true);bridge_key_update(false);assert(!rf_pin);
- wire_epoch=5;receive(0,0,true);bridge_key_update(false);assert(rf_pin);
+ bridge_key_update(true,false);advance(251);bridge_key_update(false,false);assert(!rf_pin);
+ wire_epoch=10;receive(0,104,true);bridge_key_update(false,false);assert(!rf_pin);
+ wire_epoch=5;receive(0,0,true);bridge_key_update(false,false);assert(rf_pin);
  printf("PASS %s new epoch/short over/retired epoch/reboot epoch\n",ENGINE);
 
  // Legacy ordered calls and uint16 wrap remain compatible.
  wire_epoch=0;begin(700);seed_stream(0,65535,65534);active();
  receive(0,65535,true);receive(0,0,false);assert(pull_audio());assert(pull_audio());
- bridge_key_update(true);advance(251);bridge_key_update(false);assert(!rf_pin);
- receive(0,65535,true);bridge_key_update(false);assert(!rf_pin);
+ bridge_key_update(true,false);advance(251);bridge_key_update(false,false);assert(!rf_pin);
+ receive(0,65535,true);bridge_key_update(false,false);assert(!rf_pin);
  printf("PASS %s legacy ordered wrap and late packet\n",ENGINE);
 
  // New talkers cannot be latched by duplicate packets extending the watchdog.
  wire_epoch=10;begin(700);seed_stream(0,101,100);active();
- for(int n=0;n<11;n++){advance(200);receive(0,100,true);bridge_key_update(false);}
- advance(251);bridge_key_update(false);
+ for(int n=0;n<11;n++){advance(200);receive(0,100,true);bridge_key_update(false,false);}
+ advance(251);bridge_key_update(false,false);
  assert(!rf_pin);
  ptt_trace_event_t trace[64];uint32_t trace_sequence;
  size_t trace_count=ptt_trace_snapshot(trace,64,&trace_sequence);bool found_timeout=false;
@@ -247,21 +247,21 @@ int main(void){
  printf("PASS %s duplicates do not extend PTT timeout; diagnostic retains timeout cause after active source clears\n",ENGINE);
 
  // Legacy restart without an OFF: require progress, never one stale packet.
- wire_epoch=0;begin(700);seed_stream(0,1001,1000);active();advance(2501);bridge_key_update(false);
- advance(251);bridge_key_update(false);assert(!rf_pin);
- receive(0,0,true);bridge_key_update(false);assert(!rf_pin);
- advance(20);receive(0,1,true);bridge_key_update(false);assert(!rf_pin);
- advance(20);receive(0,2,true);bridge_key_update(false);assert(rf_pin);
+ wire_epoch=0;begin(700);seed_stream(0,1001,1000);active();advance(2501);bridge_key_update(false,false);
+ advance(251);bridge_key_update(false,false);assert(!rf_pin);
+ receive(0,0,true);bridge_key_update(false,false);assert(!rf_pin);
+ advance(20);receive(0,1,true);bridge_key_update(false,false);assert(!rf_pin);
+ advance(20);receive(0,2,true);bridge_key_update(false,false);assert(rf_pin);
  printf("PASS %s legacy restart requires three progressing frames\n",ENGINE);
 
  // Exercise repeated genuine overs and replay the just-retired over each time.
  for(unsigned round=0;round<1000;round++){
   wire_epoch=(uint16_t)(100+round*2);begin(700);seed_stream(0,101,100);active();advance(20);finish_valid();
   uint16_t old=wire_epoch;wire_epoch++;
-  receive(0,102,true);bridge_key_update(false);assert(rf_pin);
-  receive(0,103,false);assert(pull_audio());assert(pull_audio());bridge_key_update(true);
-  advance(251);bridge_key_update(false);assert(!rf_pin);
-  wire_epoch=old;receive(0,104,true);bridge_key_update(false);assert(!rf_pin);
+  receive(0,102,true);bridge_key_update(false,false);assert(rf_pin);
+  receive(0,103,false);assert(pull_audio());assert(pull_audio());bridge_key_update(true,false);
+  advance(251);bridge_key_update(false,false);assert(!rf_pin);
+  wire_epoch=old;receive(0,104,true);bridge_key_update(false,false);assert(!rf_pin);
  }
  printf("PASS %s 1000 over transitions and retired-over replays\n",ENGINE);
  return 0;

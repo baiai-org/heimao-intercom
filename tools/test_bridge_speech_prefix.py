@@ -42,12 +42,12 @@ static void clip(int frames,int gap){
   if(t%20==0 && delivered<frames){wire_pcm=(uint16_t)(1000+delivered);receive(0,tx_seq++,true);delivered++;}
   else if(t==frames*20){wire_pcm=9000;receive(0,tx_seq++,false);ended=true;}
   if(t%5==0){
-   bridge_key_update(false);
+   bridge_key_update(false,false);
    if(!was_key && rf_pin && first_key<0)first_key=t;
    was_key=rf_pin;
    bool have=false;
    if(t%20==0 && voice_bridge_room()>=320){int16_t pcm[320];have=engine_take(pcm);if(have)voice_bridge_inject(pcm,320);}
-   bridge_key_update(have);
+   bridge_key_update(have,false);
    if(!was_key && rf_pin && first_key<0)first_key=t;
    was_key=rf_pin;
   }
@@ -77,9 +77,9 @@ static void burst(int frames,int end_at){
  for(int t=0;t<5000;t++){
   if(end_at && t==end_at){wire_pcm=9000;receive(0,tx_seq++,false);}
   if(t%5==0){
-   bridge_key_update(false);saw_key|=rf_pin;bool have=false;
+   bridge_key_update(false,false);saw_key|=rf_pin;bool have=false;
    if(t%20==0 && voice_bridge_room()>=320){int16_t pcm[320];have=engine_take(pcm);if(have)voice_bridge_inject(pcm,320);}
-   bridge_key_update(have);
+   bridge_key_update(have,false);
   }
   if(t%16==0){int16_t pcm[256];size_t n=voice_bridge_play(pcm,256);if(n){assert(rf_pin);if(first<0)first=pcm[0];last=pcm[n-1];}voice_bridge_network_written();}
   if(saw_key && !rf_pin && !voice_bridge_level()){assert(first==1000 && last==9000);return;}
@@ -97,19 +97,29 @@ int main(void){
  for(int i=0;i<1000;i++)clip(1+i%3,0);
  printf("PASS %s 1000 consecutive short overs: no residue, no head/tail loss\n",ENGINE);
 
+ // A short over can finish the network jitter buffer before the DSP emits speech.
+ fixture();int16_t delayed=321,filtered[256];
+ bridge_key_update(false,true);assert(rf_pin);advance(300);
+ bridge_key_update(false,true);assert(rf_pin && voice_bridge_network_ready());
+ voice_bridge_inject(&delayed,1);bridge_key_update(true,false);
+ assert(voice_bridge_play(filtered,256)==1 && filtered[0]==321);
+ advance(300);bridge_key_update(false,false);assert(rf_pin);
+ voice_bridge_network_written();bridge_key_update(false,false);
+ advance(251);bridge_key_update(false,false);assert(!rf_pin);
+
  // The final sample and final I2S block both keep the transmitter reserved.
  fixture();int16_t one=777,out[256];voice_bridge_inject(&one,1);
- bridge_key_update(false);assert(rf_pin);advance(300);
+ bridge_key_update(false,false);assert(rf_pin);advance(300);
  assert(voice_bridge_play(out,256)==1 && out[0]==777 && voice_bridge_level()==0);
- assert(voice_bridge_network_pending());advance(300);bridge_key_update(false);assert(rf_pin);
- voice_bridge_network_written();bridge_key_update(false);advance(251);bridge_key_update(false);
+ assert(voice_bridge_network_pending());advance(300);bridge_key_update(false,false);assert(rf_pin);
+ voice_bridge_network_written();bridge_key_update(false,false);advance(251);bridge_key_update(false,false);
  assert(!rf_pin && !voice_bridge_network_pending());
  printf("PASS %s last interpolation sample and I2S completion hold RF\n",ENGINE);
 
  // A stopped consumer gets a bounded drain; stream cancel never erases SDR.
  fixture();int16_t buf[320];for(int i=0;i<320;i++)buf[i]=500;
- voice_bridge_inject(buf,320);bridge_key_update(false);assert(rf_pin);advance(2001);
- bridge_key_update(false);advance(251);bridge_key_update(false);assert(!rf_pin && voice_bridge_level()==0);
+ voice_bridge_inject(buf,320);bridge_key_update(false,false);assert(rf_pin);advance(2001);
+ bridge_key_update(false,false);advance(251);bridge_key_update(false,false);assert(!rf_pin && voice_bridge_level()==0);
  assert(ptt_claim(PTT_OWNER_SDR,55));s_inject_owner=PTT_OWNER_SDR;s_inject_token=55;
  s_bridge_inj_head=320;s_bridge_inj_tail=0;voice_bridge_network_cancel();assert(voice_bridge_level()==320);
  ptt_release(PTT_OWNER_SDR,55);voice_inject_reset();

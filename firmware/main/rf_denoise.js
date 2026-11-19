@@ -1,126 +1,218 @@
 (() => {
   'use strict';
   const card = document.getElementById('rfDenoiseCard');
-  const connection = document.getElementById('rfDenoiseStatus');
-  const inactiveTx = document.getElementById('eqDenoiseTxInactive');
-  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 原声旁路', '处理超时 · 原声旁路'];
-  const rows = [...card.querySelectorAll('[data-dn-key]')].map(row => ({
-    row, key: row.dataset.dnKey, mode: Number(row.dataset.dnMode),
-    button: row.querySelector('button'), detail: row.querySelector('small')
-  }));
-  const pending = new Set();
-  const errors = new Map();
+  const get = name => card.querySelector('[data-dn="' + name + '"]');
+  const inputs = [...card.querySelectorAll('[data-path]')];
+  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '处理超时 · 暂用原声'];
+  const modes = ['本地模拟', '公网直连', 'MQTT 网络中继'];
+  const pathNames = ['手台发话 → 本机射频', '手台发话 → 网络', '射频来话 → 本机喇叭',
+    '射频来话 → 网络转发', '网络来话 → 本机喇叭', '网络来话 → 模拟桥接'];
+  const drafts = new Map();
+  const messages = new Map();
+  const status = document.getElementById('rfDenoiseStatus');
   let saved;
+  let device;
+  let pending = false;
   let reading = false;
+  let readError = '';
   let epoch = 0;
-  let refreshWhenIdle = false;
+
+  function bitFor(path, mode) {
+    if (path === 'handset') return 1 << 4;
+    if (path === 'speaker') return 1 << 3;
+    if (!mode) return 0;
+    if (path === 'forward') return 1 << mode;
+    const first = mode === 1 ? 5 : 8;
+    return 1 << (first + ['netTx', 'netSpeaker', 'netRf'].indexOf(path));
+  }
+
+  function modeDrafts(mode) {
+    return inputs.map(input => bitFor(input.dataset.path, mode)).filter(bit => drafts.has(bit));
+  }
 
   function text(node, value) {
     if (node.textContent !== value) node.textContent = value;
   }
 
-  function attribute(node, name, value) {
-    if (node.getAttribute(name) !== value) node.setAttribute(name, value);
-  }
-
   function render() {
+    get('form').hidden = !saved;
+    get('retry').hidden = !readError;
+    get('connection').hidden = Boolean(saved && !readError);
+    text(get('connection'), readError || (saved ? '' : '正在读取降噪设置…'));
     if (!saved) return;
-    for (const {row, key, mode, button, detail} of rows) {
-      const network = mode <= 2;
-      const visible = network ? saved.mode === mode : key !== 'handset' || saved.mode === 0 || saved.rf_tx;
-      if (row.hidden === visible) row.hidden = !visible;
-      if (key === 'handset' && inactiveTx.hidden !== visible) inactiveTx.hidden = visible;
-      if (button.disabled) button.disabled = false;
-      const isSaving = pending.has(key);
-      attribute(button, 'aria-busy', String(isSaving));
-      attribute(button, 'aria-pressed', String(saved[key]));
-      if (button.classList.contains('on') !== saved[key]) button.classList.toggle('on', saved[key]);
-      text(button, saved[key] ? '开启' : '关闭');
-      const telemetry = network ? saved : saved[key + '_stats'];
-      const action = isSaving ? '保存中…' : errors.get(key)?.message;
-      if (action) {
-        text(detail, action);
-      } else if (network && saved[key] && !saved.bridge_active) {
-        text(detail, '已开启 · 等待桥接');
-      } else {
-        const isActive = network ? saved.active_mode === mode : telemetry.state >= 2;
-        const state = isActive ? telemetry.state : saved[key] ?
-          (telemetry.state === 3 ? 3 : 1) : 0;
-        const label = (saved[key] && state !== 0 ? '已开启 · ' : '') + (states[state] || '状态未知');
-        text(detail, label + (telemetry.frames ? ' · 处理 ' + telemetry.frames +
-          ' 帧 · 最高 ' + telemetry.max_us + ' μs · 超时 ' + telemetry.overruns : ''));
+    const {mode, flags} = saved;
+    text(get('mode'), modes[mode]);
+    text(get('txLabel'), '发到' + modes[mode]);
+    text(get('forwardLabel'), '转发到' + modes[mode]);
+    get('network').hidden = mode === 0;
+    for (const input of inputs) {
+      const bit = bitFor(input.dataset.path, mode);
+      input.closest('label').hidden = !bit;
+      const value = drafts.get(bit)?.value ?? Boolean(flags & bit);
+      if (input.checked !== value) input.checked = value;
+      if (input.getAttribute('aria-disabled') !== String(pending)) {
+        input.setAttribute('aria-disabled', String(pending));
       }
     }
+    const notes = {
+      rfNote: mode && !saved.rf_tx ? '启用本机射频发射时使用「发到本机射频」。' : '',
+      bridgeNote: mode ? (saved.bridge_keyed ? '桥接发射中 · 使用射频出口。桥接时本机喇叭与射频共用音频。' :
+        saved.bridge_active ? '桥接发射时，两个出口共用射频音频。' :
+        '两项桥接设置等待模拟桥接开启。') : '',
+    };
+    for (const [name, label] of Object.entries(notes)) {
+      get(name).hidden = !label;
+      text(get(name), label);
+    }
+    const stats = [saved.handset_stats, saved.network_stats[0], saved.speaker_stats,
+      saved, saved.network_stats[1], saved.network_stats[2]];
+    const rows = inputs.map((input, index) => {
+      const bit = bitFor(input.dataset.path, mode);
+      if (!bit) return '';
+      const item = stats[index];
+      const enabled = Boolean(flags & bit);
+      const state = !enabled ? 0 : item?.state || 1;
+      return pathNames[index] + ' · ' + (states[state] || states[1]) +
+        (item?.frames ? ' · ' + item.frames + ' 帧 · 最高 ' + item.max_us + ' μs · 超时 ' + item.overruns : '');
+    }).filter(Boolean);
+    const list = get('stats');
+    if (list.dataset.summary !== rows.join('\n')) {
+      list.dataset.summary = rows.join('\n');
+      list.replaceChildren(...rows.map(value => {
+        const li = document.createElement('li'); li.textContent = value; return li;
+      }));
+    }
+    const dirty = modeDrafts(mode).length !== 0;
+    get('save').disabled = pending || !dirty;
+    get('undo').disabled = pending || !dirty;
+    text(status, pending ? '正在确认保存…' :
+      [messages.get(mode), dirty ? '有未保存修改' : ''].filter(Boolean).join(' · '));
   }
 
-  async function fetchStatus(method, body) {
-    const device = (await window.ORLControl.identity).device_id;
+  async function request(body, boundDevice) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
+    const timeout = setTimeout(() => controller.abort(), 4000);
     try {
-      const options = {method, cache: 'no-store', signal: controller.signal};
+      const options = {method: body ? 'POST' : 'GET', cache: 'no-store', signal: controller.signal};
       if (body) {
-        options.headers = {'Content-Type': 'application/json', 'X-ORL-Device': device};
+        options.headers = {'Content-Type': 'application/json', 'X-ORL-Device': boundDevice};
         options.body = JSON.stringify(body);
       }
       const response = await fetch('/api/rf_denoise', options);
+      if (!response.ok) {
+        const error = Error('降噪设置未确认');
+        error.conflict = response.status === 409;
+        throw error;
+      }
       const next = await response.json();
-      if (!response.ok || !next.ok || next.device_id !== device ||
-          !rows.every(({key}) => typeof next[key] === 'boolean') ||
+      const identity = boundDevice || device || window.ORLControl?.device;
+      if (!next.ok || !next.device_id || (identity && next.device_id !== identity)) {
+        throw Error('设备身份已变化，请重新打开面板');
+      }
+      if (!Number.isInteger(next.mode) || !modes[next.mode] || !Number.isInteger(next.flags) ||
+          (next.flags & 0x7fe) !== next.flags || !Array.isArray(next.network_stats) ||
           !next.speaker_stats || !next.handset_stats) throw Error('降噪状态未确认');
       return next;
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timeout);
     }
   }
 
   async function read() {
-    if (reading || pending.size) { refreshWhenIdle = true; return; }
-    refreshWhenIdle = false;
+    if (reading || pending) return;
     reading = true;
     const version = epoch;
     try {
-      const next = await fetchStatus('GET');
-      if (version !== epoch || pending.size) return;
+      const next = await request();
+      if (version !== epoch) return;
+      device = next.device_id;
       saved = next;
-      for (const [key, error] of errors) {
-        if (saved[key] === error.requested) errors.delete(key);
-        else error.message = '保存未确认，当前显示设备回读值';
-      }
-      text(connection, '');
-      render();
-    } catch (e) {
-      if (version === epoch) text(connection, saved ? '状态暂未更新' : '读取降噪设置失败');
+      readError = '';
+    } catch (error) {
+      if (version !== epoch) return;
+      readError = error.message.includes('设备身份') ? error.message :
+        saved ? '状态暂未更新' : '读取降噪设置失败';
     } finally {
       reading = false;
-      if (refreshWhenIdle && !pending.size) void read();
-    }
-  }
-
-  async function save({mode, key}) {
-    if (pending.has(key) || !saved) return;
-    pending.add(key);
-    ++epoch;
-    errors.delete(key);
-    render();
-    const requested = !saved[key];
-    try {
-      const next = await fetchStatus('POST', {mode, expected: saved[key], enabled: requested});
-      saved[key] = next[key];
-      if (next[key + '_stats']) saved[key + '_stats'] = next[key + '_stats'];
-    } catch (e) {
-      errors.set(key, {requested, message: '保存未确认，正在核对设备设置'});
-    } finally {
-      pending.delete(key);
-      ++epoch;
       render();
-      if (!pending.size) void read();
     }
   }
 
-  for (const entry of rows) entry.button.onclick = () => save(entry);
+  async function save() {
+    if (pending || !saved) return;
+    const mode = saved.mode;
+    const bits = modeDrafts(mode);
+    if (!bits.length) return;
+    const body = {mode, mask: 0, expected: 0, values: 0};
+    for (const bit of bits) {
+      const {expected, value} = drafts.get(bit);
+      body.mask |= bit;
+      if (expected) body.expected |= bit;
+      if (value) body.values |= bit;
+    }
+    const boundDevice = device;
+    pending = true;
+    ++epoch;
+    messages.delete(mode);
+    render();
+    let next;
+    let conflict = false;
+    try {
+      next = await request(body, boundDevice);
+    } catch (error) {
+      conflict = error.conflict;
+      try { next = await request(null, boundDevice); } catch (readFailure) { next = null; }
+    }
+    if (next) {
+      saved = next;
+      readError = '';
+    }
+    if (next && (next.flags & body.mask) === body.values) {
+      for (const bit of bits) drafts.delete(bit);
+      messages.set(mode, '已保存，下一话段生效');
+    } else if (next && (conflict || (next.flags & body.mask) !== body.expected)) {
+      const latest = [];
+      for (const bit of bits) {
+        const draft = drafts.get(bit);
+        const expected = Boolean(next.flags & bit);
+        if (draft.expected !== expected) {
+          const index = inputs.findIndex(input => bitFor(input.dataset.path, mode) === bit);
+          latest.push(pathNames[index] + (expected ? '已开启' : '已关闭'));
+          draft.expected = expected;
+        }
+      }
+      messages.set(mode, latest.length ? '设备设置有变化（' + latest.join('、') + '），请核对后再保存' :
+        '设置未保存，请重试');
+    } else {
+      messages.set(mode, '保存未确认，请重试');
+    }
+    pending = false;
+    render();
+  }
+
+  for (const input of inputs) {
+    input.addEventListener('click', event => { if (pending) event.preventDefault(); });
+    input.addEventListener('change', () => {
+      if (!saved || pending) { render(); return; }
+      const bit = bitFor(input.dataset.path, saved.mode);
+      if (!bit) return;
+      const expected = Boolean(saved.flags & bit);
+      if (input.checked === expected) drafts.delete(bit);
+      else drafts.set(bit, {value: input.checked, expected});
+      messages.delete(saved.mode);
+      render();
+    });
+  }
+  get('save').onclick = save;
+  get('retry').onclick = read;
+  get('undo').onclick = () => {
+    if (pending || !saved) return;
+    for (const bit of modeDrafts(saved.mode)) drafts.delete(bit);
+    messages.delete(saved.mode);
+    render();
+  };
   void read();
   setInterval(() => {
-    if (!document.hidden && card.getClientRects().length && !reading && !pending.size) void read();
+    if (!document.hidden && card.getClientRects().length) void read();
   }, 2000);
 })();

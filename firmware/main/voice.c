@@ -1971,6 +1971,27 @@ static bool talk_denoise_owned(uint32_t generation)
            ptt_rf_keying_enabled() && sa818_cfg_tx_ready();
 }
 
+struct talk_network_denoise {
+    uint32_t generation;
+    uint16_t room;
+    uint8_t mode;
+    int peak;
+};
+
+static bool talk_network_emit(const int16_t *pcm, size_t n, void *context)
+{
+    struct talk_network_denoise *tx = context;
+    int16_t shaped[BLOCK_FRAMES];
+    if (n > BLOCK_FRAMES || ptt_get_state() != PTT_TX ||
+        !ptt_owned(PTT_OWNER_TALK, tx->generation) ||
+        tx->mode != netcom_mode() || tx->room != netcom_room()) { return false; }
+    memcpy(shaped, pcm, n * sizeof(*pcm));
+    const int peak = voice_apply_tx_processing(shaped, n);
+    if (peak > tx->peak) { tx->peak = peak; }
+    netcom_tx_sample(shaped, n, true);
+    return true;
+}
+
 static bool talk_denoise_drain(uint32_t generation, int16_t *buf, eq6_t *eq, tx_history_t *history)
 {
     if (!talk_denoise_owned(generation) || !rf_denoise_play_finish(RF_DENOISE_HANDSET_TX)) { return false; }
@@ -2002,11 +2023,18 @@ static void talk_task(void *arg)
     int16_t buf[BLOCK_FRAMES * 2];
     bool ptt_released = false;
     _Static_assert(BLOCK_FRAMES <= RF_DENOISE_MAX_BLOCK, "mic capture exceeds DAC denoise queue");
-    const bool network = netcom_mode() != NETCOM_MODE_LOCAL;
-    const bool denoise_enabled = (!network || s_rf_also) &&
-        bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX);
+    struct talk_network_denoise tx = {
+        .generation = generation, .mode = netcom_mode(), .room = netcom_room(),
+    };
+    const bool network = tx.mode != NETCOM_MODE_LOCAL;
+    const bool to_rf = !network || s_rf_also;
+    const uint32_t flags = bridge_denoise_flags();
+    const bool denoise_enabled = to_rf && (flags & (1u << DENOISE_SETTING_HANDSET_TX));
+    const uint8_t net_setting = bridge_denoise_network_setting(tx.mode, DENOISE_NET_TX);
+    const bool net_requested = net_setting && (flags & (1u << net_setting));
+    const bool net_denoising = net_requested && rf_denoise_start(RF_DENOISE_NET_TX);
     const bool denoising = denoise_enabled && rf_denoise_start(RF_DENOISE_HANDSET_TX);
-    const bool split = denoising && network;
+    const bool split = network && to_rf && (denoising || net_denoising);
     eq6_t rf_eq;
     tx_history_t rf_history;
     if (split) {
@@ -2024,22 +2052,34 @@ static void talk_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
+        if (tx.mode != netcom_mode() || (network && tx.room != netcom_room())) {
+            ptt_released = true;
+            break;
+        }
         s_stats.samples += (unsigned)got;
         /* Match the browser TX source to this established TALK path: the
          * operator's microphone EQ, then one fixed TX gain. */
-        int out_peak;
-        if (denoising) {
-            int16_t *rf_pcm = buf + BLOCK_FRAMES;
-            memcpy(rf_pcm, buf, got * sizeof(*buf));
-            if (split) {
-                /* Match the existing network PCM and submit it before the DAC work. */
-                out_peak = voice_apply_tx_processing(buf, got);
-                netcom_tx_sample(buf, got, ptt_get_state() == PTT_TX);
-                if (memcmp(rf_eq.db, s_eq_mic.db, sizeof(rf_eq.db)) != 0) {
-                    rf_eq = s_eq_mic;
-                    eq6_reset_state(&rf_eq);
-                }
+        int out_peak = 0;
+        int16_t *rf_pcm = split ? buf + BLOCK_FRAMES : buf;
+        if (split) { memcpy(rf_pcm, buf, got * sizeof(*buf)); }
+        if (net_denoising) {
+            tx.peak = 0;
+            if (!rf_denoise_push(RF_DENOISE_NET_TX, buf, got, talk_network_emit, &tx)) {
+                ptt_released = true;
+                break;
             }
+            out_peak = tx.peak;
+        } else if (network || !denoising) {
+            out_peak = voice_apply_tx_processing(buf, got);
+            if (network && netcom_mode() == tx.mode) {
+                netcom_tx_sample(buf, got, ptt_get_state() == PTT_TX);
+            }
+        }
+        if (split && memcmp(rf_eq.db, s_eq_mic.db, sizeof(rf_eq.db)) != 0) {
+            rf_eq = s_eq_mic;
+            eq6_reset_state(&rf_eq);
+        }
+        if (denoising) {
             if (!talk_denoise_owned(generation) ||
                 !rf_denoise_play_block(RF_DENOISE_HANDSET_TX, rf_pcm, got)) {
                 ptt_release(PTT_OWNER_TALK, generation);
@@ -2055,29 +2095,17 @@ static void talk_task(void *arg)
                 break;
             }
             captured_for_denoise = true;
-        } else {
-            out_peak = voice_apply_tx_processing(buf, got);
+        } else if (to_rf && netcom_mode() == tx.mode) {
+            if (split) { (void)talk_shape(rf_pcm, got, dac_eq, dac_history); }
+            if (!net_denoising || talk_denoise_owned(generation)) {
+                (void)audio_i2s_write(rf_pcm, got);
+            }
         }
         if (out_peak > s_stats.peak_in) { s_stats.peak_in = out_peak; }
         if (++s_tx_log_blocks >= 62) {
             s_tx_log_blocks = 0;
             ESP_LOGI(TAG, "TX: gain %.2fx  out peak %5d  (full scale 32767)",
                      (double)s_tx_gain / 16.0, out_peak);
-        }
-        if (netcom_mode() != NETCOM_MODE_LOCAL) {
-            /*
-             * Network modes (P2P/relay): the shaped mic audio goes to the
-             * room over the network.  The engine's playback task owns the DAC
-             * (remote audio or silence), so this task must not write to it --
-             * unless the operator asked for a simultaneous local transmission,
-             * in which case we take the DAC over (voice_dac_held_by_talk()).
-             */
-            if (!split) { netcom_tx_sample(buf, (size_t)got, ptt_get_state() == PTT_TX); }
-            if (s_rf_also && !denoising) {
-                (void)audio_i2s_write(buf, got);   /* same audio on air */
-            }
-        } else if (!denoising) {
-            audio_i2s_write(buf, got);
         }
         ++s_stats.blocks;
 
@@ -2110,6 +2138,8 @@ static void talk_task(void *arg)
      * Runs before s_task_running is cleared: voice_stop() only releases the
      * PTT once this task has exited, and in local mode the DAC is still ours.
      */
+    if (net_denoising) { (void)rf_denoise_finish(RF_DENOISE_NET_TX, talk_network_emit, &tx); }
+    if (net_requested) { rf_denoise_stop(RF_DENOISE_NET_TX); }
     const bool drained = captured_for_denoise &&
         talk_denoise_drain(generation, buf, dac_eq, dac_history);
     if (captured_for_denoise && !drained) { ptt_release(PTT_OWNER_TALK, generation); }
@@ -2122,7 +2152,8 @@ static void talk_task(void *arg)
                 ESP_LOGW(TAG, "tail '%s' selected but empty -- nothing sent",
                          tail_name(tid));
             }
-        } else if (ptt_get_state() != PTT_TX) {
+        } else if (ptt_get_state() != PTT_TX || tx.mode != netcom_mode() ||
+                   (network && tx.room != netcom_room())) {
             /*
              * The radio is already unkeyed (deadline, fault, an external stop):
              * writing the tone now would produce audio nobody transmits and
@@ -2136,7 +2167,6 @@ static void talk_task(void *arg)
             /* Microphone capture is finished; reuse its buffer for the tail
              * instead of retaining another PCM block on the TALK stack. */
             int16_t *tbuf = buf;
-            size_t pos = 0;
             ESP_LOGI(TAG, "tail: %s (%u samples, %ss)", tail_name(tid),
                      (unsigned)total, network ? " network" : " to air");
             /*
@@ -2172,7 +2202,7 @@ static void talk_task(void *arg)
     if (drained) { talk_denoise_drain_dac(generation, buf); }
     /* Every network talk needs an end marker, including TAIL_OFF and a
      * skipped/empty tail. Otherwise peers retain PTT until its timeout. */
-    if (netcom_mode() != NETCOM_MODE_LOCAL) {
+    if (network && netcom_mode() == tx.mode && netcom_room() == tx.room) {
         netcom_tx_end();
     }
     /*
@@ -2727,6 +2757,21 @@ bool voice_bridge_network_pending(void)
     }
     ptt_control_unlock();
     return pending;
+}
+
+void voice_bridge_network_discard(void)
+{
+    ptt_control_lock();
+    if (s_inject_owner == PTT_OWNER_NETWORK) {
+        const bool feeding = s_net_feeding, rf = s_net_rf_required, keyed = s_net_rf_keyed;
+        const int64_t ready = s_net_ready_us;
+        voice_inject_reset();
+        s_net_feeding = feeding;
+        s_net_rf_required = rf;
+        s_net_rf_keyed = keyed;
+        s_net_ready_us = ready;
+    }
+    ptt_control_unlock();
 }
 
 bool voice_bridge_network_ready(void)

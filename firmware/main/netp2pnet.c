@@ -84,6 +84,7 @@
 #include "audio_i2s.h"
 #include "board_hw.h"
 #include "bridge.h"
+#include "net_audio_denoise.h"
 #include "netcom.h"
 #include "radio_led.h"
 #include "opus_link.h"
@@ -1760,7 +1761,7 @@ static rt_peer_t *select_active_peer(void)
 
 /* PTT and buffered playback control the carrier; PCM amplitude never does. */
 static int64_t s_last_play_ms;
-static void bridge_key_update(bool played)
+static void bridge_key_update(bool played, bool denoise_pending)
 {
     peer_lock();
     const int64_t now = now_ms();
@@ -1789,7 +1790,7 @@ static void bridge_key_update(bool played)
     peer_unlock();
     voice_bridge_network_state(feeding, bridge_active());
     const bool pcm_pending = voice_bridge_network_pending();
-    if (feeding || played || pcm_pending) { s_last_play_ms = now; }
+    if (feeding || played || pcm_pending || denoise_pending) { s_last_play_ms = now; }
     const bool keyed = feeding ||
         (s_last_play_ms != 0 && now - s_last_play_ms < NP_RX_HANG_MS);
     netcom_note_rx_carrier(keyed);
@@ -1810,32 +1811,54 @@ static void bridge_key_update(bool played)
     voice_bridge_network_keyed(ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed());
 }
 
+/* Sample the accepted sender and jitter-buffer state under the same lock
+ * as the PCM pull. A prefill miss is still part of the current over. */
+static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *out)
+{
+    int peak = 0;
+    *out = (net_audio_source_t){0};
+    peer_lock();
+    rt_peer_t *source = select_active_peer();
+    const bool have = pull && (source && peer_jbuf_next(source, block, &peak));
+    if (source) {
+        const bool feeding = net_rx_order_keyed(&source->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) ||
+            (source->have_latest && (!source->head_valid || (int16_t)(source->head - source->latest) <= 0));
+        *out = net_audio_source(source->mac, source->order.epoch, source->stream_first, feeding);
+    }
+    peer_unlock();
+    return have;
+}
+
 static void netp2pnet_play_task(void *arg)
 {
     (void)arg;
+    _Static_assert(NP_PKT_SAMPLES == RF_DENOISE_MAX_BLOCK, "network PCM block changed");
     int16_t block[NP_PKT_SAMPLES];
     int16_t silence[NP_PKT_SAMPLES] = {0};
+    net_audio_denoise_t denoise = {0};
     int64_t next_ms = 0;
     while (!s_play_stop) {
         /* Establish RF/lead before making the first PCM visible to monitor. */
-        bridge_key_update(false);
+        bridge_key_update(false, net_audio_denoise_pending(&denoise, now_ms()));
         if (voice_mode() == VOICE_MONITOR) {
             const int64_t now = now_ms();
             if (!next_ms || now - next_ms > 4 * NP_PKT_MS) { next_ms = now; }
             bool played = false;
             for (int due = 0; due < 4 && now >= next_ms; ++due) {
-                if (voice_bridge_room() < NP_PKT_SAMPLES) { next_ms = now; break; }
-                int peak = 0;
-                peer_lock();
-                const bool have = select_active_peer() ? peer_jbuf_next(select_active_peer(), block, &peak) : false;
-                peer_unlock();
+                const bool room = voice_bridge_room() >= NP_PKT_SAMPLES;
+                net_audio_source_t source;
+                const bool have = network_audio_read(room, block, &source);
                 if (have) {
                     sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES);
-                    voice_bridge_inject(block, NP_PKT_SAMPLES); played = true;
                 }
+                if (net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P, source, have, room, block, now)) {
+                    voice_bridge_inject(block, NP_PKT_SAMPLES);
+                    played = true;
+                }
+                if (!room) { next_ms = now; break; }
                 next_ms += NP_PKT_MS;
             }
-            bridge_key_update(played);
+            bridge_key_update(played, denoise.pending);
             /* The monitor owns the amplifier in this mode. */
             if (s_amp_on) { board_amp_enable(false); s_amp_on = false; }
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -1851,15 +1874,14 @@ static void netp2pnet_play_task(void *arg)
             (void)audio_i2s_write(block, preview);
             continue;
         }
-        int peak = 0;
         const bool ready = voice_bridge_network_ready();
-        peer_lock();
-        const bool have = ready && select_active_peer()
-            ? peer_jbuf_next(select_active_peer(), block, &peak) : false;
-        peer_unlock();
-        bridge_key_update(have);
+        net_audio_source_t source;
+        const bool have = network_audio_read(ready, block, &source);
         if (have) { sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES); }
-        int16_t *pcm = have ? block : silence;
+        const bool rendered = net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P,
+            source, have, ready && dac_owned, block, now_ms());
+        bridge_key_update(rendered, denoise.pending);
+        int16_t *pcm = rendered ? block : silence;
         if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, NP_PKT_SAMPLES); }
         if (voice_dac_held_by_talk()) {
             s_amp_on = false;
@@ -1868,6 +1890,7 @@ static void netp2pnet_play_task(void *arg)
             (void)audio_i2s_write(pcm, NP_PKT_SAMPLES);
         }
     }
+    net_audio_denoise_reset(&denoise);
     if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
     voice_bridge_network_cancel();
     s_play_task = NULL;

@@ -44,10 +44,14 @@ typedef struct {
 
 static stream_t s_streams[RF_DENOISE_ROUTE_COUNT];
 
+static bool has_playback(rf_denoise_route_t route)
+{
+    return route != RF_DENOISE_BRIDGE && route != RF_DENOISE_NET_TX;
+}
+
 static size_t workspace_size(rf_denoise_route_t route)
 {
-    return sizeof(workspace_t) +
-        (route == RF_DENOISE_BRIDGE ? 0 : PLAY_CAPACITY * sizeof(int16_t));
+    return sizeof(workspace_t) + (has_playback(route) ? PLAY_CAPACITY * sizeof(int16_t) : 0);
 }
 
 void rf_denoise_prepare(rf_denoise_route_t route)
@@ -174,7 +178,7 @@ static bool queue_pcm(const int16_t *pcm, size_t n, void *context)
 size_t rf_denoise_play_take(rf_denoise_route_t route, int16_t *pcm, size_t n)
 {
     stream_t *stream = &s_streams[route];
-    if (!stream->work || route == RF_DENOISE_BRIDGE) { return 0; }
+    if (!stream->work || !has_playback(route)) { return 0; }
     const size_t lead = n < stream->lead ? n : stream->lead;
     memset(pcm, 0, lead * sizeof(*pcm));
     stream->lead -= lead;
@@ -191,7 +195,7 @@ size_t rf_denoise_play_take(rf_denoise_route_t route, int16_t *pcm, size_t n)
 bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n)
 {
     stream_t *stream = &s_streams[route];
-    if (!stream->work || route == RF_DENOISE_BRIDGE || n > RF_DENOISE_MAX_BLOCK ||
+    if (!stream->work || !has_playback(route) || n > RF_DENOISE_MAX_BLOCK ||
         !rf_denoise_push(route, pcm, n, queue_pcm, stream)) { return false; }
     const size_t got = rf_denoise_play_take(route, pcm, n);
     return got == n;
@@ -200,7 +204,7 @@ bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n)
 bool rf_denoise_play_finish(rf_denoise_route_t route)
 {
     stream_t *stream = &s_streams[route];
-    if (!stream->work || route == RF_DENOISE_BRIDGE) { return false; }
+    if (!stream->work || !has_playback(route)) { return false; }
     /* A short burst can end before the 20 ms lead has been rendered. Only
      * carry the lead into drain if there is actual speech waiting behind it. */
     if (!stream->input_n && !stream->previous_n && !stream->queued) { stream->lead = 0; }

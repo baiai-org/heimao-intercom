@@ -73,10 +73,21 @@ void bridge_rx_inhibit(void);
 void bridge_rx_room_change(bool changing);
 /* Network selectors use their NETCOM_MODE values for r11-95 compatibility. */
 enum { DENOISE_SETTING_SPEAKER = 3, DENOISE_SETTING_HANDSET_TX = 4 };
+typedef enum {
+    DENOISE_NET_TX,
+    DENOISE_NET_SPEAKER,
+    DENOISE_NET_RF,
+} denoise_network_path_t;
+#define DENOISE_CONFIG_MASK 0x7feu
+uint8_t bridge_denoise_network_setting(uint8_t mode, denoise_network_path_t path);
+uint32_t bridge_denoise_mode_mask(uint8_t mode);
+uint32_t bridge_denoise_flags(void);
+rf_denoise_route_t bridge_denoise_route(uint8_t setting);
+esp_err_t bridge_denoise_update(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values);
 /* Stored independently by path and latched for each talkspurt. */
 esp_err_t bridge_denoise_set(uint8_t mode, bool enabled, bool expected);
 bool bridge_denoise_enabled(uint8_t setting);
-void bridge_denoise_status(uint8_t *flags, uint8_t *active_mode, rf_denoise_stats_t *stats);
+void bridge_denoise_status(uint32_t *flags, uint8_t *active_mode, rf_denoise_stats_t *stats);
 
 /* Read-only stream-edge diagnostics; timestamps are local uptime in ms. */
 typedef struct {

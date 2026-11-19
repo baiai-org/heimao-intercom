@@ -118,6 +118,7 @@ void voice_bridge_network_state(bool feeding, bool rf_required);
 void voice_bridge_network_keyed(bool keyed);
 bool voice_bridge_network_ready(void);
 bool voice_bridge_network_pending(void);
+void voice_bridge_network_discard(void);
 void voice_bridge_network_written(void);
 void voice_bridge_network_cancel(void);
 size_t voice_bridge_room(void);

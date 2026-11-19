@@ -57,6 +57,7 @@ idf_component_register(
         "netrelay.c"
         "bridge.c"   # analog <-> network bridge (NET-P2P / relay)
         "rf_denoise.c"
+        "net_audio_denoise.c"
         "sdr.c"      # SDR: radio <-> browser web audio over /ws/sdr
         "frontpanel.c"  # front panel: 3 LEDs + PTT/function keys
         "radio_led.c"   # RF steady / real network voice 5 Hz activity
@@ -148,5 +149,5 @@ set_source_files_properties(device_maintenance.c maintenance_http.c peer_labels.
 # for routing, TLS and newlib formatting, and retain compiler stack reports.
 set_source_files_properties(net_http.c PROPERTIES
     COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
-set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c bridge.c rf_denoise.c PROPERTIES
+set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c bridge.c rf_denoise.c net_audio_denoise.c PROPERTIES
     COMPILE_OPTIONS "-fstack-usage")

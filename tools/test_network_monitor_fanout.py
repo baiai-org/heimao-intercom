@@ -11,6 +11,7 @@ PRE=r'''
 #include <stdio.h>
 #include <string.h>
 #include "monitor_rx.h"
+#include "net_audio_denoise.h"
 #define NP_PKT_SAMPLES 320
 #define REL_PKT_SAMPLES 320
 #define NP_PKT_MS 20
@@ -30,15 +31,21 @@ static int audio_i2s_start_clock_only(void){return 0;}
 static bool voice_dac_held_by_talk(void){return false;}
 static size_t tail_preview_fetch(int16_t *out,size_t n){(void)out;(void)n;return 0;}
 static void board_amp_enable(bool on){(void)on;}
-static void peer_lock(void){}static void peer_unlock(void){}static void rx_lock(void){}static void rx_unlock(void){}
-static int dummy;static void *select_active_peer(void){return &dummy;}
 static int16_t expected[320],ring[2048];static monitor_rx_t monitor;
 static unsigned injections,writes,packet_reads;
 static size_t available_room=8192;
 static bool ready_for_direct=true,pre_key_seen;
 static bool packet(int16_t *out){++packet_reads;memcpy(out,expected,sizeof(expected));return true;}
-static bool peer_jbuf_next(void *p,int16_t *out,int *peak){(void)p;(void)peak;return packet(out);}
-static bool rel_jbuf_next(int16_t *out,int *peak){(void)peak;return packet(out);}
+static bool network_audio_read(bool pull,int16_t *pcm,net_audio_source_t *source){
+ *source=(net_audio_source_t){.present=true,.feeding=true};
+ return pull && packet(pcm);
+}
+bool net_audio_denoise_pending(net_audio_denoise_t *dn,int64_t now){(void)now;return dn->pending;}
+void net_audio_denoise_reset(net_audio_denoise_t *dn){(void)dn;}
+bool net_audio_denoise_render(net_audio_denoise_t *dn,uint8_t mode,net_audio_source_t src,
+ bool have,bool ready,int16_t *pcm,int64_t now){
+ (void)dn;(void)mode;(void)src;(void)ready;(void)pcm;(void)now;return have;
+}
 static void sdr_rx_network_push(uint8_t mode,const int16_t *pcm,size_t n){assert(mode==current_mode);monitor_rx_network(&monitor,mode,pcm,n,1000000);}
 static void voice_bridge_inject(const int16_t *pcm,size_t n){
  assert(pre_key_seen);
@@ -46,7 +53,7 @@ static void voice_bridge_inject(const int16_t *pcm,size_t n){
  // The existing RF-side close is deliberately interleaved with network delivery.
  monitor_rx_rf(&monitor,NULL,0,false,1000001);
 }
-static void bridge_key_update(bool played){if(!played)pre_key_seen=true;}
+static void bridge_key_update(bool played,bool pending){assert(!pending);if(!played)pre_key_seen=true;}
 static size_t voice_bridge_room(void){return available_room;}
 static bool voice_bridge_network_ready(void){return ready_for_direct;}
 static void voice_bridge_network_cancel(void){}

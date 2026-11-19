@@ -53,6 +53,8 @@ int64_t esp_timer_get_time(void);
 esp_err_t nvs_open(const char *, int, nvs_handle_t *);
 esp_err_t nvs_get_u8(nvs_handle_t, const char *, uint8_t *);
 esp_err_t nvs_set_u8(nvs_handle_t, const char *, uint8_t);
+esp_err_t nvs_get_u32(nvs_handle_t, const char *, uint32_t *);
+esp_err_t nvs_set_u32(nvs_handle_t, const char *, uint32_t);
 esp_err_t nvs_commit(nvs_handle_t);
 void nvs_close(nvs_handle_t);
 int channels_count(void);
@@ -98,6 +100,9 @@ static int channel_count = 1;
 static bool storage_fail;
 static uint8_t denoise_stored;
 static uint8_t local_denoise_stored;
+static bool denoise_exists, denoise_pending, commit_fail;
+static uint32_t denoise_config, pending_config;
+static unsigned denoise_commits;
 static bool protect_during_finish;
 static size_t queued_samples;
 void rx_guard_init(void) {}
@@ -132,8 +137,27 @@ esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t v) {
     if (strcmp(key, "auddn_local1") == 0) { local_denoise_stored = v; }
     return ESP_OK;
 }
-esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
-void nvs_close(nvs_handle_t h) { (void)h; }
+esp_err_t nvs_get_u32(nvs_handle_t h, const char *key, uint32_t *v) {
+    (void)h; assert(strcmp(key, "auddn_cfg2") == 0);
+    if (!denoise_exists) { return ESP_ERR_INVALID_STATE; }
+    *v = denoise_config;
+    return ESP_OK;
+}
+esp_err_t nvs_set_u32(nvs_handle_t h, const char *key, uint32_t v) {
+    (void)h; assert(strcmp(key, "auddn_cfg2") == 0);
+    if (storage_fail) { return ESP_ERR_INVALID_STATE; }
+    denoise_pending = true; pending_config = v;
+    return ESP_OK;
+}
+esp_err_t nvs_commit(nvs_handle_t h) {
+    (void)h;
+    if (denoise_pending) {
+        if (commit_fail) { return ESP_ERR_INVALID_STATE; }
+        denoise_config = pending_config; denoise_exists = true; ++denoise_commits;
+    }
+    return ESP_OK;
+}
+void nvs_close(nvs_handle_t h) { (void)h; denoise_pending = false; }
 int channels_count(void) { return channel_count; }
 bool channels_get(int i, char *name, size_t n, sa818_cfg_t *cfg) {
     (void)name; (void)n;
@@ -293,12 +317,12 @@ int main(void) {
     assert(channel_current() == 1 && bridge_chan() == 0 && strstr(log, "正在切换"));
     *s_select_mux = 0;
     /* A short denoised over is drained before the unmodified tail and OFF. */
-    assert(bridge_denoise_set(1, true, false) == ESP_OK && denoise_stored == 2);
-    assert(bridge_denoise_set(2, true, false) == ESP_OK && denoise_stored == 6);
+    assert(bridge_denoise_set(1, true, false) == ESP_OK && denoise_config == 2);
+    assert(bridge_denoise_set(2, true, false) == ESP_OK && denoise_config == 6);
     storage_fail = true;
-    assert(bridge_denoise_set(2, false, true) != ESP_OK && denoise_stored == 6);
+    assert(bridge_denoise_set(2, false, true) != ESP_OK && denoise_config == 6);
     storage_fail = false;
-    assert(bridge_denoise_set(2, false, true) == ESP_OK && denoise_stored == 2);
+    assert(bridge_denoise_set(2, false, true) == ESP_OK && denoise_config == 2);
     mode = 1;
     tail_enabled = true;
     assert(bridge_set_chan(1) == ESP_OK && bridge_set_en(true) == ESP_OK && bridge_active());
@@ -331,12 +355,33 @@ int main(void) {
     assert(bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
     assert(!bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
     assert(bridge_denoise_set(DENOISE_SETTING_HANDSET_TX, true, false) == ESP_OK);
-    assert(denoise_stored == 2 && local_denoise_stored == 24);
+    assert(denoise_config == 26 && denoise_stored == 0 && local_denoise_stored == 0);
     assert(bridge_denoise_set(DENOISE_SETTING_SPEAKER, false, true) == ESP_OK);
     bridge_init();
     assert(bridge_denoise_enabled(1) && !bridge_denoise_enabled(2));
     assert(!bridge_denoise_enabled(DENOISE_SETTING_SPEAKER));
     assert(bridge_denoise_enabled(DENOISE_SETTING_HANDSET_TX));
+    const uint32_t p2p = (1u << 5) | (1u << 6) | (1u << 7);
+    const uint32_t relay = (1u << 8) | (1u << 9) | (1u << 10);
+    assert(bridge_denoise_update(0, p2p, 0, p2p) == ESP_ERR_INVALID_ARG);
+    assert(bridge_denoise_update(1, p2p | relay, 0, p2p) == ESP_ERR_INVALID_ARG);
+    unsigned commits_before = denoise_commits;
+    commit_fail = true;
+    assert(bridge_denoise_update(1, p2p, 0, p2p) != ESP_OK);
+    assert(bridge_denoise_flags() == 18 && denoise_config == 18 && denoise_commits == commits_before);
+    commit_fail = false;
+    assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK);
+    assert(denoise_commits == ++commits_before && denoise_config == (18 | p2p));
+    assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK && denoise_commits == commits_before);
+    assert(bridge_denoise_update(1, p2p, 0, 0) == ESP_ERR_INVALID_STATE);
+    assert(bridge_denoise_update(2, relay, 0, relay) == ESP_OK);
+    bridge_init();
+    assert(bridge_denoise_flags() == (18 | p2p | relay));
+    denoise_exists = false; denoise_stored = 6; local_denoise_stored = 24;
+    bridge_init();
+    assert(bridge_denoise_flags() == 30 && !denoise_exists);
+    assert(bridge_denoise_update(2, relay, 0, relay) == ESP_OK);
+    assert(denoise_config == (30 | relay) && denoise_stored == 6 && local_denoise_stored == 24);
     puts("PASS: RX inhibit drops PCM without a synthetic tail; normal tail preserved; squelch edge, repeated close, empty block, capture stop, preview, "
          "half-duplex, disable race, mode switch, RF profile preservation; common channel application, "
          "same-channel retune, profile matching, bridge follow/preselection, busy and storage failure; "
