@@ -63,9 +63,14 @@ static void query_str(httpd_req_t*r,const char*k,char*out,size_t len){char q[300
 static int send_result(httpd_req_t*r,bool ok,const char*error){snprintf(r->response,sizeof(r->response),"%s",error?error:"");return ESP_OK;}
 static void revoke(void){++revoked;}
 static bool reboot_pending,writer_refused;static int writer_count;
+static bool listener_paused;static unsigned listener_transitions;
 static bool device_maintenance_reboot_pending(void){return reboot_pending;}
 static bool device_maintenance_write_begin(void){if(writer_refused)return false;++writer_count;return true;}
 static void device_maintenance_write_end(void){assert(writer_count>0);--writer_count;}
+static void sdr_tail_upload_pause(bool active){
+ assert(writer_count==1&&active!=listener_paused);
+ listener_paused=active;++listener_transitions;
+}
 '''
 HARNESS=r'''
 static httpd_req_t request(const char *body,const char *token){httpd_req_t r={0};r.method=body?HTTP_POST:HTTP_GET;r.body=body;r.content_len=body?strlen(body):0;r.type="application/json";r.token=token;r.device=device_identity_id();r.status=200;return r;}
@@ -111,6 +116,12 @@ int main(void){
  r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)maint_route;assert(controlled_dispatch(&r)==0&&mutations==mutations_before+1&&lock_count==0);
  reboot_pending=false;writer_refused=true;r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)upload_route;controlled_dispatch(&r);assert(writer_count==0&&lock_count==0);
  writer_refused=false;r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)upload_route;controlled_dispatch(&r);assert(writer_count==0&&lock_count==0);
+ assert(listener_transitions==0);
+ const httpd_uri_t *tail_route=NULL;
+ for(size_t i=0;i<sizeof(s_routes)/sizeof(s_routes[0]);++i)if(s_routes[i].handler==h_tail_upload)tail_route=&s_routes[i];
+ assert(tail_route);
+ r=request(NULL,NULL);r.method=HTTP_POST;r.user_ctx=(void*)tail_route;strcpy(r.uri,"/api/tail_upload?activate=1");
+ assert(controlled_dispatch(&r)==ESP_OK&&listener_transitions==2&&!listener_paused&&writer_count==0);
  assert(lock_count==0);
  puts("PASS: production HTTP claim/renew/release/takeover, device identity, hidden bearer, exact expiry, old WebSocket generations, concurrent mutation refusal, malformed bodies and all legacy route guards");
  return 0;
