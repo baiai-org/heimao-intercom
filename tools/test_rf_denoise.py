@@ -148,14 +148,23 @@ static void test_input_cadences(void) {
         assert(rf_denoise_start(forward[mode]));
         assert(rf_denoise_start(RF_DENOISE_SPEAKER));
         size_t streamed = 0, played = 0;
+        uint64_t input_power = 0, speaker_power = 0;
         for (unsigned pos = 0; pos < RF_FRAMES * 160; pos += 256) {
             memcpy(block, input, 256 * sizeof(*block));
             assert(rf_denoise_push(forward[mode], block, 256, count_output, &streamed));
             assert(rf_denoise_play_block(RF_DENOISE_SPEAKER, block, 256));
+            if (pos >= 16000) {
+                // The periodic, seeded PCM makes each complete block's input power equal.
+                for (size_t i = 0; i < 256; ++i) {
+                    input_power += (int32_t)input[i] * input[i];
+                    speaker_power += (int32_t)block[i] * block[i];
+                }
+            }
             played += 256;
             // Both real-time consumers finish this ADC batch before the worker runs.
             service_between_blocks();
         }
+        assert(speaker_power * 10 < input_power); // At least 10 dB of steady noise reduction.
         rf_denoise_stats(forward[mode], &stats);
         assert(stats.wet_frames == RF_FRAMES - 4 && stats.dry_frames == 0);
         assert(rf_denoise_finish(forward[mode], count_output, &streamed));
