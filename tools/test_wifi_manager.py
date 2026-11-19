@@ -68,7 +68,8 @@ static bool radio_stopped;
 static wifi_profile_store_t disk,pending_disk;
 static bool pending_blob;
 static char legacy_ssid[33],legacy_pass[65],legacy_host[64];
-static int connect_calls,scan_calls,driver_mode=WIFI_MODE_STA;
+static int connect_calls,scan_calls,sntp_starts,driver_mode=WIFI_MODE_STA;
+static void maintenance_clock_network_ready(void){++sntp_starts;}
 static wifi_ap_record_t scan_records[32];static uint16_t scan_count;
 static wifi_config_t driver_config;
 static int64_t esp_timer_get_time(void){return clock_ms*1000;}
@@ -116,7 +117,7 @@ static void reset(int64_t now){
  s_debug_stop_pending=s_debug_radio_off=s_storage_fault=false;
  s_apply_id=0;s_apply_at=s_hold_until=s_next_scan=s_disconnect_at=0;s_last_scan=-1;
  s_ap_suppressed=s_request_ap_close=false;s_config_until=s_setup_until=0;s_setup_owner[0]=0;
- associated=ip_ready=scanning=radio_stopped=false;connect_calls=scan_calls=scan_count=0;
+ associated=ip_ready=scanning=radio_stopped=false;connect_calls=scan_calls=scan_count=sntp_starts=0;
  clock_ms=now;have_blob=nvs_failure=false;legacy_ssid[0]=legacy_pass[0]=legacy_host[0]=0;
 }
 static uint32_t save(const char*ssid,bool enabled,int priority){uint32_t id=0;assert(net_wifi_profile_save(&id,ssid,"test-only-secret",enabled,priority,NULL)==ESP_OK);return id;}
@@ -146,15 +147,15 @@ int main(void){
  memset(&s_manager->store,0,sizeof(s_manager->store));assert(load_profiles()==ESP_OK);
  assert(!s_manager->store.profiles[0].id); /* valid empty store overrides rollback credentials */
  reset(0);uint32_t a=save("A",true,0),b=save("B",true,1),c=save("C",true,0);
- tick(0,0);assert(s_scan_running && !s_ap_on);
+ tick(0,0);assert(s_scan_running && !s_ap_on && sntp_starts==0);
  visible("A",NULL);tick(1000,EV_SCAN);assert(connect_calls==1 && !strcmp(s_ssid,"A"));
- associated=ip_ready=true;tick(2000,EV_IP|EV_ASSOC);assert(s_connected && s_manager->policy.offline_since==-1);
+ associated=ip_ready=true;tick(2000,EV_IP|EV_ASSOC);assert(s_connected && s_manager->policy.offline_since==-1 && sntp_starts==1);
  tick(70000,0);assert(s_connected && connect_calls==1 && !s_ap_on && scan_calls==1);
  associated=ip_ready=false;tick(71000,EV_DISC);
  assert(s_manager->policy.offline_since==71000 && s_scan_running);
  visible("B","C");tick(72000,EV_SCAN);assert(!strcmp(s_ssid,"B"));
  tick(73000,EV_DISC);assert(!strcmp(s_ssid,"C")); /* failed B cools; C proceeds */
- associated=ip_ready=true;tick(74000,EV_IP);assert(s_connected);
+ associated=ip_ready=true;tick(74000,EV_IP);assert(s_connected && sntp_starts==2);
  char json[8192];assert(net_wifi_profiles_json(json,sizeof(json))==ESP_OK);
  assert(!strstr(json,"test-only-secret") && strstr(json,"has_password"));
  /* A stale LOST_IP arriving after a new GOT_IP cannot break a healthy link. */

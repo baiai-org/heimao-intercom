@@ -42,27 +42,47 @@ static int nvs_commit(int h){(void)h;if(fail_commit)return 52;memcpy(durable,pen
 static void nvs_close(int h){(void)h;}
 '''
 POLICY_TEST=r'''
-int main(void){
- maintenance_config_t c={.version=1,.cleanup_enabled=1,.restart_hours=24};maintenance_policy_t p;
- assert(maintenance_config_valid(&c));c.restart_hours=0;assert(!maintenance_config_valid(&c));c.restart_hours=169;assert(!maintenance_config_valid(&c));c.restart_hours=24;
- maintenance_policy_reset(&p,&c,0);assert(!p.next_restart_ms);
- assert(maintenance_policy_tick(&p,&c,0,false,false)==0);
- assert(maintenance_policy_tick(&p,&c,59999,false,true)==0);
- assert(maintenance_policy_tick(&p,&c,60000,false,true)==MAINTENANCE_CLEANUP);
- assert(maintenance_policy_tick(&p,&c,360000,true,false)==0);
- assert(maintenance_policy_tick(&p,&c,360001,false,false)==0);
- assert(maintenance_policy_tick(&p,&c,420000,false,false)==0);
- assert(maintenance_policy_tick(&p,&c,420001,false,false)==MAINTENANCE_CLEANUP);
- c.cleanup_enabled=0;c.restart_enabled=1;c.restart_hours=1;maintenance_policy_reset(&p,&c,1000);
- assert(maintenance_policy_tick(&p,&c,3601000,true,false)==0&&p.restart_waiting);
- assert(maintenance_policy_tick(&p,&c,7201000,true,false)==0);
- assert(maintenance_policy_tick(&p,&c,7201001,false,false)==0);
- assert(maintenance_policy_tick(&p,&c,7261000,false,false)==0);
- assert(maintenance_policy_tick(&p,&c,7261001,false,false)==MAINTENANCE_RESTART);
- c.restart_enabled=0;maintenance_policy_reset(&p,&c,7261002);assert(!p.restart_waiting&&!p.next_restart_ms);
- assert(maintenance_policy_tick(&p,&c,9000000,false,false)==0);
- c.restart_enabled=1;c.restart_hours=168;maintenance_policy_reset(&p,&c,INT64_C(5000000000));assert(p.next_restart_ms==INT64_C(5604800000));
- puts("PASS policy: defaults, bounds, 60-second idle, busy postponement, cancellation, reboot reset, 64-bit long uptime");return 0;
+#define MONDAY_UTC 1795363200LL /* Monday 00:00 in Beijing. */
+int main(void) {
+    maintenance_config_t c = {.version=2, .cleanup_enabled=1, .restart_minute=240};
+    maintenance_policy_t p;
+    assert(maintenance_config_valid(&c));
+    c.restart_enabled = 1;
+    assert(!maintenance_config_valid(&c));
+    c.restart_days = 0x80;
+    assert(!maintenance_config_valid(&c));
+    c.restart_days = 1;
+    c.restart_minute = 1440;
+    assert(!maintenance_config_valid(&c));
+    c.restart_minute = 0;
+    assert(maintenance_config_valid(&c));
+
+    maintenance_policy_reset(&p, 0);
+    assert(!maintenance_policy_cleanup_due(&p, &c, 0, false));
+    assert(!maintenance_policy_cleanup_due(&p, &c, 300000, true));
+    assert(!maintenance_policy_cleanup_due(&p, &c, 300001, false));
+    assert(!maintenance_policy_cleanup_due(&p, &c, 360000, false));
+    assert(maintenance_policy_cleanup_due(&p, &c, 360001, false));
+
+    assert(maintenance_next_restart(&c, MONDAY_UTC - 1, 0) == MONDAY_UTC);
+    assert(maintenance_next_restart(&c, MONDAY_UTC, 0) == MONDAY_UTC + 7 * 86400);
+    assert(maintenance_restart_due(&c, MONDAY_UTC - 1, MONDAY_UTC, 1000, 0));
+    assert(!maintenance_restart_due(&c, 0, MONDAY_UTC, 1000, 0));
+    assert(!maintenance_restart_due(&c, MONDAY_UTC - 1, MONDAY_UTC + 600, 1000, 0));
+    assert(!maintenance_restart_due(&c, MONDAY_UTC - 600, MONDAY_UTC, 1000, 0));
+    assert(!maintenance_restart_due(&c, MONDAY_UTC + 1, MONDAY_UTC, 1000, 0));
+    assert(!maintenance_restart_due(&c, MONDAY_UTC - 1, MONDAY_UTC + 1, 2000, MONDAY_UTC / 60));
+
+    c.restart_minute = 23 * 60 + 59;
+    c.restart_days |= 1 << 6;
+    assert(maintenance_next_restart(&c, MONDAY_UTC - 120, 0) == MONDAY_UTC - 60);
+    assert(maintenance_restart_due(&c, MONDAY_UTC - 61, MONDAY_UTC - 60, 1000, 0));
+    assert(maintenance_next_restart(&c, MONDAY_UTC - 60, 0) == MONDAY_UTC + 86340);
+    assert(maintenance_restart_due(&c, MONDAY_UTC + 86339, MONDAY_UTC + 86340, 1000, 0));
+    c.restart_enabled = 0;
+    assert(!maintenance_next_restart(&c, MONDAY_UTC, 0));
+    puts("PASS weekly schedule: China midnight and week rollover, single/multiple days, large clock corrections, durable deduplication, and independent idle cleanup");
+    return 0;
 }
 '''
 LABEL_ENV=r'''
@@ -101,7 +121,38 @@ SERVICE_ENV=r'''
 #define PTT_IDLE 0
 #define PTT_OWNER_NONE 0
 #define VOICE_TALK 2
-static int64_t clock_ms;static bool station_busy,storing,lock_available=true;static int boots,latches,clean_calls,flushes;
+#define pdMS_TO_TICKS(x) (x)
+static int64_t clock_ms, wall_utc, last_slot_saved, pending_slot;
+static bool station_busy, storing, lock_available=true, preparing_fails, boot_held;
+static bool board_boot_button_pressed(void) {return boot_held;}
+static int boots, latches, clean_calls, flushes, prepared, rf_off;
+maintenance_clock_t maintenance_clock_get(void) {
+    return (maintenance_clock_t){.utc=wall_utc,.state=wall_utc?"synced":"waiting"};
+}
+static int maintenance_get_blob(int h, const char *key, void *out, size_t *size) {
+    if ((!strcmp(key,"config2") && durable_n==12) || (!strcmp(key,"config1") && durable_n!=12)) return ESP_ERR_NVS_NOT_FOUND;
+    return nvs_get_blob(h,key,out,size);
+}
+static int nvs_get_i64(int h, const char *key, int64_t *value) {
+    (void)h;assert(!strcmp(key,"last_slot"));
+    if(!last_slot_saved) return ESP_ERR_NVS_NOT_FOUND;
+    *value=last_slot_saved;return ESP_OK;
+}
+static int nvs_set_i64(int h, const char *key, int64_t value) {
+    (void)h;assert(!strcmp(key,"last_slot"));pending_slot=value;return ESP_OK;
+}
+static int maintenance_commit(int h) {
+    const int result=nvs_commit(h);
+    if (!result && pending_slot) last_slot_saved=pending_slot;
+    pending_slot=0;
+    return result;
+}
+#define nvs_get_blob maintenance_get_blob
+#define nvs_commit maintenance_commit
+static int factory_reset_prepare(void) { ++prepared;return preparing_fails?77:ESP_OK; }
+static void vTaskDelay(int delay) { assert(delay==50); }
+static void board_sa818_power(bool on) { assert(!on && latches>rf_off);++rf_off; }
+
 static int64_t recent_activity_us;
 static int64_t ptt_last_activity_us(void){return recent_activity_us;}
 static int64_t esp_timer_get_time(void){return clock_ms*1000;}
@@ -131,23 +182,132 @@ static void board_amp_enable(bool e){assert(!e);}
 static void esp_restart(void){++boots;}
 '''
 SERVICE_TEST=r'''
-int main(void){
- assert(device_maintenance_init()==0);maintenance_config_t c;device_maintenance_config(&c);assert(c.cleanup_enabled&&!c.restart_enabled&&c.restart_hours==24);
- c.restart_enabled=1;c.restart_hours=1;fail_commit=true;assert(device_maintenance_set(&c,0)!=0);fail_commit=false;
- device_maintenance_config(&c);assert(!c.restart_enabled&&c.revision==0);
- c.restart_enabled=1;c.restart_hours=1;assert(device_maintenance_set(&c,0)==0);assert(device_maintenance_set(&c,0)==ESP_ERR_INVALID_STATE);
- device_maintenance_tick();clock_ms=59999;assert(device_maintenance_cleanup()==ESP_ERR_INVALID_STATE);
- clock_ms=60000;assert(device_maintenance_cleanup()==0&&clean_calls==1);char json[1500];device_maintenance_json(json,sizeof(json));assert(strstr(json,"\"released_buffer_bytes\":1334"));
- recent_activity_us=clock_ms*1000;clock_ms+=1;assert(device_maintenance_cleanup()==ESP_ERR_INVALID_STATE); // sub-tick activity is not missed
- station_busy=true;clock_ms=3600000;device_maintenance_tick();assert(!device_maintenance_reboot_pending()&&s_policy.restart_waiting&&!boots);
- station_busy=false;clock_ms=3600001;device_maintenance_tick();clock_ms=3660000;device_maintenance_tick();assert(!device_maintenance_reboot_pending());
- clock_ms=3660001;device_maintenance_tick();assert(device_maintenance_reboot_pending());
- device_maintenance_config(&c);c.restart_enabled=0;assert(device_maintenance_set(&c,1)==0&&!device_maintenance_reboot_pending());clock_ms+=2000;device_maintenance_tick();assert(!boots);
- assert(device_maintenance_write_begin());assert(device_maintenance_reboot(true)==ESP_ERR_INVALID_STATE);device_maintenance_write_end();
- storing=true;assert(device_maintenance_reboot(true)==ESP_ERR_INVALID_STATE);storing=false;
- station_busy=true;assert(device_maintenance_reboot(true)==0);assert(!device_maintenance_write_begin());assert(device_maintenance_reboot(true)==0);
- clock_ms+=1499;device_maintenance_tick();assert(!boots);clock_ms+=1;device_maintenance_tick();assert(boots==1&&latches==1&&s_rtc_kind==1);
- puts("PASS service: default settings, durable config failure, conflict, idle cleanup accounting, deferred schedule, cancellation after arm, upload/conversion protection, deduplicated manual reboot, no new writes, unkey before reboot");return 0;
+#define MONDAY_UTC 1795363200LL
+int main(void) {
+    const uint32_t legacy[3]={1,6,0x01000018}; /* 24 h, cleanup off, interval enabled */
+    memcpy(durable,legacy,sizeof(legacy));durable_n=sizeof(legacy);
+    assert(device_maintenance_init()==0);
+    maintenance_config_t c;
+    device_maintenance_config(&c);
+    assert(!c.cleanup_enabled && !c.restart_enabled && c.revision==6 && c.restart_minute==240);
+    c.cleanup_enabled=1;c.restart_enabled=1;c.restart_days=1;c.restart_minute=0;
+    fail_commit=true;assert(device_maintenance_set(&c,6)!=0);fail_commit=false;
+    device_maintenance_config(&c);
+    assert(!c.restart_enabled && c.revision==6);
+    c.cleanup_enabled=1;c.restart_enabled=1;c.restart_days=1;c.restart_minute=0;
+    assert(device_maintenance_set(&c,6)==0 && device_maintenance_set(&c,6)==ESP_ERR_INVALID_STATE);
+    device_maintenance_tick();
+    clock_ms=59999;assert(device_maintenance_cleanup()==ESP_ERR_INVALID_STATE);
+    clock_ms=60000;assert(device_maintenance_cleanup()==0 && clean_calls==1);
+    char json[1500];device_maintenance_json(json,sizeof(json));
+    assert(strstr(json,"\"released_buffer_bytes\":1334"));
+    recent_activity_us=clock_ms*1000;clock_ms++;assert(device_maintenance_cleanup()==ESP_ERR_INVALID_STATE);
+
+    wall_utc=MONDAY_UTC;clock_ms+=1000;device_maintenance_tick();
+    assert(!boots && !s_due_slot); /* first synchronization inside the minute */
+    wall_utc=MONDAY_UTC-1;clock_ms+=1000;device_maintenance_tick();
+    station_busy=true;lock_available=false;
+    wall_utc++;clock_ms+=1000;device_maintenance_tick();
+    assert(s_due_slot && !boots); /* crossing tracked during an OTA/write lock */
+    lock_available=true;
+    assert(device_maintenance_write_begin());
+    wall_utc++;clock_ms+=1000;device_maintenance_tick();assert(!boots);
+    device_maintenance_write_end();
+    fail_commit=true;wall_utc++;clock_ms+=1000;device_maintenance_tick();
+    assert(s_restart_save_failed && !boots && !last_slot_saved);
+    fail_commit=false;
+    wall_utc+=5;clock_ms+=5000;device_maintenance_tick();
+    assert(boots==1 && latches==1 && rf_off==1 && s_rtc_kind==REBOOT_SCHEDULED);
+    assert(last_slot_saved==MONDAY_UTC/60);
+
+    /* Simulate power loss and persistent re-load after the scheduled reboot. */
+    s_lock=0;s_reboot_kind=0;s_previous_utc=0;s_last_slot=0;
+    assert(device_maintenance_init()==0 && s_last_slot==MONDAY_UTC/60);
+    wall_utc=MONDAY_UTC-1;clock_ms+=1000;device_maintenance_tick();
+    wall_utc++;clock_ms+=1000;device_maintenance_tick();assert(boots==1 && !s_due_slot);
+
+    wall_utc=MONDAY_UTC+7*86400-1;clock_ms+=1000;device_maintenance_tick();
+    storing=true;
+    wall_utc++;clock_ms+=1000;device_maintenance_tick();assert(s_due_slot && boots==1);
+    assert(device_maintenance_reboot()==ESP_ERR_INVALID_STATE);
+    assert(device_maintenance_factory_reset()==ESP_ERR_INVALID_STATE);
+    device_maintenance_config(&c);c.restart_enabled=0;
+    assert(device_maintenance_set(&c,7)==0 && !s_due_slot);
+    storing=false;
+    assert(device_maintenance_write_begin());
+    assert(device_maintenance_factory_reset()==ESP_ERR_INVALID_STATE);
+    device_maintenance_write_end();
+    preparing_fails=true;assert(device_maintenance_factory_reset()==77 && !device_maintenance_reboot_pending());
+    preparing_fails=false;
+    assert(device_maintenance_factory_reset()==0 && device_maintenance_factory_reset()==0 && prepared==2);
+    assert(!device_maintenance_write_begin() && device_maintenance_reboot()==ESP_ERR_INVALID_STATE);
+    assert(device_maintenance_set(&c,8)==ESP_ERR_INVALID_STATE);
+    clock_ms+=1499;device_maintenance_tick();assert(boots==1);
+    boot_held=true;clock_ms++;device_maintenance_tick();assert(boots==1);
+    boot_held=false;clock_ms++;device_maintenance_tick();
+    assert(boots==2 && latches==2 && rf_off==2 && s_rtc_kind==REBOOT_FACTORY);
+    puts("PASS service: legacy migration, cleanup, deduplicated weekly restart during a call, OTA/writer postponement, commit failure, cancellation, safe factory admission");
+    return 0;
+}
+'''
+CLOCK_ENV=r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef int esp_err_t,portMUX_TYPE;
+#define ESP_OK 0
+#define ESP_LOGW(...) ((void)0)
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(lock) ((void)(lock))
+#define portEXIT_CRITICAL(lock) ((void)(lock))
+struct timeval {int64_t tv_sec,tv_usec;};
+typedef struct {
+    const char *servers[2];
+    void (*sync_cb)(struct timeval *value);
+    bool wait_for_sync;
+} esp_sntp_config_t;
+#define ESP_SNTP_SERVER_LIST(...) {__VA_ARGS__}
+#define ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(n,list) {.servers=list,.wait_for_sync=true}
+static int errors,init_count,restart_count;
+static int64_t monotonic_us, system_utc;
+static void (*sync_callback)(struct timeval *);
+static esp_err_t esp_netif_sntp_init(esp_sntp_config_t *config) {
+    assert(config->servers[0]&&config->servers[1]&&!config->wait_for_sync&&config->sync_cb);
+    ++init_count;
+    if (errors) return errors;
+    sync_callback=config->sync_cb;return ESP_OK;
+}
+static esp_err_t esp_netif_sntp_start(void) {++restart_count;return errors;}
+static int64_t esp_timer_get_time(void) {return monotonic_us;}
+static int64_t fake_time(void *out) {assert(!out);return system_utc;}
+#define time fake_time
+'''
+
+CLOCK_TEST=r'''
+#include <string.h>
+int main(void) {
+    maintenance_clock_t clock=maintenance_clock_get();
+    assert(!strcmp(clock.state,"waiting")&&!clock.utc&&!clock.last_sync_utc);
+    errors=1;maintenance_clock_network_ready();assert(init_count==1&&!restart_count);
+    errors=0;maintenance_clock_network_ready();assert(init_count==2&&sync_callback);
+    maintenance_clock_network_ready();assert(init_count==2&&restart_count==1);
+    struct timeval sample={.tv_sec=1700000000LL};
+    sync_callback(&sample);assert(!maintenance_clock_get().utc);
+    sample.tv_sec=system_utc=1795075200LL;monotonic_us=1000;sync_callback(&sample);
+    clock=maintenance_clock_get();
+    assert(!strcmp(clock.state,"synced")&&clock.utc==system_utc&&clock.last_sync_utc==system_utc);
+    monotonic_us+=2LL*60*60*1000000;
+    system_utc+=2*60*60;
+    assert(!strcmp(maintenance_clock_get().state,"holdover"));
+    monotonic_us+=22LL*60*60*1000000;
+    system_utc+=22*60*60;
+    clock=maintenance_clock_get();
+    assert(!strcmp(clock.state,"stale")&&!clock.utc&&clock.last_sync_utc==sample.tv_sec);
+    sample.tv_sec=system_utc;sync_callback(&sample);
+    assert(!strcmp(maintenance_clock_get().state,"synced"));
+    puts("PASS board clock: invalid first time, SNTP initialization retry, reconnect, holdover, 24-hour expiry and resync");
+    return 0;
 }
 '''
 def run(name,source):
@@ -161,9 +321,10 @@ def run(name,source):
 def main():
     policy=plain('maintenance_policy.h')+plain('maintenance_policy.c')
     run('policy',BASE+policy+POLICY_TEST)
+    run('clock',CLOCK_ENV+plain('maintenance_clock.h')+plain('maintenance_clock.c')+CLOCK_TEST)
     labels=plain('np_peer_store.h')+plain('np_access.h')+plain('np_access.c')+plain('peer_labels.h')
     labels+=function((MAIN/'device_name.c').read_text(encoding='utf-8'),'device_name_validate')
     labels=labels.replace('DEVICE_NAME_BYTES','96')
     run('labels',BASE+LABEL_ENV+labels+plain('peer_labels.c')+LABEL_TEST)
-    run('service',BASE+policy+SERVICE_ENV+plain('device_maintenance.c')+SERVICE_TEST)
+    run('service',BASE+policy+plain('maintenance_clock.h')+SERVICE_ENV+plain('device_maintenance.c')+SERVICE_TEST)
 if __name__=='__main__':main()

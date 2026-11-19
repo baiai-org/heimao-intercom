@@ -7,7 +7,8 @@ void device_maintenance_tick(void);
 void device_maintenance_config(maintenance_config_t *out);
 esp_err_t device_maintenance_set(const maintenance_config_t *cfg, uint32_t expected);
 esp_err_t device_maintenance_cleanup(void);
-esp_err_t device_maintenance_reboot(bool manual);
+esp_err_t device_maintenance_reboot(void);
+esp_err_t device_maintenance_factory_reset(void);
 bool device_maintenance_reboot_pending(void);
 /* Track non-HTTP file writers too; new writes cannot start after reboot arm. */
 bool device_maintenance_write_begin(void);

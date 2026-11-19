@@ -2201,7 +2201,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
       <div id="log"></div>
       <div class="row" style="margin-top:10px;margin-bottom:0;gap:8px">
         <button id="facReset" class="warn-btn" style="flex:1;padding:9px 12px;min-height:40px">面板恢复默认参数</button>
-        <button id="facWipe" class="warn-btn" style="flex:1;padding:9px 12px;min-height:40px">彻底恢复出厂设置</button>
+        <button id="facWipe" type="button" disabled class="warn-btn" style="flex:1;padding:9px 12px;min-height:40px">彻底恢复出厂设置</button>
       </div>
       <div class="row" style="margin-top:8px;margin-bottom:0;gap:8px">
         <label class="file-pick" id="otaPick">
@@ -2368,7 +2368,6 @@ diagButton.onclick = async () => {
  * phone and blocks the polling loop).  First tap arms the button for 4 s.
  */
 let facArmed = 0;
-let facWipeArmed = 0;
 
 $('facReset').onclick = async () => {
   const now = Date.now();
@@ -2403,30 +2402,6 @@ $('facReset').onclick = async () => {
   }
   $('facReset').textContent = '面板恢复默认参数';
   $('facReset').className = 'warn-btn';
-};
-
-$('facWipe').onclick = async () => {
-  const now = Date.now();
-  if (now - facWipeArmed > 4000) {
-    facWipeArmed = now;
-    $('facWipe').textContent = '⚠ 再点一次确认';
-    $('facWipe').className = 'tx';
-    setTimeout(() => {
-      if (Date.now() - facWipeArmed > 3900) {
-        facWipeArmed = 0;
-        $('facWipe').textContent = '彻底恢复出厂设置';
-        $('facWipe').className = 'warn-btn';
-      }
-    }, 4200);
-    return;
-  }
-  facWipeArmed = 0;
-  $('facWipe').textContent = '正在擦除…';
-  $('facWipe').className = 'warn-btn';
-  try {
-    await fetch('/api/set?k=factory_wipe&v=1');
-  } catch (e) {}
-  log('彻底恢复出厂设置: 正在擦除并重启，热点 黑猫智能手台-XXXXXX 会重新出现', 'err');
 };
 
 /* ------------------------------------------------------------------ OTA --- */

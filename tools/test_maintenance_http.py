@@ -16,14 +16,16 @@ ENV=r'''
 #define ESP_ERR_INVALID_ARG 3
 #define ESP_ERR_INVALID_STATE 4
 #define ESP_ERR_NOT_FOUND 5
+#define ESP_ERR_NOT_SUPPORTED 6
 #define HTTPD_500_INTERNAL_SERVER_ERROR 500
-static int changes,reboots,cleanups,renames,adds;static int operation_error;static bool added_partial;
+static int changes,reboots,factory_resets,cleanups,renames,adds;static int operation_error;static bool added_partial;
 static int httpd_resp_send_err(httpd_req_t*r,int status,const char*t){r->status=status;return httpd_resp_send(r,t,-1);}
 static const char*radio_activity_boot_id(void){return "boot-1";}
-static void device_maintenance_json(char*out,size_t n){snprintf(out,n,"{\"version\":1,\"ready\":true,\"revision\":0}");}
-static int device_maintenance_set(const maintenance_config_t*c,uint32_t revision){assert(c->restart_hours>=1&&c->restart_hours<=168);(void)revision;++changes;return operation_error;}
+static void device_maintenance_json(char*out,size_t n){snprintf(out,n,"{\"version\":2,\"ready\":true,\"revision\":0}");}
+static int device_maintenance_set(const maintenance_config_t*c,uint32_t revision){assert(c->version==2&&c->restart_minute<1440&&c->restart_days<=127);(void)revision;++changes;return operation_error;}
 static int device_maintenance_cleanup(void){++cleanups;return operation_error;}
-static int device_maintenance_reboot(bool manual){assert(manual);++reboots;return operation_error;}
+static int device_maintenance_reboot(void){++reboots;return operation_error;}
+static int device_maintenance_factory_reset(void){++factory_resets;return operation_error;}
 static uint32_t peer_labels_revision(void){return 7;}
 static int netp2pnet_peer_rename(const char*id,const char*label,uint32_t rev){assert(!strcmp(id,"m-001122334455"));assert(strlen(label)<=96);(void)rev;++renames;return operation_error;}
 static int netp2pnet_peer_add_named(const char*label,const char*ip,uint16_t port,bool restore,uint32_t rev,bool*added){(void)label;(void)ip;(void)port;(void)restore;(void)rev;++adds;*added=added_partial;return operation_error;}
@@ -32,16 +34,22 @@ TEST=r'''
 static httpd_req_t req(const char*body){httpd_req_t r={0};r.method=body?HTTP_POST:HTTP_GET;r.body=body;r.content_len=body?strlen(body):0;r.type="application/json";r.device=device_identity_id();r.status=200;return r;}
 int main(void){
  httpd_req_t r=req(NULL);assert(maintenance_http(&r)==0);cJSON*j=cJSON_Parse(r.response);assert(!strcmp(cJSON_GetObjectItem(j,"device_id")->valuestring,device_identity_id()));assert(!strcmp(cJSON_GetObjectItem(j,"boot_id")->valuestring,"boot-1"));cJSON_Delete(j);
- r=req("{\"op\":\"set\",\"revision\":0,\"restart_hours\":24,\"cleanup_enabled\":true,\"restart_enabled\":false}");r.device="other";maintenance_http(&r);assert(r.status==409&&!changes);
- r=req("{\"op\":\"set\",\"revision\":0,\"restart_hours\":24,\"cleanup_enabled\":true,\"restart_enabled\":false}");maintenance_http(&r);assert(r.status==200&&changes==1);
- const char*bad[]={"{\"op\":\"set\",\"revision\":0,\"restart_hours\":0,\"cleanup_enabled\":true,\"restart_enabled\":false}",
- "{\"op\":\"set\",\"revision\":0,\"restart_hours\":169,\"cleanup_enabled\":true,\"restart_enabled\":false}",
- "{\"op\":\"set\",\"revision\":0.5,\"restart_hours\":24,\"cleanup_enabled\":true,\"restart_enabled\":false}",
- "{\"op\":\"set\",\"revision\":0,\"restart_hours\":24,\"cleanup_enabled\":1,\"restart_enabled\":false}",
- "{\"op\":\"set\",\"revision\":0,\"restart_hours\":24.5,\"cleanup_enabled\":true,\"restart_enabled\":false}"};
+ r=req("{\"op\":\"set\",\"revision\":0,\"restart_days\":21,\"restart_minute\":270,\"cleanup_enabled\":true,\"restart_enabled\":false}");r.device="other";maintenance_http(&r);assert(r.status==409&&!changes);
+ r=req("{\"op\":\"set\",\"revision\":0,\"restart_days\":21,\"restart_minute\":270,\"cleanup_enabled\":true,\"restart_enabled\":false}");maintenance_http(&r);assert(r.status==200&&changes==1);
+ const char*bad[]={"{\"op\":\"set\",\"revision\":0,\"restart_days\":128,\"restart_minute\":270,\"cleanup_enabled\":true,\"restart_enabled\":false}",
+ "{\"op\":\"set\",\"revision\":0,\"restart_days\":21,\"restart_minute\":1440,\"cleanup_enabled\":true,\"restart_enabled\":false}",
+ "{\"op\":\"set\",\"revision\":0.5,\"restart_days\":21,\"restart_minute\":270,\"cleanup_enabled\":true,\"restart_enabled\":false}",
+ "{\"op\":\"set\",\"revision\":0,\"restart_days\":21,\"restart_minute\":270,\"cleanup_enabled\":1,\"restart_enabled\":false}",
+ "{\"op\":\"set\",\"revision\":0,\"restart_days\":21,\"restart_minute\":270.5,\"cleanup_enabled\":true,\"restart_enabled\":false}",
+ "{\"op\":\"set\",\"revision\":0,\"restart_days\":0,\"restart_minute\":270,\"cleanup_enabled\":true,\"restart_enabled\":true}",
+ "{\"op\":\"set\",\"revision\":0,\"restart_hours\":24,\"cleanup_enabled\":true,\"restart_enabled\":true}"};
  for(unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++){r=req(bad[i]);maintenance_http(&r);assert(r.status==400&&changes==1);}
  r=req("{\"op\":\"reboot\",\"boot_id\":\"old-boot\"}");maintenance_http(&r);assert(r.status==409&&!reboots);
  r=req("{\"op\":\"reboot\",\"boot_id\":\"boot-1\"}");maintenance_http(&r);assert(r.status==200&&reboots==1);
+ r=req("{\"op\":\"factory_reset\",\"boot_id\":\"boot-1\"}");r.device="other";maintenance_http(&r);assert(r.status==409&&!factory_resets);
+ r=req("{\"op\":\"factory_reset\",\"boot_id\":\"old-boot\"}");maintenance_http(&r);assert(r.status==409&&!factory_resets);
+ operation_error=ESP_ERR_NOT_SUPPORTED;r=req("{\"op\":\"factory_reset\",\"boot_id\":\"boot-1\"}");maintenance_http(&r);assert(r.status==503&&factory_resets==1);
+ operation_error=0;r=req("{\"op\":\"factory_reset\",\"boot_id\":\"boot-1\"}");maintenance_http(&r);assert(r.status==200&&factory_resets==2);
  operation_error=ESP_ERR_INVALID_STATE;r=req("{\"op\":\"cleanup\"}");maintenance_http(&r);assert(r.status==409&&cleanups==1);operation_error=0;
  char ip[64];uint16_t port;assert(endpoint_parse("[2001:db8::1]:65535",ip,&port)&&port==65535);assert(endpoint_parse("2001:db8::1",ip,&port)&&port==54321);
  assert(endpoint_parse("192.0.2.1:54321",ip,&port)&&port==54321);

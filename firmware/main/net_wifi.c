@@ -1,5 +1,6 @@
 /* Saved Wi-Fi management. All driver transitions run in one worker. */
 #include "net_wifi.h"
+#include "maintenance_clock.h"
 #include "brand.h"
 #include "wifi_policy.h"
 #include "device_identity.h"
@@ -374,6 +375,7 @@ static void manager_step(uint32_t events, int64_t now)
             s_connected = true; wifi_policy_online(policy, now);
             strcpy(s_state, "up"); ip6_ensure_linklocal(); s_announce_at = now;
             ESP_LOGI(TAG, "saved profile acquired IP %s", s_ip);
+            maintenance_clock_network_ready();
         }
     }
     esp_netif_ip_info_t current_ip = {0};

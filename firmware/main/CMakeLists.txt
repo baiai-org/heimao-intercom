@@ -43,6 +43,8 @@ idf_component_register(
         "device_name.c"
         "peer_labels.c"
         "maintenance_policy.c"
+        "maintenance_clock.c"
+        "factory_reset.c"
         "device_maintenance.c"
         "maintenance_http.c"
         "control_lease.c"
@@ -85,6 +87,8 @@ idf_component_register(
         esp_psram
         esphome__micro-opus   # Opus codec (managed component)
         nvs_flash
+        esp_partition
+        spi_flash
         spiffs          # storage partition: custom end-of-transmission tones
         esp_driver_gpio
         esp_driver_uart
@@ -142,12 +146,12 @@ set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=adc_hal_digi_controller_config")
 
-set_source_files_properties(device_maintenance.c maintenance_http.c peer_labels.c
+set_source_files_properties(device_maintenance.c maintenance_http.c factory_reset.c peer_labels.c
     PROPERTIES COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
 
 # HTTP tasks have 10 KB stacks. Reserve at least 4 KB beyond each local frame
 # for routing, TLS and newlib formatting, and retain compiler stack reports.
 set_source_files_properties(net_http.c PROPERTIES
     COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
-set_source_files_properties(netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c bridge.c rf_denoise.c net_audio_denoise.c PROPERTIES
+set_source_files_properties(main.c netp2pnet.c netrelay.c voice.c voice_tail.c sa818_cfg.c ptt.c channel_control.c bridge.c rf_denoise.c net_audio_denoise.c PROPERTIES
     COMPILE_OPTIONS "-fstack-usage")

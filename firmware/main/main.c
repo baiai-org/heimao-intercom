@@ -18,6 +18,7 @@
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <stdatomic.h>
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -31,6 +32,7 @@
 #include "bridge.h"
 #include "frontpanel.h"
 #include "device_maintenance.h"
+#include "factory_reset.h"
 #include "channels.h"
 #include "channels.h"
 #include "net_http.h"
@@ -1636,6 +1638,8 @@ static void console_task(void *arg)
  * is visible without a console attached.  That matters once the board is
  * powered from a battery with no serial link.
  */
+static atomic_uint s_sw1_factory_requested, s_sw1_factory_rejected;
+
 static void heartbeat_task(void *arg)
 {
     (void)arg;
@@ -1651,31 +1655,41 @@ static void heartbeat_task(void *arg)
      * it across a reset makes the ROM enter download mode and the application
      * never starts -- the classic trap with this button.
      *
-     *   3 s   forget the WiFi network, keep the radio settings
-     *   10 s  erase everything saved, radio profile included
+     *   3 s   open the setup AP
+     *   10 s  arm a full reset, then release to start it
      */
     int held_ms = 0;
+    int64_t press_start = -1;
     int announced = 0;
     board_boot_button_init();
 
     for (;;) {
+        if (atomic_exchange(&s_sw1_factory_rejected, 0)) {
+            for (unsigned i = 0; i < 6; ++i) {
+                board_led_set((i & 1u) == 0);
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        }
         if (board_boot_button_pressed()) {
-            if (held_ms == 0) {
+            const int64_t now = esp_timer_get_time();
+            if (press_start < 0) {
+                press_start = now;
                 ESP_LOGI(TAG, "SW1 pressed (GPIO%d reads 0)", PIN_BOOT_IO0);
             }
-            held_ms += 50;
+            const int64_t duration = now - press_start;
+            held_ms = duration >= 10000000 ? 10000 : (int)(duration / 1000);
             /* Blink while counting: the operator can see the press registered
              * instead of wondering whether it took. */
             board_led_set((held_ms / 150) & 1);
 
             if (held_ms >= 10000) {
-                ESP_LOGW(TAG, "SW1 held 10 s -- erasing ALL saved settings");
+                held_ms = 10000;
                 board_led_set(true);
-                vTaskDelay(pdMS_TO_TICKS(300));
-                nvs_flash_erase();
-                esp_restart();
-            }
-            if (held_ms >= 3000 && announced < 1) {
+                if (announced < 3) {
+                    announced = 3;
+                    ESP_LOGW(TAG, "SW1 held 10 s -- release to start factory reset");
+                }
+            } else if (held_ms >= 3000 && announced < 1) {
                 announced = 1;
                 ESP_LOGW(TAG, "SW1 held 3 s -- release now to open setup AP (saved networks kept)");
             } else if (held_ms >= 6000 && announced < 2) {
@@ -1690,13 +1704,16 @@ static void heartbeat_task(void *arg)
         if (held_ms > 0) {
             ESP_LOGI(TAG, "SW1 released after %d ms", held_ms);
         }
-        if (held_ms >= 3000) {
+        if (held_ms >= 10000) {
+            atomic_store(&s_sw1_factory_requested, 1);
+        } else if (held_ms >= 3000) {
             ESP_LOGW(TAG, "SW1 released after %d ms -- opening setup AP; saved networks kept",
                      held_ms);
             board_led_set(false);
             (void)net_wifi_setup_ap_start();
         }
         held_ms = 0;
+        press_start = -1;
         announced = 0;
 
         /*
@@ -1989,6 +2006,16 @@ void app_main(void)
     if (board_led_init() != ESP_OK) {
         ESP_LOGW(TAG, "status LED init failed (not fatal)");
     }
+    const esp_err_t reset = factory_reset_apply_pending();
+    if (reset != ESP_OK) {
+        ESP_LOGE(TAG, "Factory reset pending; restart to retry: %s", esp_err_to_name(reset));
+        for (;;) {
+            board_led_set(true);
+            vTaskDelay(pdMS_TO_TICKS(120));
+            board_led_set(false);
+            vTaskDelay(pdMS_TO_TICKS(120));
+        }
+    }
     if (board_charge_pins_init() != ESP_OK) {
         ESP_LOGW(TAG, "charge header pins init failed (not fatal)");
     }
@@ -2121,6 +2148,13 @@ void app_main(void)
     /* Maintenance only after the full station has remained idle. */
     for (;;) {
         sa818_cfg_refresh_tick();
+        if (atomic_exchange(&s_sw1_factory_requested, 0)) {
+            const esp_err_t err = device_maintenance_factory_reset();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "SW1 factory reset not accepted: %s", esp_err_to_name(err));
+                atomic_store(&s_sw1_factory_rejected, 1);
+            }
+        }
         device_maintenance_tick();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

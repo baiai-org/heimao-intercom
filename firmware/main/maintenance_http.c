@@ -64,24 +64,38 @@ esp_err_t maintenance_http(httpd_req_t *req)
     if (cJSON_IsString(op) && !strcmp(op->valuestring, "set")) {
         const cJSON *clean = cJSON_GetObjectItemCaseSensitive(body, "cleanup_enabled");
         const cJSON *restart = cJSON_GetObjectItemCaseSensitive(body, "restart_enabled");
-        uint32_t revision, hours;
+        uint32_t revision, days, minute;
         if (cJSON_IsBool(clean) && cJSON_IsBool(restart) && uint32_field(body, "revision", &revision) &&
-            uint32_field(body, "restart_hours", &hours) && hours >= 1 && hours <= 168) {
-            maintenance_config_t cfg = {.version=1, .restart_hours=(uint16_t)hours,
-                .cleanup_enabled=cJSON_IsTrue(clean), .restart_enabled=cJSON_IsTrue(restart)};
+            uint32_field(body, "restart_days", &days) && days <= MAINTENANCE_WEEKDAYS &&
+            uint32_field(body, "restart_minute", &minute) && minute < MAINTENANCE_MINUTES_PER_DAY &&
+            (!cJSON_IsTrue(restart) || days)) {
+            const maintenance_config_t cfg = {
+                .version = 2, .restart_days = (uint8_t)days, .restart_minute = (uint16_t)minute,
+                .cleanup_enabled = cJSON_IsTrue(clean), .restart_enabled = cJSON_IsTrue(restart),
+            };
             err = device_maintenance_set(&cfg, revision);
         }
     } else if (cJSON_IsString(op) && !strcmp(op->valuestring, "cleanup")) {
         err = device_maintenance_cleanup();
-    } else if (cJSON_IsString(op) && !strcmp(op->valuestring, "reboot")) {
+    } else if (cJSON_IsString(op) && (!strcmp(op->valuestring, "reboot") ||
+                                      !strcmp(op->valuestring, "factory_reset"))) {
         const cJSON *boot = cJSON_GetObjectItemCaseSensitive(body, "boot_id");
-        err = cJSON_IsString(boot) && !strcmp(boot->valuestring, radio_activity_boot_id()) ?
-            device_maintenance_reboot(true) : ESP_ERR_INVALID_STATE;
+        const bool factory = !strcmp(op->valuestring, "factory_reset");
+        err = ESP_ERR_INVALID_STATE;
+        if (cJSON_IsString(boot) && !strcmp(boot->valuestring, radio_activity_boot_id())) {
+            err = factory ? device_maintenance_factory_reset() : device_maintenance_reboot();
+        }
+        if (factory && err != ESP_OK) {
+            cJSON_Delete(body);
+            return error(req, err == ESP_ERR_INVALID_STATE ? "设备状态已变更或正在写入，请重新读取后重试" :
+                err == ESP_ERR_NOT_SUPPORTED ? "当前 Flash 布局不支持板载彻底恢复，请使用 USB 刷机工具" :
+                "恢复请求未确认，请核对设备是否仍在线", err == ESP_ERR_INVALID_STATE ? 409 : 503);
+        }
     }
     cJSON_Delete(body);
     if (err != ESP_OK) {
-        return error(req, err == ESP_ERR_INVALID_ARG ? "设置无效：间隔须为1至168小时，开关和版本需完整填写" :
-            err == ESP_ERR_INVALID_STATE ? "状态已变更、设备忙或尚未连续空闲60秒；请重新读取后重试" : "保存或执行失败，未确认成功，请重试",
+        return error(req, err == ESP_ERR_INVALID_ARG ? "设置无效：启用时需至少选一天，并填写有效的时分、开关和版本" :
+            err == ESP_ERR_INVALID_STATE ? "状态已变更或设备忙；回收资源需要连续空闲60秒，请重新读取后重试" : "保存或执行失败，未确认成功，请重试",
             err == ESP_ERR_INVALID_ARG ? 400 : err == ESP_ERR_INVALID_STATE ? 409 : 503);
     }
     return reply(req, maintenance_snapshot(), 200);

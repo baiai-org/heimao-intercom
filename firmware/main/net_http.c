@@ -719,7 +719,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":1,\"peer_labels\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -1924,37 +1924,6 @@ static void prev_auto_release(void)
     voice_monitor_release("preview");
 }
 
-/*
- * "Erase everything" needs the HTTP response to be on the wire first: the
- * partition that holds the panel's own settings is about to be wiped.  A
- * one-shot timer gives the socket a moment to flush, then does the same two
- * calls the SW1 10 s gesture does.
- */
-static void factory_wipe_cb(void *arg)
-{
-    (void)arg;
-    ESP_LOGW(TAG, "full factory reset: erasing NVS and rebooting");
-    (void)nvs_flash_erase();
-    esp_restart();
-}
-
-static void factory_wipe_schedule(void)
-{
-    static esp_timer_handle_t t;
-    if (!t) {
-        const esp_timer_create_args_t args = {
-            .callback = factory_wipe_cb,
-            .name     = "factory_wipe",
-        };
-        if (esp_timer_create(&args, &t) != ESP_OK) {
-            ESP_LOGE(TAG, "factory wipe timer create failed");
-            return;
-        }
-    }
-    (void)esp_timer_stop(t);
-    (void)esp_timer_start_once(t, 700 * 1000);
-}
-
 static bool parse_setting_request(httpd_req_t *req, char *key, size_t key_len, char *val, size_t val_len)
 {
     key[0] = val[0] = 0;
@@ -2400,25 +2369,7 @@ static esp_err_t h_set(httpd_req_t *req)
         ESP_LOGW(TAG, "panel defaults restored (WiFi credentials and saved "
                       "channels kept)");
     } else if (!strcmp(key, "factory_wipe")) {
-        /*
-         * The complete reset: erase the whole NVS partition and reboot -- byte
-         * for byte what holding SW1 for 10 s does.  WiFi credentials, the saved
-         * channel bank, the front-panel key mapping, the NET-P2P peer table and
-         * every other saved setting go, and the board comes back up as its own
-         * setup access point.
-         *
-         * The response has to leave before the partition is erased (the browser
-         * is still attached to it), so the erase is deferred to a one-shot
-         * timer.  By the time it fires the panel has its answer and the reboot
-         * is the expected outcome rather than a mystery.
-         */
-        if (voice_mode() == VOICE_TALK) {
-            voice_request_talk_end();
-            for (int w = 0; w < 100 && ptt_get_state() != PTT_IDLE; ++w) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-        }
-        factory_wipe_schedule();
+        return send_result(req, false, "请刷新网页后使用彻底恢复出厂设置按钮");
     } else if (!strcmp(key, "rf_band")) {
         const sa818_band_t band = !strcmp(val, "UHF") ? SA818_BAND_UHF :
                                   !strcmp(val, "VHF") ? SA818_BAND_VHF : SA818_BAND_UNSET;

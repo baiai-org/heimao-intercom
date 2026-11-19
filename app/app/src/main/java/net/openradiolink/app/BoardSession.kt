@@ -275,10 +275,13 @@ class BoardSession(
         api.json("api/np2p/peer",JSONObject().put("op","add").put("name",HandsetName.normalized(name))
             .put("address",address.trim()).put("restore",restore).put("revision",revision));refresh()
     }
-    internal suspend fun saveDeviceMaintenance(cleanup:Boolean,restart:Boolean,hours:Int,revision:Long) {
-        require(hours in 1..168) { "重启间隔须为1至168小时" };ensureLease()
-        val data=api.json("api/maintenance",JSONObject().put("op","set").put("revision",revision)
-            .put("cleanup_enabled",cleanup).put("restart_enabled",restart).put("restart_hours",hours))
+    internal suspend fun saveDeviceMaintenance(cleanup:Boolean,restart:Boolean,revision:Long,value:Int,days:Int?) {
+        ensureLease()
+        val body=JSONObject().put("op","set").put("revision",revision)
+            .put("cleanup_enabled",cleanup).put("restart_enabled",restart)
+        if(days==null) body.put("restart_hours",value)
+        else body.put("restart_days",days).put("restart_minute",value)
+        val data=api.json("api/maintenance",body)
         publish{it.copy(deviceMaintenance=data)}
     }
     internal suspend fun cleanDeviceResources() {
