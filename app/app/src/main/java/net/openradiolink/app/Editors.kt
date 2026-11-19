@@ -137,13 +137,16 @@ import java.util.Date
     }
     Section("尾音") {
         val tails=listOf("关闭","单音 Beep","业余无线电 K-CHOO","宝峰 ROGER","摩托罗拉 MDC-1200","Icom IDAS *","Icom IDAS #","泉盛 UV-K5 双音","自定义音频")
+        val tail = TailSettings.parse(s.status)
+        Text(tail?.description(tails) ?: "正在读取尾音设置…", color=secondary)
         Parameter(manager,p,s,"tail","尾音类型",s.status.value("tail.id"),tails.mapIndexed{i,t->i.toString() to t})
         Parameter(manager,p,s,"tail_modes","应用范围",s.status.value("tail.modes"),listOf("1" to "本地","2" to "公网直连","4" to "网络中继","3" to "本地与直连","5" to "本地与中继","6" to "直连与中继","7" to "所有模式"))
-        Text("自定义音频：${s.status.value("tail.custom_s")} 秒",color=secondary)
+        if (tail != null && tail.customSeconds > 0) Text("自定义音频 ${tail.customSeconds} 秒",color=secondary)
         FlowRow {OutlinedButton(onClick={manager.action(p.id){stopListening();set("tail_preview",s.status.value("tail.id"))}},enabled=s.connected&&!s.maintenance&&s.status.optJSONObject("tail")?.optInt("id",0)!=0){Text("本机试听")}
             TextButton(onClick={manager.action(p.id){set("tail_preview","0")}}){Text("停止试听")}
-            OutlinedButton(onClick={file(false)},enabled=s.connected&&!s.maintenance){Text("上传 WAV / MP3")}
-            TextButton(onClick={confirm("删除手台保存的自定义尾音？",{manager.action(p.id){set("tail_custom_del","1")}})}){Text("删除自定义",color=red)}}
+            OutlinedButton(onClick={file(false)},enabled=s.connected&&!s.maintenance){Text("上传并启用")}
+            TextButton(onClick={confirm("删除手台保存的自定义尾音？",{manager.action(p.id){set("tail_custom_del","1")}})},
+                enabled=s.connected && !s.maintenance && tail?.customSeconds?.let { it > 0 } == true){Text("删除自定义",color=red)}}
     }
 }
 

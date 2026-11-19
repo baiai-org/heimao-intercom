@@ -39,7 +39,8 @@ internal object RadioStateRules {
     fun rejection(reason:String,mode:Int?,networkReady:Boolean?=null):String=when(reason){
         "network_not_ready"->if(networkReady==true)"当前处于${modeName(mode)}模式，手台报告网络转发或本机电台暂未就绪，本次发话已取消。请检查对端连接和本机射频参数后松开重试。" else networkReason(mode)
         "radio_not_ready"->"当前处于${modeName(mode)}模式，电台模块或发射频率尚未就绪，因此禁止发射。请检查模块频段与收发参数。"
-        "busy"->"上一轮发射还在收尾（尾音/释放中），本次按下已取消；请稍等再按，APP 会自动尝试释放。"
+        "tail_pending"->"上一段尾音还在发送，结束后再按发话。"
+        "busy"->"手台正在处理另一段发话，请稍等再按。"
         "owner_lost"->"手台的发射占用已失效，本次发话已取消；APP 会自动尝试释放，请稍后重按。"
         "hold_limit"->"已达到手台的单次发话时限，发话已结束。"
         "expired","session_expired"->"手机通联会话已过期，请重新开启收听后发话。"

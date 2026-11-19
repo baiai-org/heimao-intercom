@@ -315,7 +315,27 @@ class BoardSession(
     suspend fun set(key: String,value: String) {
         ensureLease();reads.incrementAndGet()
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
-        api.json("api/set",JSONObject().put("k",key).put("v",value));refresh()
+        val response = api.json("api/set", JSONObject().put("k", key).put("v", value))
+        when (key) {
+            "tail" -> check(acceptTail(response).id == value.toInt()) { "尾音类型回读不一致" }
+            "tail_modes" -> check(acceptTail(response).modes == value.toInt()) { "尾音应用模式回读不一致" }
+            "tail_custom_del" -> {
+                val confirmed = acceptTail(response)
+                check(confirmed.id != 8 && confirmed.customSeconds == 0.0) { "尾音删除未确认" }
+            }
+            else -> refresh()
+        }
+    }
+
+    private suspend fun acceptTail(response: JSONObject): TailSettings {
+        val status = if (response.has("tail")) response else api.json("api/status")
+        check(!closed && api.deviceId.isNotBlank() && status.optString("device_id") == api.deviceId) {
+            "尾音响应的设备身份不匹配"
+        }
+        val confirmed = TailSettings.parse(status) ?: throw IOException("手台尾音状态未确认")
+        reads.incrementAndGet()
+        publish { it.copy(status = JSONObject(it.status.toString()).put("tail", status.getJSONObject("tail"))) }
+        return confirmed
     }
     /**
      * One user action, six bands. The firmware's /api/set accepts a single band per
@@ -483,22 +503,17 @@ class BoardSession(
                 }
             } catch (e: Exception) {
                 audio?.stopMicrophone();microphoneType(false)
-                runCatching { withTimeout(3000) { api.json("api/sdr_ptt?on=0&sid=$sid&tx=$t&id=0") } }
-                publish { it.copy(ptt=false,pttPending=false) }
-                if(e is PttRejected && (e.reason=="busy"||e.reason=="owner_lost")) {
-                    /* The board may still hold the previous PTT owner.  Try
-                     * an OFF with the token the board actually reports, then
-                     * a forced close if the owner is still stuck. */
-                    val stuck=runCatching{api.json("api/sdr_state?sid=$sid")}.getOrNull()
-                    val boardTx=stuck?.optLong("txid")?:0L
-                    if(boardTx>0L) {
-                        runCatching{withTimeout(1500){api.json("api/sdr_ptt?on=0&sid=$sid&tx=$boardTx&id=0")}}
+                if (e is PttRejected) {
+                    pttLock.withLock {
+                        if (heldTx == t) {
+                            heldTx = 0L
+                            pttMayBeActive = false
+                        }
                     }
-                    val owner=stuck?.optString("owner").orEmpty()
-                    if(owner.isNotBlank() && owner!="none") {
-                        runCatching{withTimeout(2000){api.json("api/sdr?on=0&sid=$sid&force=1")}}
-                    }
+                } else if (t != 0L) {
+                    runCatching { withTimeout(3000) { api.json("api/sdr_ptt?on=0&sid=$sid&tx=$t&id=0") } }
                 }
+                publish { it.copy(ptt=false,pttPending=false) }
                 if(e is PttRejected) {
                     var latest=currentLive ?: JSONObject()
                     if(e.reason=="network_not_ready") {
@@ -522,8 +537,7 @@ class BoardSession(
     }
     suspend fun stopPtt()=pttLock.withLock {
         val wasHeld=pttMayBeActive || view.value.ptt || view.value.pttPending
-        /* Send the 880/660 tone first: stopMicrophone() clears `recording`, so
-         * the old order silently skipped the tone on every release. */
+        /* The board appends its selected tail after the microphone stops. */
         audio?.finishMicrophone();audio?.stopMicrophone();microphoneType(false)
         if (wasHeld && sid!=0L && tx!=0L) {
             val s=sid; val t=if(heldTx!=0L) heldTx else tx
@@ -564,7 +578,8 @@ class BoardSession(
                     val releasing=state?.optBoolean("rel")==true || state?.optBoolean("tail")==true
                     val owner=state?.optString("owner").orEmpty()
                     val stuckOwner=owner.isNotBlank() && owner!="none" && !holding && !releasing
-                    if((holding && !releasing) || stuckOwner) {
+                    val matching = state != null && state.optLong("sid") == s && state.optLong("tx") == t
+                    if(matching && !releasing && (holding || stuckOwner)) {
                         val forced=runCatching{api.json("api/sdr?on=0&sid=$s&force=1")}.isSuccess
                         if(forced){confirmed=true;audio?.close();audio=null;playbackType(false);sid=0}
                     }
@@ -586,8 +601,14 @@ class BoardSession(
         publish { it.copy(maintenance=true,progress=0,phase=if(firmware)"上传固件" else "上传尾音",error="") }
         try {
             api.json("api/control",JSONObject().put("op","renew"));lastRenew=SystemClock.elapsedRealtime()
+            val activateTail = !firmware && capabilities.optInt("tail_activate") >= 1
+            val path = when {
+                firmware -> "api/ota"
+                activateTail -> "api/tail_upload?activate=1"
+                else -> "api/tail_upload"
+            }
             var result=JSONObject()
-            try { result=api.upload(if(firmware)"api/ota" else "api/tail_upload",data) { progress -> publish { it.copy(progress=progress) } } }
+            try { result=api.upload(path,data) { progress -> publish { it.copy(progress=progress) } } }
             catch(e: IOException) { if(e is ApiFailure || !firmware || view.value.progress<100)throw e }
             if (firmware) {
                 api.token="";publish { it.copy(phase="等待重启并核对完整镜像",mine=false) }
@@ -604,8 +625,19 @@ class BoardSession(
                 }
                 check(verified) { "未能确认新固件运行，请核对设备后再试" }
             }
+            val summary = if (firmware) {
+                "完整运行镜像与所选文件一致。SHA256：${BoardApi.sha256(data)}"
+            } else {
+                val tail = if (activateTail) acceptTail(result) else {
+                    set("tail", "8")
+                    TailSettings.parse(view.value.status) ?: throw IOException("手台尾音状态未确认")
+                }
+                check(tail.id == 8 && tail.customPlayable) { "自定义尾音启用未确认" }
+                if (tail.enabled) "已保存并启用自定义尾音，下一次发话生效"
+                else "已保存并选用自定义尾音，当前模式未启用尾音"
+            }
             publish { it.copy(phase=if(firmware)"升级校验完成" else "尾音上传完成",progress=100,
-                taskResult=if(firmware)"完整运行镜像与所选文件一致。SHA256：${BoardApi.sha256(data)}" else "尾音已转换保存，长度 ${result.optDouble("seconds")} 秒") }
+                taskResult=summary) }
         } finally {
             publish { it.copy(maintenance=false) }
             runCatching { refresh(true) }

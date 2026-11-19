@@ -4,6 +4,7 @@ const main=path.resolve(__dirname,'../firmware/main');
 const output=process.env.PANEL_TEST_OUTPUT || __dirname;fs.mkdirSync(output,{recursive:true});
 const identity={device_id:'orl-example',api_version:2,custom_name:'桥接测试',name_revision:1};
 const originalIdentity=identity.device_id;
+let failTailUpload=false, tailUploads=0, holdTailUpload=null;
 const status={...identity,build:{version:'r11-90'},wifi:{connected:true,ip:'192.0.2.1',ssid:'测试网络',state:'connected',rssi:-45,host:'heimao',ip6:''},
  mode:'MONITOR',ptt:'IDLE',rssi:80,peak:200,mod_sq:true,sql_open:true,eq_spk:[0,0,0,0,0,0],eq_mic:[0,0,0,0,0,0],
  clip:0,ovf:0,underruns:0,gain:96,txgain:36,ntxgain:254,bgtx:16,cvol:80,spk:5,rxnetgain:16,txpre:1,tx_count:0,uptime:120,heap:50000,audio_rate:16000,
@@ -25,6 +26,11 @@ const denoise={ok:true,levels:0,active_mode:0,...idleDenoise,
 const packLevel=(setting,level)=>level << ((setting-1)*3);
 const getLevel=setting=>(denoise.levels >> ((setting-1)*3)) & 7;
 const putLevel=(setting,level)=>{denoise.levels=(denoise.levels & ~packLevel(setting,7)) | packLevel(setting,level);};
+const tailState=()=>{
+ const {tail,intercom:{mode}}=status;
+ return {...tail,mode,enabled:!!(tail.id && (tail.modes & (1<<mode))),
+  custom_play_ms:Math.round(tail.custom_s*1000)};
+};
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
 (async()=>{
@@ -43,7 +49,20 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    if(p==='/api/device')json=identity;
    else if(p==='/api/talk'){assert.equal(url.searchParams.get('on'),'0');stops++;if(!refuseStop)status.ptt="IDLE";json={ok:!refuseStop};}
    else if(p==='/api/sdr_ptt'){assert.equal(url.searchParams.get('on'),'0');json={ok:true,sid:Number(url.searchParams.get('sid')),tx:Number(url.searchParams.get('tx')),id:Number(url.searchParams.get('id')),ptt:refuseStop};}
-   else if(p==='/api/status')json=status;
+    else if(p==='/api/status')json={...status,tail:tailState()};
+    else if(p==='/api/tail_upload'){
+     assert.equal(url.searchParams.get('activate'),'1');
+     assert.equal(route.request().method(),'POST');
+     assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+     assert.equal(route.request().postDataBuffer().toString(),'test audio');
+     tailUploads++;
+     if(holdTailUpload)await holdTailUpload;
+     if(failTailUpload)json={ok:false,err:'存储失败'};
+     else {
+      status.tail.id=8;status.tail.custom_s=0.8;
+      json={ok:true,device_id:identity.device_id,tail:tailState()};
+     }
+    }
    else if(p==='/api/rf_denoise'){
     if(route.request().method()==='POST'){
      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
@@ -76,8 +95,15 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    else if(p==='/api/channels')json=channels;
    else if(['/api/ctcss','/api/dcs'].includes(p))json=[];
    else if(p==='/api/set'){
-    const k=url.searchParams.get('k'),v=url.searchParams.get('v');writes.push({k,v});
-    if(k==='ix_mode')status.intercom.mode=Number(v);
+     const {k,v}=route.request().method()==='POST' ? route.request().postDataJSON() :
+      {k:url.searchParams.get('k'),v:url.searchParams.get('v')};
+     writes.push({k,v});
+     if(k==='tail' || k==='tail_modes'){
+      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+      if(k==='tail')status.tail.id=Number(v);
+      else status.tail.modes=Number(v);
+      return route.fulfill({json:{ok:true,device_id:identity.device_id,tail:tailState()}});
+     }else if(k==='ix_mode')status.intercom.mode=Number(v);
     else if(k==='freq_pair'){
      if(rejectChannel)return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:false,err:'模块拒绝频率或响应超时，请重新提交可用频率'})});
      [status.freq.tx,status.freq.rx]=v.split(',').map(Number);
@@ -155,7 +181,35 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
     card.classList.contains('subcard');
   }));
   await page.getByRole('button',{name:'尾音',exact:true}).click();
-  assert(await page.locator('#ixTailFile').count());
+   const tailType=page.locator('#ixTailSel'), tailStatus=page.locator('#ixTailState');
+   await tailType.selectOption('1');
+   await page.waitForFunction(()=>document.querySelector('#ixTailState').textContent.includes('当前模式已启用'));
+   await page.locator('#ixTailM1').uncheck();
+   await page.waitForFunction(()=>document.querySelector('#ixTailState').textContent.includes('当前模式未启用'));
+   assert.equal(status.tail.modes,5);
+   await page.locator('#ixTailFile').setInputFiles({name:'tail.wav',mimeType:'audio/wav',buffer:Buffer.from('test audio')});
+   // The selector stays on the board-confirmed tone during a delayed upload.
+   let finishTailUpload;
+   holdTailUpload=new Promise(resolve=>{finishTailUpload=resolve;});
+   const upload=page.waitForRequest(req=>req.url().includes('/api/tail_upload?'));
+   await page.getByRole('button',{name:'上传并启用',exact:true}).click();
+   await upload;
+   assert.equal(await tailType.inputValue(),'1');
+   assert((await tailStatus.textContent()).includes('正在确认'));
+   holdTailUpload=null;finishTailUpload();
+   await page.waitForFunction(()=>document.querySelector('#ixTailSel').value==='8');
+   assert((await tailStatus.textContent()).includes('当前模式未启用'));
+   assert.equal(status.tail.modes,5);
+   assert.equal(writes.filter(write=>write.k==='tail').length,1);
+   await tailType.selectOption('1');
+   await page.waitForFunction(()=>document.querySelector('#ixTailSel').value==='1');
+   failTailUpload=true;
+   await page.locator('#ixTailFile').setInputFiles({name:'next.wav',mimeType:'audio/wav',buffer:Buffer.from('test audio')});
+   await page.getByRole('button',{name:'上传并启用',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#ixTailState').textContent.includes('存储失败'));
+   assert.equal(await tailType.inputValue(),'1');
+   assert.equal(tailUploads,2);
+   failTailUpload=false;
   await page.getByRole('button',{name:'调音台 EQ',exact:true}).click();
   const input=path=>card.locator('[data-path="'+path+'"]');
   const save=card.locator('[data-dn=save]'), undo=card.locator('[data-dn=undo]');
@@ -165,8 +219,15 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
     ['本地模拟','公网直连','MQTT 网络中继'][mode]);
   };
   const saved=()=>page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('已保存'));
-  const visibleSelects=()=>card.locator('select:visible').count();
+   const visibleSelects=()=>card.locator('select[data-path]:visible').count();
+   const advanced=card.locator('[data-dn=advanced]');
+   const localPreset=card.locator('[data-dn=localPreset]');
+   const networkPreset=card.locator('[data-dn=networkPreset]');
   await selectMode(1);
+   assert.equal(await visibleSelects(),0);
+   assert(await localPreset.isVisible());
+   assert(await networkPreset.isVisible());
+   await advanced.locator('summary').first().click();
   assert.equal(await visibleSelects(),6);
   assert.deepEqual(await input('netTx').locator('option').allTextContents(),['关闭','轻度','标准','强力','极强']);
   await input('netTx').focus();
@@ -236,6 +297,7 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   await save.click();await saved();assert.equal(getLevel(5),0);
   await selectMode(0);
   assert.equal(await visibleSelects(),2);
+   assert(!await networkPreset.isVisible());
   await input('handset').selectOption('3');
   await page.locator('[data-page=device]').click();
   await page.locator('[data-page=audio]').click();
@@ -248,6 +310,19 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   failDenoiseRead=false;
   await card.locator('[data-dn=retry]').click();
   await selectMode(2);
+   await advanced.locator('summary').first().click();
+   assert.equal(await visibleSelects(),0);
+   assert.equal(await localPreset.inputValue(),'mixed');
+   assert.equal(await networkPreset.inputValue(),'mixed');
+   const p2pBefore=[1,5,6,7].map(getLevel);
+   const writesBefore=denoiseWrites;
+   await networkPreset.selectOption('3');await saved();
+   assert.equal(denoiseWrites,writesBefore+1);
+   assert.deepEqual([2,8,9,10].map(getLevel),[3,3,3,3]);
+   assert.deepEqual([1,5,6,7].map(getLevel),p2pBefore);
+   await localPreset.selectOption('0');await saved();
+   assert.deepEqual([3,4].map(getLevel),[0,0]);
+   assert.deepEqual([2,8,9,10].map(getLevel),[3,3,3,3]);
   await page.setViewportSize({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   assert.equal(await card.locator('.denoise-options').first().evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length),1);

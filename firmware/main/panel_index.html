@@ -2001,11 +2001,12 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <span class="pick-chip">选择文件</span>
           <span class="pick-name" id="ixTailName">未选择</span>
         </label>
-        <button id="ixTailUp" class="pri">上传转换</button>
+        <button id="ixTailUp" class="pri" disabled>上传并启用</button>
         <button id="ixTailDel">删除</button>
       </div>
+      <div class="row"><span id="ixTailState" role="status">正在读取尾音设置…</span></div>
       <div class="row" style="margin-bottom:0">
-        <label>Flash 已存</label>
+        <label>自定义音频</label>
         <span id="ixTailInfo" style="flex:1;font-family:var(--mono);font-size:11.5px;color:var(--dim)">-</span>
       </div>
 
@@ -2108,6 +2109,13 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <p data-dn="connection" class="denoise-note" role="status">正在读取降噪设置…</p>
         <button type="button" data-dn="retry" hidden>重试</button>
         <div data-dn="form" hidden>
+          <div class="denoise-options">
+            <label><span>本机收发 · 各模式共用</span><select data-dn="localPreset"></select></label>
+            <label data-dn="networkPresetRow" hidden><span data-dn="networkPresetLabel"></span><select data-dn="networkPreset"></select></label>
+          </div>
+          <p id="rfDenoiseStatus" class="denoise-note" role="status"></p>
+          <details data-dn="advanced">
+          <summary>按线路调整</summary>
           <fieldset class="denoise-group">
             <legend>手台发话</legend>
             <div class="denoise-options">
@@ -2137,7 +2145,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
             <button type="button" class="pri" data-dn="save" disabled>保存降噪设置</button>
             <button type="button" data-dn="undo" disabled>撤销未保存修改</button>
           </div>
-          <p id="rfDenoiseStatus" class="denoise-note" role="status"></p>
+          </details>
         </div>
       </section>
 
@@ -3310,28 +3318,111 @@ async function credSet() {
 }
 $('ixPassSet2').onclick = credSet;
 
-$('ixTailSel').onchange = () => cmd('tail', $('ixTailSel').value);
-$('ixTailM0').onchange = tailModesApply;
-$('ixTailM1').onchange = tailModesApply;
-$('ixTailM2').onchange = tailModesApply;
-function tailModesValue() {
-  return ['ixTailM0', 'ixTailM1', 'ixTailM2'].reduce((v, id) =>
-    v | ($(id).checked ? +$(id).value : 0), 0);
+const tailModeControls = ['ixTailM0', 'ixTailM1', 'ixTailM2'].map($);
+let tailSaved = null;
+let tailPending = false;
+let tailEpoch = 0;
+let tailMessage = '';
+
+function tailLabel(tail) {
+  if (!tail) return '正在读取尾音设置…';
+  if (!tail.id) return '尾音已关闭';
+  if (!(tail.modes & (1 << tail.mode))) return '当前模式未启用尾音';
+  if (!tail.enabled) return '所选尾音不可播放';
+  return '当前模式已启用 · ' + $('ixTailSel').options[tail.id].text;
 }
-function tailModesRestore(modes) {
-  ['ixTailM0', 'ixTailM1', 'ixTailM2'].forEach(id => {
-    const el = $(id);
-    if (document.activeElement !== el) el.checked = !!(modes & +el.value);
-  });
-}
-async function tailModesApply() {
-  const modes = tailModesValue();
-  if (!modes) {
-    log('尾音至少选择一个应用模式；如需全部关闭请选择“关闭尾音”', 'err');
-    tailModesRestore((window._st && window._st.tail && window._st.tail.modes) || 7);
-    return;
+
+function renderTail() {
+  const editable = !!tailSaved && !tailPending;
+  $('ixTailSel').disabled = !editable;
+  $('ixTailPrev').disabled = !editable || !tailSaved.id;
+  $('ixTailUp').disabled = !editable;
+  $('ixTailDel').disabled = !editable || !tailSaved.custom_s;
+  for (const control of tailModeControls) {
+    control.disabled = !editable;
+    if (tailSaved) control.checked = !!(tailSaved.modes & Number(control.value));
   }
-  await cmd('tail_modes', modes);
+  if (tailSaved) {
+    $('ixTailSel').value = String(tailSaved.id);
+    $('ixTailInfo').textContent = tailSaved.custom_s
+      ? tailSaved.custom_s.toFixed(2) + ' 秒'
+      : '未上传 WAV 或 MP3';
+  }
+  $('ixTailState').textContent = tailPending ? '正在确认尾音设置…' :
+    [tailLabel(tailSaved), tailMessage].filter(Boolean).join(' · ');
+}
+
+function acceptTail(response, device) {
+  const tail = response.tail;
+  if (response.device_id !== device || !tail ||
+      !Number.isInteger(tail.id) || tail.id < 0 || tail.id > 8 ||
+      !Number.isInteger(tail.modes) || tail.modes < 1 || tail.modes > 7 ||
+      !Number.isInteger(tail.mode) || tail.mode < 0 || tail.mode > 2 ||
+      !Number.isFinite(tail.custom_s) || typeof tail.enabled !== 'boolean') {
+    throw Error('手台尾音状态未确认');
+  }
+  tailSaved = tail;
+}
+
+async function writeTail(path, options, matches, failure) {
+  if (tailPending || !tailSaved) return false;
+  tailPending = true;
+  ++tailEpoch;
+  tailMessage = '';
+  renderTail();
+  let device;
+  let confirmed = false;
+  try {
+    device = (await ORLControl.identity).device_id;
+    const response = await fetch(path, {
+      method: 'POST', ...options, cache: 'no-store',
+      headers: { ...options.headers, 'X-ORL-Device': device },
+    });
+    const body = await response.json();
+    if (!response.ok || !body.ok) throw Error(body.err || failure);
+    acceptTail(body, device);
+    if (!matches(tailSaved)) throw Error(failure + '，请核对手台设置');
+    confirmed = true;
+    tailMessage = '已保存，下一次发话生效';
+  } catch (error) {
+    tailMessage = error.message || failure;
+    if (device) {
+      try {
+        acceptTail(await panelReadJsonImpl('/api/status'), device);
+      } catch (_) {
+        tailMessage = failure + '，手台状态未确认';
+      }
+    }
+  } finally {
+    tailPending = false;
+    renderTail();
+    last = '';
+    setTimeout(refresh, 60);
+  }
+  return confirmed;
+}
+
+function setTail(key, value, matches) {
+  return writeTail('/api/set', {
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({k: key, v: String(value)}),
+  }, matches, '尾音设置未确认');
+}
+
+$('ixTailSel').onchange = () => {
+  const id = Number($('ixTailSel').value);
+  void setTail('tail', id, tail => tail.id === id);
+};
+for (const control of tailModeControls) {
+  control.onchange = () => {
+    const modes = tailModeControls.reduce((mask, input) => mask | (input.checked ? Number(input.value) : 0), 0);
+    if (!modes) {
+      tailMessage = '请至少保留一个应用模式，全部停用时可选择关闭尾音';
+      renderTail();
+      return;
+    }
+    void setTail('tail_modes', modes, tail => tail.modes === modes);
+  };
 }
 $('ixTailPrev').onclick = () => {
   const v = parseInt($('ixTailSel').value, 10);
@@ -3343,24 +3434,13 @@ $('ixTailUp').onclick = async () => {
   const f = $('ixTailFile').files[0];
   if (!f) { log('请先选择 WAV 或 MP3 音频文件', 'err'); return; }
   if (f.size > 512 * 1024) { log('文件超过 512 KB 上限', 'err'); return; }
-  log('正在上传并转换 ' + f.name + ' (' + f.size + ' B)...');
-  const buf = new Uint8Array(await f.arrayBuffer());
-  try {
-    const r = await fetch('/api/tail_upload', { method: 'POST', body: buf });
-    const j = await r.json();
-    if (j.ok) {
-      log('自定义尾音已存储: ' + j.seconds + ' s (8 kHz μ-law)', 'good');
-      $('ixTailSel').value = '8';
-      cmd('tail', '8');
-      resetPick('ixTailFile', 'ixTailPick', 'ixTailName');
-    } else {
-      log('上传失败: ' + (j.err || ''), 'err');
-    }
-  } catch (e) {
-    log('上传异常: ' + e, 'err');
+  if (await writeTail('/api/tail_upload?activate=1', {body: f},
+      tail => tail.id === 8 && tail.custom_play_ms > 0, '上传并启用未确认')) {
+    resetPick('ixTailFile', 'ixTailPick', 'ixTailName');
   }
 };
-$('ixTailDel').onclick = () => cmd('tail_custom_del', 1);
+$('ixTailDel').onclick = () => setTail('tail_custom_del', 1, tail => !tail.custom_s && tail.id !== 8);
+renderTail();
 
 $('mOn').onclick = () => cmd('monitor', 1);
 $('mOff').onclick = () => cmd('monitor', 0);
@@ -4154,11 +4234,16 @@ async function refreshMeter() {
 async function refresh() {
   if (panelRefreshBusy) return false;
   panelRefreshBusy = true;
+  const tailReadEpoch = tailPending ? -1 : tailEpoch;
   let readSucceeded = false;
   try {
     const s = await panelReadJson('/api/status');
     if (!s || typeof s.ptt !== 'string' || !s.wifi || !s.intercom) throw Error('手台状态格式错误');
     if (window.ORLControl && ORLControl.device && s.device_id && ORLControl.device !== s.device_id) throw Error('设备身份变化，请重新打开面板');
+    if (s.tail && !tailPending && tailReadEpoch === tailEpoch && Number.isInteger(s.tail.mode)) {
+      acceptTail(s, window.ORLControl?.device || s.device_id);
+      renderTail();
+    }
     readSucceeded = true; panelSeen(); panelStatusAt = Date.now();
     panelReadState.textContent = '';
     let radio = window._radio;
@@ -4246,7 +4331,7 @@ async function refresh() {
       ['喇叭音量', s.spk],
       ['峰值 / 硬削顶计数', s.peak + ' / ' + s.clip],
       ['ADC 溢出 / 欠载', s.ovf + ' / ' + s.underruns],
-      ['尾音信令', s.tail && s.tail.id ? ('#' + s.tail.id + ' 已启用') : '未启用']
+      ['尾音信令', tailLabel(tailSaved)]
     ];
     $('stat').innerHTML = kv.map(([a, b]) => '<div class="kv-item"><span>' + escHtml(a) + '</span><b>' + escHtml(b) + '</b></div>').join('');
 
@@ -4313,15 +4398,6 @@ async function refresh() {
       if (!s.sdr.on && SDR.on) sdrStop(false);
     }
 
-    if (s.tail) {
-      if (document.activeElement !== $('ixTailSel') && $('ixTailSel').value !== String(s.tail.id)) {
-        $('ixTailSel').value = String(s.tail.id);
-      }
-      tailModesRestore(Number(s.tail.modes || 7));
-      $('ixTailInfo').textContent = s.tail.custom_s
-        ? (s.tail.custom_s.toFixed(2) + ' s · μ-law ' + Math.round(s.tail.custom_s * 8) + ' KB')
-        : '未上传（支持 ≤5s WAV/MP3）';
-    }
 
     if (Date.now() < holdSyncUntil) return true;
 

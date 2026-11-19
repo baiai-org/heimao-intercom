@@ -10,6 +10,35 @@ import org.junit.Test
 import java.util.concurrent.TimeUnit
 
 class BoardApiTest {
+    @Test fun tailUploadCarriesIdentityAndConfirmsTheDeviceResponse() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        val api = BoardApi(AccessPoint(address = server.url("/proxy/").toString()))
+        api.deviceId = "board-A"
+        try {
+            server.enqueue(MockResponse().setBody("""{"ok":true,"device_id":"board-A",
+                "tail":{"id":8,"modes":5,"mode":1,"enabled":false,"custom_s":0.8,"custom_play_ms":780}}"""))
+            val response = api.upload("api/tail_upload?activate=1", byteArrayOf(1, 2, 3)) {}
+            val tail = checkNotNull(TailSettings.parse(response))
+            assertEquals(8, tail.id)
+            assertEquals(5, tail.modes)
+            assertFalse(tail.enabled)
+            assertTrue(tail.customPlayable)
+            val request = server.takeRequest(1, TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/proxy/api/tail_upload?activate=1", request.path)
+            assertEquals("board-A", request.getHeader("X-ORL-Device"))
+            assertArrayEquals(byteArrayOf(1, 2, 3), request.body.readByteArray())
+            assertEquals(1, server.requestCount)
+            val legacy = checkNotNull(TailSettings.parse(JSONObject("""{"tail":{"id":8,"modes":5,
+                "custom_s":0.8},"intercom":{"mode":2}}""")))
+            assertTrue(legacy.enabled)
+        } finally {
+            api.close()
+            server.shutdown()
+        }
+    }
+
     @Test fun activityPttAndSetupRenewalBypassSlowSettingsWhileKeepingIdentityAndProxyPath()=runBlocking {
         val server=MockWebServer();server.start()
         val api=BoardApi(AccessPoint(address=server.url("/proxy/").toString()))

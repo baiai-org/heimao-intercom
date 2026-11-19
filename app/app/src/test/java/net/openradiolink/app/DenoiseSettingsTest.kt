@@ -20,6 +20,23 @@ class DenoiseSettingsTest {
         assertEquals(DenoiseSettings.paths(0)[1],DenoiseSettings.paths(2)[2])
     }
 
+    @Test fun presetsSummarizeMixedSettingsAndWriteOneGroup() {
+        val mqtt = DenoiseSettings(2, (2 shl 6) or (4 shl 9) or (2 shl 21))
+        assertNull(mqtt.uniformLevel(mqtt.localPaths))
+        assertNull(mqtt.uniformLevel(mqtt.networkPaths))
+        val localOff = mqtt.preset(mqtt.localPaths, DenoiseLevel.OFF).body()
+        assertEquals((1 shl 3) or (1 shl 4), localOff.getInt("mask"))
+        assertEquals((2 shl 6) or (4 shl 9), localOff.getInt("expected_levels"))
+        assertEquals(0, localOff.getInt("levels"))
+        val network = mqtt.preset(mqtt.networkPaths, DenoiseLevel.STRONG)
+        assertEquals(listOf(2, 8, 9, 10), network.changes.keys.map { it.setting }.sorted())
+        val newSettings = DenoiseSettings(2, network.body().getInt("levels") or (1 shl 12))
+        assertTrue(network.confirmed(newSettings))
+        assertEquals(DenoiseLevel.STRONG, newSettings.uniformLevel(newSettings.networkPaths))
+        assertEquals(DenoiseLevel.OFF, newSettings.uniformLevel(newSettings.localPaths))
+        assertTrue(DenoiseSettings(0, 0).networkPaths.isEmpty())
+    }
+
     @Test fun editSendsOnlyTheFieldsInTheCurrentMode() {
         val p2p=DenoiseSettings.paths(1)
         val mqtt=DenoiseSettings.paths(2)

@@ -1,13 +1,8 @@
-@file:OptIn(
-    androidx.compose.material3.ExperimentalMaterial3Api::class,
-    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
-)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package net.openradiolink.app
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,172 +10,199 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun DenoiseEditor(manager:DeviceManager,p:DeviceProfile,s:SessionView) {
-    var open by remember(p.id){mutableStateOf(false)}
-    val connected=s.profileId==p.id && s.connected && !s.maintenance
-    SettingRow("语音降噪",value="分线路档位",enabled=connected) { open=true }
-    if(open) {
-        ModalBottomSheet(
-            sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true),
-            onDismissRequest={open=false},
-        ) {
-            DenoiseSheet(manager,p.id,s)
-        }
-    }
-}
+internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state: SessionView) {
+    val scope = rememberCoroutineScope()
+    val device = state.deviceId
+    val connected = state.profileId == profile.id && device.isNotBlank() && state.connected && !state.maintenance
+    val currentMode = RadioStateRules.mode(state.activity.live(state.live), state.status)
 
-@Composable
-private fun DenoiseSheet(manager:DeviceManager,profileId:String,s:SessionView) {
-    val scope=rememberCoroutineScope()
-    var saved by remember{mutableStateOf<DenoiseSettings?>(null)}
-    val drafts=remember{mutableStateMapOf<DenoisePath,DenoiseDraft>()}
-    var busy by remember{mutableStateOf(false)}
-    var message by remember{mutableStateOf("")}
-    var error by remember{mutableStateOf(false)}
-    var automaticReadKey by remember{mutableStateOf<Pair<String,Int?>?>(null)}
-    val currentMode=RadioStateRules.mode(s.activity.live(s.live),s.status)
-    val connected=s.profileId==profileId && s.connected && !s.maintenance
-    val current=saved
-    val paths=current?.paths.orEmpty()
-    val editable=connected && !busy && current!=null && (currentMode==null || currentMode==current.mode)
-    val changes=paths.mapNotNull { path->drafts[path]?.let{path to it} }.toMap()
+    var saved by remember(profile.id, device) { mutableStateOf<DenoiseSettings?>(null) }
+    val drafts = remember(profile.id, device) { mutableStateMapOf<DenoisePath, DenoiseDraft>() }
+    var advanced by remember(profile.id, device) { mutableStateOf(false) }
+    var busy by remember(profile.id, device) { mutableStateOf(false) }
+    var reading by remember(profile.id, device) { mutableStateOf(false) }
+    var unsupported by remember(profile.id, device) { mutableStateOf(false) }
+    var epoch by remember(profile.id, device) { mutableLongStateOf(0L) }
+    var loadError by remember(profile.id, device) { mutableStateOf("") }
+    var feedback by remember(profile.id, device) { mutableStateOf("") }
+    var saveFailed by remember(profile.id, device) { mutableStateOf(false) }
 
-    fun run(operation:suspend BoardSession.()->Unit) {
-        if(busy)return
-        busy=true
-        message=""
-        error=false
-        val job=manager.action(profileId) {
+    fun read() {
+        if (!connected || busy || reading || unsupported) return
+        reading = true
+        val started = epoch
+        val job = manager.action(profile.id) {
             try {
-                operation()
-            } catch(e:CancellationException) {
-                throw e
-            } catch(e:Exception) {
+                val result = api.readDenoise()
                 withContext(Dispatchers.Main) {
-                    if(e is DenoiseUnsupported) saved=null
-                    error=true
-                    message=e.message ?: "降噪设置未确认，请重试"
-                }
-                if(e is CertificateFailure)throw e
-            }
-        }
-        if(job==null) {
-            busy=false
-            message="手台当前不可操作，请重新读取降噪设置"
-            error=true
-        } else {
-            job.invokeOnCompletion { scope.launch { busy=false } }
-        }
-    }
-
-    fun read()=run {
-        val result=api.readDenoise()
-        withContext(Dispatchers.Main){saved=result}
-    }
-
-    LaunchedEffect(connected,s.deviceId,currentMode,busy) {
-        if(!connected) {
-            automaticReadKey=null
-        } else if(!busy) {
-            val key=s.deviceId to currentMode
-            if(automaticReadKey!=key) {
-                automaticReadKey=key
-                read()
-            }
-        }
-    }
-
-    Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal=20.dp).padding(bottom=24.dp),
-        verticalArrangement=Arrangement.spacedBy(10.dp),
-    ) {
-        Text("语音降噪",style=MaterialTheme.typography.headlineSmall)
-        if(current!=null) {
-            Text(RadioStateRules.modeName(current.mode),color=secondary)
-            for(path in paths) {
-                val stored=current.level(path)
-                val draft=drafts[path]
-                val value=draft?.requested ?: stored
-                DenoiseLevelRow(path,value,stored,editable) { level->
-                    if(level==stored) drafts.remove(path)
-                    else drafts[path]=DenoiseDraft(draft?.expected ?: stored,level)
-                    message=""
-                    error=false
-                }
-            }
-            Text("保存后从下一话段生效。",color=secondary,style=MaterialTheme.typography.bodySmall)
-            if(paths.any{(drafts[it]?.requested ?: current.level(it))==DenoiseLevel.EXTREME}) {
-                Text("极强档可能削弱弱话音和尾音。",color=amber,style=MaterialTheme.typography.bodySmall)
-            }
-        }
-
-        if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if(message.isNotBlank()) Text(message,color=if(error)red else secondary)
-        if(changes.isNotEmpty()) Text("有未保存修改",color=amber,style=MaterialTheme.typography.bodySmall)
-        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick={read()},enabled=connected&&!busy){Text("重新读取")}
-            if(current!=null) {
-                TextButton(
-                    onClick={paths.forEach{drafts.remove(it)};message="";error=false},
-                    enabled=editable&&changes.isNotEmpty(),
-                ){Text("撤销修改")}
-                Button(onClick={
-                    val write=DenoiseWrite(current.mode,changes)
-                    run {
-                        val result=api.writeDenoise(write)
-                        withContext(Dispatchers.Main) {
-                            saved=result
-                            if(write.confirmed(result)) {
-                                write.changes.keys.forEach{drafts.remove(it)}
-                                message="已保存，下一话段生效"
-                            } else {
-                                val conflicts=mutableListOf<String>()
-                                write.changes.forEach { (path,draft) ->
-                                    val latest=result.level(path)
-                                    if(latest==draft.requested) {
-                                        drafts.remove(path)
-                                    } else {
-                                        drafts[path]=draft.copy(expected=latest)
-                                        if(latest!=draft.expected) conflicts.add(path.label+"为"+latest.label)
-                                    }
-                                }
-                                error=true
-                                message=if(conflicts.isEmpty()) "保存未确认，草稿已保留"
-                                else "手台设置有变化（"+conflicts.joinToString("、")+"），请核对后再保存"
-                            }
-                        }
+                    if (started == epoch && api.deviceId == device) {
+                        saved = result
+                        loadError = ""
                     }
-                },enabled=editable&&changes.isNotEmpty()){Text("保存")}
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) {
+                    if (started == epoch) {
+                        if (error is DenoiseUnsupported) {
+                            saved = null
+                            unsupported = true
+                        }
+                        loadError = error.message ?: "读取降噪设置失败"
+                    }
+                }
+                if (error is CertificateFailure) throw error
             }
+        }
+        if (job == null) {
+            reading = false
+            loadError = "手台当前不可操作，请重新读取降噪设置"
+        } else {
+            job.invokeOnCompletion { scope.launch { reading = false } }
+        }
+    }
+
+    fun save(write: DenoiseWrite) {
+        if (busy) return
+        busy = true
+        ++epoch
+        feedback = ""
+        saveFailed = false
+        val job = manager.action(profile.id) {
+            try {
+                check(api.deviceId == device) { "设备身份已变化，请重新连接" }
+                val result = api.writeDenoise(write)
+                withContext(Dispatchers.Main) {
+                    saved = result
+                    loadError = ""
+                    val confirmed = write.confirmed(result)
+                    write.changes.forEach { (path, draft) ->
+                        val latest = result.level(path)
+                        if (latest == draft.requested) drafts.remove(path)
+                        else drafts[path] = draft.copy(expected = latest)
+                    }
+                    saveFailed = !confirmed
+                    feedback = if (confirmed) "已保存，下一话段生效"
+                        else "保存未确认，已读取手台当前档位，请核对后重试"
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) {
+                    drafts.putAll(write.changes)
+                    saveFailed = true
+                    feedback = error.message ?: "保存未确认，请重试"
+                }
+                if (error is CertificateFailure) throw error
+            }
+        }
+        if (job == null) {
+            busy = false
+            drafts.putAll(write.changes)
+            saveFailed = true
+            feedback = "手台当前不可操作，请重试"
+        } else {
+            job.invokeOnCompletion { scope.launch { busy = false } }
+        }
+    }
+
+    LaunchedEffect(connected, device, currentMode) {
+        if (connected) {
+            while (true) {
+                read()
+                delay(2500)
+            }
+        }
+    }
+
+    Text("手台语音降噪", style = MaterialTheme.typography.titleSmall)
+    val current = saved
+    if (current != null) {
+        val editable = connected && !busy && (currentMode == null || current.mode == currentMode)
+        val local = current.localPaths
+        val localLevel = current.uniformLevel(local)
+        DenoiseLevelRow("本机收发 · 各模式共用", localLevel, editable) { level ->
+            if (level != localLevel) save(current.preset(local, level))
+        }
+        val network = current.networkPaths
+        if (network.isNotEmpty()) {
+            val networkLevel = current.uniformLevel(network)
+            DenoiseLevelRow(RadioStateRules.modeName(current.mode), networkLevel, editable) { level ->
+                if (level != networkLevel) save(current.preset(network, level))
+            }
+        }
+
+        val changes = current.paths.mapNotNull { path -> drafts[path]?.let { path to it } }.toMap()
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (feedback.isNotBlank()) Text(feedback, color = if (saveFailed) red else secondary)
+        if (changes.isNotEmpty()) Text("有未保存的线路设置", color = amber, style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { advanced = !advanced }) {
+            Text(if (advanced) "收起线路设置" else "按线路调整")
+        }
+        if (advanced) {
+            for (path in current.paths) {
+                val stored = current.level(path)
+                val draft = drafts[path]
+                DenoiseLevelRow(path.label, draft?.requested ?: stored, editable) { level ->
+                    if (level == stored) drafts.remove(path)
+                    else drafts[path] = DenoiseDraft(draft?.expected ?: stored, level)
+                    feedback = ""
+                }
+            }
+            if (current.paths.any { (drafts[it]?.requested ?: current.level(it)) == DenoiseLevel.EXTREME }) {
+                Text("极强档可能削弱弱话音和尾音。", color = amber, style = MaterialTheme.typography.bodySmall)
+            }
+            if (changes.isNotEmpty()) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { save(DenoiseWrite(current.mode, changes)) }, enabled = editable) {
+                        Text("保存线路设置")
+                    }
+                    TextButton(onClick = {
+                        changes.keys.forEach { drafts.remove(it) }
+                        feedback = ""
+                    }, enabled = editable) { Text("撤销修改") }
+                }
+            }
+        }
+    } else if (connected && loadError.isBlank()) {
+        Text("正在读取降噪设置…", color = secondary)
+    }
+    if (loadError.isNotBlank()) {
+        Text(loadError, color = red, style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { unsupported = false; read() }, enabled = connected && !busy && !reading) {
+            Text("重新读取")
         }
     }
 }
 
 @Composable
 private fun DenoiseLevelRow(
-    path:DenoisePath,
-    level:DenoiseLevel,
-    stored:DenoiseLevel,
-    enabled:Boolean,
-    change:(DenoiseLevel)->Unit,
+    title: String,
+    level: DenoiseLevel?,
+    enabled: Boolean,
+    change: (DenoiseLevel) -> Unit,
 ) {
-    var expanded by remember(path){mutableStateOf(false)}
-    Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,
-        horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-        Column(Modifier.weight(1f)) {
-            Text(path.label)
-            if(level!=stored) Text("已保存 "+stored.label,color=secondary,style=MaterialTheme.typography.bodySmall)
-        }
+    var expanded by remember(title) { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) expanded = false }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, Modifier.weight(1f))
         Box {
-            OutlinedButton(onClick={expanded=true},enabled=enabled){Text(level.label)}
-            DropdownMenu(expanded=expanded&&enabled,onDismissRequest={expanded=false}) {
+            OutlinedButton(onClick = { expanded = true }, enabled = enabled) {
+                Text(level?.label ?: "分线路")
+            }
+            DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
                 DenoiseLevel.entries.forEach { choice ->
-                    DropdownMenuItem(text={Text(choice.label)},onClick={expanded=false;change(choice)})
+                    DropdownMenuItem(text = { Text(choice.label) }, onClick = { expanded = false; change(choice) })
                 }
             }
         }

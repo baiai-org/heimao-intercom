@@ -58,7 +58,7 @@ enum {
 };
 
 #define TAIL_UPLOAD_MAX         (512 * 1024)  /* largest accepted upload */
-#define TAIL_CUSTOM_MAX_SAMPLES (8000 * 5)    /* 5 s at 8 kHz */
+#define TAIL_CUSTOM_MAX_SECONDS 5
 
 /* Which communication architecture receives the configured tail.  The bits
  * intentionally match NETCOM_MODE_* without making this small audio module
@@ -73,28 +73,36 @@ void voice_tail_init(void);
 
 const char *tail_name(int id);
 
+typedef struct {
+    int id;
+    uint8_t modes;
+    size_t custom_samples;
+    size_t custom_play_samples;
+    bool enabled;
+} tail_status_t;
+
+void tail_status(int mode, tail_status_t *out);
+int tail_id_for_mode(int mode);
 int tail_get(void);
 esp_err_t tail_set(int id);          /* persist + activate */
-size_t tail_samples(int id);         /* total 8 kHz samples (0 if empty) */
+size_t tail_samples(int id);         /* stream-rate samples (0 if empty) */
 
 /* Persisted mode mask.  A zero mask is rejected; use TAIL_OFF for a global
  * disable.  Missing/invalid NVS values load as TAIL_MODE_ALL for compatibility
  * with firmware that predates per-mode selection. */
-uint8_t tail_modes_get(void);
 esp_err_t tail_modes_set(int modes);
 bool tail_should_play(int mode);
 
 /*
- * Fetch up to n 8 kHz samples at absolute position pos.  Returns the number
+ * Fetch up to n stream-rate samples at absolute position pos. Returns the number
  * written (0 once pos is at or past the end).
  */
 size_t tail_fetch(int id, size_t pos, int16_t *buf, size_t n);
 
 /* Store an uploaded WAV or MP3 (see the file header for accepted formats). */
-esp_err_t tail_custom_store(const uint8_t *file, size_t len);
+esp_err_t tail_custom_store(const uint8_t *file, size_t len, bool activate);
 bool tail_store_busy(void);
 esp_err_t tail_custom_delete(void);
-size_t tail_custom_samples(void);    /* 0 = none stored */
 
 /* Preview: play id through whichever DAC owner is active right now. */
 void tail_preview_arm(int id);       /* id 0..TAIL_COUNT-1 */

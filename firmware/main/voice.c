@@ -38,6 +38,7 @@ static volatile bool s_dac_talk;
 /* This talk's local-RF decision, latched at start so a config change mid-talk
  * cannot move the DAC owner around. */
 static bool s_rf_also;
+static int s_talk_tail_id;
 static volatile bool s_bridge_inj_amp; /* amplifier forced on while bridge audio plays */
 
 static const char *TAG = "voice";
@@ -2020,6 +2021,7 @@ static void talk_denoise_drain_dac(uint32_t generation, int16_t *buf)
 static void talk_task(void *arg)
 {
     const uint32_t generation = (uint32_t)(uintptr_t)arg;
+    const int tid = s_talk_tail_id;
     int16_t buf[BLOCK_FRAMES * 2];
     bool ptt_released = false;
     _Static_assert(BLOCK_FRAMES <= RF_DENOISE_MAX_BLOCK, "mic capture exceeds DAC denoise queue");
@@ -2146,8 +2148,8 @@ static void talk_task(void *arg)
         talk_denoise_drain(generation, buf, dac_eq, dac_history);
     if (captured_for_denoise && !drained) { ptt_release(PTT_OWNER_TALK, generation); }
     if (denoise_enabled) { rf_denoise_stop(RF_DENOISE_HANDSET_TX); }
+    bool played_tail = false;
     {
-        const int tid = tail_get();
         const size_t total = tail_samples(tid);
         if (tid == TAIL_OFF || total == 0) {
             if (tid != TAIL_OFF) {
@@ -2190,7 +2192,7 @@ static void talk_task(void *arg)
              * PTT only after this task exits -- so the key holds either way.
              */
             struct talk_tail_ctx tctx = { .network = network, .rf_also = s_rf_also };
-            (void)tail_play(tid, tbuf, BLOCK_FRAMES, talk_tail_sink, &tctx);
+            played_tail = tail_play(tid, tbuf, BLOCK_FRAMES, talk_tail_sink, &tctx);
             /*
              * The tone is NOT played back on the local speaker (user
              * requirement): in local mode the amplifier stays off as during
@@ -2201,7 +2203,7 @@ static void talk_task(void *arg)
              */
         }
     }
-    if (drained) { talk_denoise_drain_dac(generation, buf); }
+    if (drained || (played_tail && to_rf)) { talk_denoise_drain_dac(generation, buf); }
     /* Every network talk needs an end marker, including TAIL_OFF and a
      * skipped/empty tail. Otherwise peers retain PTT until its timeout. */
     if (network && netcom_mode() == tx.mode && netcom_room() == tx.room) {
@@ -2529,6 +2531,7 @@ static esp_err_t voice_start_locked(voice_mode_t mode)
         return ESP_FAIL;
     }
     s_mode = VOICE_TALK;
+    s_talk_tail_id = tail_id_for_mode(netcom_mode());
     s_task_running = true;
     /* Hand the DAC over before the first block: the engine's playback loop polls
      * this flag once per packet, so it must be set before we start writing. */
@@ -2651,8 +2654,9 @@ bool voice_sdr_begin(uint32_t token)
         s_sdr_tail_pos = 0;
         s_sdr_tail_token = token;
         s_sdr_tail_done_token = 0;
-        s_sdr_net_tx = netcom_mode() != NETCOM_MODE_LOCAL;
-        s_sdr_tail_config = tail_should_play(netcom_mode()) ? tail_get() : TAIL_OFF;
+        const int mode = netcom_mode();
+        s_sdr_net_tx = mode != NETCOM_MODE_LOCAL;
+        s_sdr_tail_config = tail_id_for_mode(mode);
     }
     control_unlock();
     return ok;

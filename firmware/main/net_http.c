@@ -329,17 +329,41 @@ static esp_err_t send_radio_result(httpd_req_t *req, esp_err_t result, const cha
     return send_json(req, out);
 }
 
-/*
- * POST /api/tail_upload -- the body is a WAV or MP3 file (raw, no multipart).
- *
- * The browser sends the file's bytes verbatim; the firmware does the format
- * conversion itself (resample to 8 kHz mono, normalise, truncate to 5 s,
- * mu-law encode, store in the storage partition).  A 512 KB cap keeps the
- * worst case at about 11 s of 44.1 kHz stereo -- enough for any real
- * sign-off clip without risking a flash-full upload.
- */
+static void tail_state_json(char *out, size_t size, int mode, const tail_status_t *tail)
+{
+    snprintf(out, size, "{\"id\":%d,\"modes\":%u,\"mode\":%d,\"enabled\":%s,"
+             "\"custom_s\":%.2f,\"custom_play_ms\":%u}", tail->id, (unsigned)tail->modes,
+             mode, tail->enabled ? "true" : "false",
+             (double)tail->custom_samples / AUDIO_SAMPLE_RATE_HZ,
+             (unsigned)(tail->custom_play_samples * 1000u / AUDIO_SAMPLE_RATE_HZ));
+}
+
+static esp_err_t send_tail_state(httpd_req_t *req)
+{
+    const int mode = netcom_mode();
+    tail_status_t tail;
+    char state[144], body[280];
+    tail_status(mode, &tail);
+    tail_state_json(state, sizeof(state), mode, &tail);
+    snprintf(body, sizeof(body), "{\"ok\":true,\"device_id\":\"%s\",\"seconds\":%.2f,"
+             "\"bytes\":%u,\"tail\":%s}", device_identity_id(),
+             (double)tail.custom_samples / AUDIO_SAMPLE_RATE_HZ, (unsigned)tail.custom_samples, state);
+    return send_json(req, body);
+}
+
+/* Legacy clients store the raw upload. The explicit activate option also
+ * selects the verified new clip in the same operation. */
 static esp_err_t h_tail_upload(httpd_req_t *req)
 {
+    const bool activate = query_int(req, "activate", 0, NULL) == 1;
+    if (activate) {
+        char id[24];
+        if (httpd_req_get_hdr_value_str(req, "X-ORL-Device", id, sizeof(id)) != ESP_OK ||
+            strcmp(id, device_identity_id())) {
+            httpd_resp_set_status(req, "409 Conflict");
+            return send_result(req, false, "设备身份已变化，请重新连接");
+        }
+    }
     /* Reject before allocating or receiving: httpd already parsed the exact
      * Content-Length, and the converter has a deliberate 512 KiB cap. */
     if (req->content_len == 0) {
@@ -396,16 +420,9 @@ static esp_err_t h_tail_upload(httpd_req_t *req)
         last_progress = esp_timer_get_time();
     }
 
-    esp_err_t e = tail_custom_store((const uint8_t *)buf, total);
+    esp_err_t e = tail_custom_store((const uint8_t *)buf, total, activate);
     free(buf);
-    char body[128];
-    if (e == ESP_OK) {
-        snprintf(body, sizeof(body),
-                 "{\"ok\":true,\"seconds\":%.2f,\"bytes\":%u}",
-                 (double)tail_custom_samples() / (double)AUDIO_SAMPLE_RATE_HZ,
-                 (unsigned)tail_custom_samples());
-        return send_json(req, body);
-    }
+    if (e == ESP_OK) { return send_tail_state(req); }
     if (e == ESP_ERR_INVALID_ARG) {
         return send_result(req, false,
             "需要 WAV（16-bit PCM，4.8–96 kHz）或 MP3（32–48 kHz）");
@@ -414,7 +431,10 @@ static esp_err_t h_tail_upload(httpd_req_t *req)
         return send_result(req, false, "音频太短（至少 0.2 秒）");
     }
     if (e == ESP_ERR_INVALID_STATE) {
-        return send_result(req, false, "上一个文件还在转换，稍后再试");
+        return send_result(req, false, "手台仍在通联、试听或转换文件，请等空闲后重试");
+    }
+    if (e == ESP_ERR_NOT_FOUND) {
+        return send_result(req, false, "音频文件没有可播放的声音");
     }
     return send_result(req, false, "存储失败");
 }
@@ -720,7 +740,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -1582,6 +1602,11 @@ static esp_err_t h_status(httpd_req_t *req)
     bridge_rx_stats(&br_rx);
     rx_guard_status_t rg;
     rx_guard_status(&rg);
+    const int tail_mode = netcom_mode();
+    tail_status_t tail;
+    char tail_info[144];
+    tail_status(tail_mode, &tail);
+    tail_state_json(tail_info, sizeof(tail_info), tail_mode, &tail);
     bool ix_pass_set = false;
     {
         const char *p = "";
@@ -1666,7 +1691,7 @@ static esp_err_t h_status(httpd_req_t *req)
         "\"p2p\":{\"en\":%u,\"ms\":%lu,\"sources\":%u,\"outputs\":%u},"
         "\"relay\":{\"en\":%u,\"ms\":%lu,\"sources\":%u,\"outputs\":%u},"
         "\"blocked\":%u,\"remaining_ms\":%lu},"
-        "\"tail\":{\"id\":%d,\"custom_s\":%.2f,\"modes\":%u}",
+        "\"tail\":%s",
         device_identity_id(), esc_name, (unsigned long)name.revision,
         app->version, app->date, app->time, app_sha,
         reset_reason_name(),
@@ -1727,8 +1752,7 @@ static esp_err_t h_status(httpd_req_t *req)
         (unsigned)rg.relay.enabled, (unsigned long)rg.relay.delay_ms,
         (unsigned)rg.relay.sources, (unsigned)rg.relay.outputs,
         (unsigned)rg.blocked, (unsigned long)rg.remaining_ms,
-        tail_get(), (double)tail_custom_samples() / (double)AUDIO_SAMPLE_RATE_HZ,
-        (unsigned)tail_modes_get());
+        tail_info);
 
     /* v0.4 front panel: the four remappable key actions plus the live LED and
      * key state, so the panel can show what the hardware is doing.  Tiny (four
@@ -2295,15 +2319,20 @@ static esp_err_t h_set(httpd_req_t *req)
         netcom_test_tone(n);
     } else if (!strcmp(key, "tail")) {
         esp_err_t err = tail_set(n);
-        if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_ARG) {
             return send_result(req, false, "tail: 0..8（8=自定义，需先上传）");
         }
+        if (err == ESP_ERR_NOT_FOUND) {
+            return send_result(req, false, "所选尾音没有可播放的音频");
+        }
+        return err == ESP_OK ? send_tail_state(req) : send_result(req, false, "尾音保存失败");
     } else if (!strcmp(key, "tail_modes")) {
         esp_err_t err = tail_modes_set(n);
-        if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_ARG) {
             return send_result(req, false,
                                "tail_modes: 1..7（位 1/2/4 对应 MODE 00/01/02）");
         }
+        return err == ESP_OK ? send_tail_state(req) : send_result(req, false, "应用模式保存失败");
     } else if (!strcmp(key, "tail_preview")) {
         if (ptt_local_audio_active()) {
             return send_result(req, false, "finish local speaker test first");
@@ -2323,7 +2352,11 @@ static esp_err_t h_set(httpd_req_t *req)
             tail_preview_cancel();
         }
     } else if (!strcmp(key, "tail_custom_del")) {
-        (void)tail_custom_delete();
+        esp_err_t err = tail_custom_delete();
+        if (err == ESP_ERR_INVALID_STATE) {
+            return send_result(req, false, "请等发话、试听或上传结束后再删除尾音");
+        }
+        return err == ESP_OK ? send_tail_state(req) : send_result(req, false, "自定义尾音删除失败");
     } else if (!strcmp(key, "monitor")) {
         /* The operator took over the monitor: no borrow (preview or bridge)
          * may outlive an explicit on/off. */

@@ -57,6 +57,8 @@ static bool s_rf_tx;
 static int64_t s_release_started_us;
 static int64_t s_ptt_started_us, s_pcm_us, s_client_us, s_ws_last_us;
 static uint32_t s_session, s_client, s_tx_id;
+static uint32_t s_cancelled_tx;
+static int64_t s_tail_drain_us;
 static const char *s_end_reason = "idle";
 /* Short-press diagnosis: remember how the last over ended. */
 static bool s_pcm_ever;
@@ -305,6 +307,7 @@ static void release_locked(const char *reason)
     s_ptt_hold = false;
     s_releasing = false;
     s_tail_started = false;
+    s_tail_drain_us = 0;
     s_net_tx = false;
     s_rf_tx = false;
     s_end_reason = reason;
@@ -319,14 +322,11 @@ static void request_release_locked(const char *reason)
     if (!s_ptt_hold || s_releasing) {
         return;
     }
-    /* Always enter the short release window: the client's last PCM (its
-     * courtesy tone, or the end of the sentence) is still in the ring and
-     * must reach the modulator.  With tail=0 the window ends as soon as the
-     * ring is empty (bounded by SDR_RELEASE_NOTONE_US); with a board tail it
-     * also covers the tone (SDR_RELEASE_MAX_US). */
+    /* Drain the last microphone samples before sending the board's tail. */
     s_ptt_hold = false;
     s_releasing = true;
     s_tail_started = false;
+    s_tail_drain_us = 0;
     s_release_started_us = esp_timer_get_time();
     s_end_reason = reason;
 }
@@ -346,80 +346,67 @@ bool sdr_session_valid(uint32_t sid)
     return ok;
 }
 
+static bool start_tx_locked(uint32_t tx)
+{
+    if (s_ptt_hold || s_releasing || !voice_sdr_begin(tx)) {
+        ++s_begin_busy;
+        s_end_reason = s_releasing ? "tail_pending" : "busy";
+        return false;
+    }
+    const bool network = netcom_mode() != NETCOM_MODE_LOCAL;
+    const bool rf = !network || netcom_rf_tx();
+    bool route_ok = !network || netcom_tx_ready();
+    if (route_ok) {
+        ptt_set_rf_keying(rf);
+        route_ok = !rf || ptt_source_key(PTT_OWNER_SDR, tx, true);
+    }
+    if (!route_ok) {
+        voice_sdr_end(tx);
+        s_end_reason = network ? "network_not_ready" : "radio_not_ready";
+        return false;
+    }
+    s_net_tx = network;
+    s_rf_tx = rf;
+    portENTER_CRITICAL(&s_mux);
+    s_tx_tail = s_tx_head;
+    monitor_rx_local_tx(&s_monitor, true);
+    portEXIT_CRITICAL(&s_mux);
+    s_tx_id = tx;
+    s_ptt_hold = true;
+    s_ptt_started_us = s_pcm_us = esp_timer_get_time();
+    s_pcm_ever = false;
+    s_end_reason = "transmitting";
+    return true;
+}
+
 bool sdr_ptt_request(uint32_t sid, uint32_t tx, bool on)
 {
     if (!s_key || !tx) { return false; }
     xSemaphoreTake(s_key, portMAX_DELAY);
-    bool ok = session_locked(sid);
-    if (ok) {
-        s_client_us = esp_timer_get_time();
-        if (!on && s_ptt_hold && tx >= s_tx_id) {
-            /* The client owns this session; an OFF (even with a tx that raced
-             * ahead of the board's accepted one) is authoritative.  Without
-             * this, rapid re-presses left the carrier keyed until the 30 s
-             * hold limit because both ON and OFF were rejected on the tx
-             * mismatch. */
-            if (tx != s_tx_id) { ++s_off_stale; }
+    if (!session_locked(sid)) {
+        xSemaphoreGive(s_key);
+        return false;
+    }
+    s_client_us = esp_timer_get_time();
+    bool ok = true;
+    if (!on) {
+        if (tx == s_tx_id) {
             request_release_locked("tail_pending");
-            xSemaphoreGive(s_key);
-            return true;
-        }
-        if (on && tx == s_tx_id && s_ptt_hold) {
-            /* Retry is idempotent: it does not extend the hard hold limit. */
-        } else if (tx <= s_tx_id) {
-            ok = !on && tx == s_tx_id;
-            if (!ok && !on) { ++s_off_reject; }
-            if (ok && s_ptt_hold) { request_release_locked("tail_pending"); }
+        } else if (tx > s_tx_id) {
+            /* OFF may arrive before a pending ON. Remember the cancellation
+             * separately from the accepted transmission and its tail. */
+            if (tx > s_cancelled_tx) { s_cancelled_tx = tx; }
+            if (s_ptt_hold || s_releasing) { ++s_off_stale; }
         } else {
-            /* OFF can arrive before ON after a cancelled request. Remember
-             * its ID so the delayed ON can never key the transmitter. */
-            if (s_ptt_hold) {
-                ok = false;
-                if (on) { ++s_on_reject; } else { ++s_off_reject; }
-            } else {
-                if (!on) { s_tx_id = tx; release_locked("cancelled"); }
-                else if (!voice_sdr_begin(tx)) {
-                    /* The previous owner (tail/release) is still alive.  Do
-                     * NOT advance s_tx_id: a later release uses s_tx_id to
-                     * ptt_release(), and a token the board never accepted
-                     * leaves the real owner keyed forever. */
-                    ++s_begin_busy;
-                    s_end_reason = "busy"; ok = false;
-                } else {
-                    const bool network = netcom_mode() != NETCOM_MODE_LOCAL;
-                    const bool rf = !network || netcom_rf_tx();
-                    bool route_ok = !network || netcom_tx_ready();
-                    if (route_ok) {
-                        /* The ordinary TALK path uses the same policy: a
-                         * network-only talk is a logical TX window and leaves
-                         * the local SA818 in receive. */
-                        s_net_tx = network;
-                        s_rf_tx = rf;
-                        ptt_set_rf_keying(rf);
-                        if (rf) {
-                            route_ok = ptt_source_key(PTT_OWNER_SDR, tx, true);
-                        }
-                    }
-                    if (!route_ok) {
-                        if (s_net_tx && !s_rf_tx) { ptt_set_rf_keying(true); }
-                        s_net_tx = false;
-                        s_rf_tx = false;
-                        voice_sdr_end(tx);
-                        s_end_reason = network ? "network_not_ready" : "radio_not_ready";
-                        ok = false;
-                    } else {
-                        portENTER_CRITICAL(&s_mux);
-                        s_tx_tail = s_tx_head;
-                        monitor_rx_local_tx(&s_monitor, true);
-                        portEXIT_CRITICAL(&s_mux);
-                        s_tx_id = tx;
-                        s_ptt_hold = true;
-                        s_ptt_started_us = s_pcm_us = esp_timer_get_time();
-                        s_pcm_ever = false;
-                        s_end_reason = "transmitting";
-                    }
-                }
-            }
+            ++s_off_reject;
+            ok = false;
+        }
+    } else if (tx != s_tx_id || !s_ptt_hold) {
+        if (tx <= s_tx_id || tx <= s_cancelled_tx) {
+            ++s_on_reject;
+            ok = false;
+        } else {
+            ok = start_tx_locked(tx);
         }
     }
     xSemaphoreGive(s_key);
@@ -566,9 +553,15 @@ static void sdr_tx_step(void)
                 } else {
                     finish_release_locked("released");
                 }
-            } else if (s_tail_started &&
-                       voice_sdr_tail_done() == s_tx_id) {
-                finish_release_locked("released");
+            } else if (s_tail_started) {
+                if (voice_sdr_tail_done() == s_tx_id) {
+                    /* I2S accepted the last samples; allow the RF DAC buffer
+                     * to play them before releasing the carrier. */
+                    s_tail_drain_us = now + (s_rf_tx ? AUDIO_I2S_BUFFER_MS * 1000 : 0);
+                }
+                if (s_tail_drain_us && now >= s_tail_drain_us) {
+                    finish_release_locked("released");
+                }
             }
         }
     }
@@ -613,7 +606,8 @@ static void sdr_tx_task(void *arg)
 static void sdr_tone_task(void *arg)
 {
     const int freq = (int)(intptr_t)arg;
-    const uint32_t sid = s_session, tx = s_tx_id + 1;
+    const uint32_t sid = s_session;
+    const uint32_t tx = (s_tx_id > s_cancelled_tx ? s_tx_id : s_cancelled_tx) + 1;
     if (sdr_ptt_request(sid, tx, true)) {
         int16_t pcm[SDR_PKT_SAMPLES];
         double phase = 0, step = 2.0 * 3.14159265358979 * freq / AUDIO_SAMPLE_RATE_HZ;
@@ -731,6 +725,8 @@ esp_err_t sdr_set_enabled(bool on)
         s_tx_processed_clip = 0;
         ++s_session; if (!s_session) { ++s_session; }
         s_client = s_tx_id = 0;
+        s_cancelled_tx = 0;
+        s_tail_drain_us = 0;
         s_ptt_hold = false;
         s_releasing = false;
         s_tail_started = false;

@@ -597,16 +597,18 @@ static void console_run_line(char *line)
         return;
     } else if (!strcmp(argv[0], "tail")) {
         if (argc < 2) {
+            tail_status_t tail;
+            tail_status(netcom_mode(), &tail);
             printf("  tail (end-of-transmission tone): %s\n",
-                   tail_name(tail_get()));
+                   tail_name(tail.id));
             printf("  available:");
             for (int i = TAIL_OFF; i < TAIL_COUNT; ++i) {
                 printf(" %d=%s", i, tail_name(i));
             }
             printf("\n");
-            if (tail_custom_samples()) {
+            if (tail.custom_samples) {
                 printf("  custom: %.2f s stored\n",
-                       (double)tail_custom_samples() / (double)AUDIO_SAMPLE_RATE_HZ);
+                       (double)tail.custom_samples / AUDIO_SAMPLE_RATE_HZ);
             }
             printf("  usage: tail <id|name>   (any name listed above)\n");
             return;

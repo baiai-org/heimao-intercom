@@ -40,6 +40,8 @@ typedef struct { int dummy; } mp3dec_t;
 typedef struct { int bitrate_kbps,hz,channels,frame_bytes; } mp3dec_frame_info_t;
 static unsigned alive,allocations,fail_alloc,stores,worker_deletes,created;
 static bool in_worker,create_fail,timeout_wait,early_finish,store_fail;
+static bool selected;
+static SemaphoreHandle_t s_write_lock = (SemaphoreHandle_t)1;
 static atomic_bool s_storing;
 static void (*pending_fn)(void *);
 static void *pending_arg,*worker_stack;
@@ -70,29 +72,29 @@ static int mp3dec_decode_frame(mp3dec_t *d,const uint8_t *src,int bytes,int16_t 
  (void)d;(void)src;assert(in_worker&&bytes>=4);*info=(mp3dec_frame_info_t){128,16000,1,4};
  for(int i=0;i<1152;i++)frame[i]=100;return 1152;
 }
-static esp_err_t custom_store_finish(int16_t *pcm,size_t samples) { assert(!in_worker&&samples>=RATE/5);stores++;free(pcm);return store_fail?ESP_ERR_INVALID_STATE:ESP_OK; }
-static esp_err_t wav_store(const uint8_t *data,size_t n) { (void)data;(void)n;assert(!in_worker);stores++;return ESP_OK; }
+static esp_err_t custom_store_finish(int16_t *pcm,size_t samples,bool activate) { assert(!in_worker&&samples>=RATE/5);stores++;free(pcm);if(store_fail)return ESP_ERR_INVALID_STATE;selected=activate;return ESP_OK; }
+static esp_err_t wav_store(const uint8_t *data,size_t n,bool activate) { (void)data;(void)n;assert(!in_worker);stores++;selected=activate;return ESP_OK; }
 '''
 
 TEST=r'''
 static void clean(void) { assert(alive==0&&!atomic_load(&s_storing)&&!pending_fn&&!worker_stack); }
 int main(void) {
  uint8_t mp3[40]={0xff,0xe1};
- assert(tail_custom_store(mp3,sizeof(mp3))==ESP_OK);clean();assert(stores==1&&worker_deletes==1);
- early_finish=true;assert(tail_custom_store(mp3,sizeof(mp3))==ESP_OK);clean();early_finish=false;
- store_fail=true;assert(tail_custom_store(mp3,sizeof(mp3))==ESP_ERR_INVALID_STATE);clean();store_fail=false;
+ assert(tail_custom_store(mp3,sizeof(mp3),true)==ESP_OK);clean();assert(stores==1&&worker_deletes==1&&selected);
+ early_finish=true;assert(tail_custom_store(mp3,sizeof(mp3),false)==ESP_OK);clean();assert(!selected);early_finish=false;
+ store_fail=true;assert(tail_custom_store(mp3,sizeof(mp3),true)==ESP_ERR_INVALID_STATE);clean();assert(!selected);store_fail=false;
  unsigned before=stores;timeout_wait=true;
- assert(tail_custom_store(mp3,sizeof(mp3))==ESP_ERR_TIMEOUT);
+ assert(tail_custom_store(mp3,sizeof(mp3),true)==ESP_ERR_TIMEOUT);
  assert(atomic_load(&s_storing)&&pending_fn&&alive);
- assert(tail_custom_store(mp3,sizeof(mp3))==ESP_ERR_INVALID_STATE);
- finish_worker();clean();assert(stores==before);timeout_wait=false;
- create_fail=true;assert(tail_custom_store(mp3,sizeof(mp3))==ESP_ERR_NO_MEM);clean();create_fail=false;
+ assert(tail_custom_store(mp3,sizeof(mp3),false)==ESP_ERR_INVALID_STATE);
+ finish_worker();clean();assert(stores==before&&!selected);timeout_wait=false;
+ create_fail=true;assert(tail_custom_store(mp3,sizeof(mp3),false)==ESP_ERR_NO_MEM);clean();create_fail=false;
  for(unsigned i=1;i<=8;i++) {
-  allocations=0;fail_alloc=i;esp_err_t err=tail_custom_store(mp3,sizeof(mp3));
+  allocations=0;fail_alloc=i;esp_err_t err=tail_custom_store(mp3,sizeof(mp3),false);
   assert(err!=ESP_OK);clean();
  }
  fail_alloc=0;allocations=0;
- assert(tail_custom_store(mp3,sizeof(mp3))==ESP_OK);clean();
+ assert(tail_custom_store(mp3,sizeof(mp3),false)==ESP_OK);clean();
  puts("PASS: PSRAM worker stack; early/normal completion; caller-only persistence; timeout cancellation and no background write; all allocation failures reclaimed");
  assert(maintenance_writers==0);
  return 0;

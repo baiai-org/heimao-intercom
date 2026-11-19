@@ -177,9 +177,9 @@ import kotlinx.coroutines.launch
         confirm?.let { (text,action) -> AlertDialog(onDismissRequest={confirm=null},title={Text("确认操作")},text={Text(text)},confirmButton={TextButton(onClick={confirm=null;action()}){Text("确认")}},dismissButton={TextButton(onClick={confirm=null}){Text("取消")}}) }
         selectedFile?.let { selection ->
             val target=profiles.firstOrNull{it.id==selection.first}
-            AlertDialog(onDismissRequest={selectedFile=null},title={Text(if(selection.third)"上传固件" else "上传尾音")},text={Text(
+            AlertDialog(onDismissRequest={selectedFile=null},title={Text(if(selection.third)"上传固件" else "上传并启用尾音")},text={Text(
                 "目标：${target?.displayName ?: "原选定设备"}\n${target?.endpoint()?.address ?: ""}\n"+
-                    if(selection.third)"升级会停止通联并重启；手台端现有 OTA 流程会切到本地模式，网络模式需之后手动恢复。上传后读取完整运行镜像核对；完成前暂不能切换手台。" else "通联将停止，手台会转换并保存所选 WAV 或 MP3。文件最多 512 KB。"
+                    if(selection.third)"升级会停止通联并重启；手台端现有 OTA 流程会切到本地模式，网络模式需之后手动恢复。上传后读取完整运行镜像核对；完成前暂不能切换手台。" else "通联会暂停。手台会转换并选用 WAV 或 MP3 尾音，沿用已设置的应用模式。文件最多 512 KB。"
             )},confirmButton={TextButton(onClick={selectedFile=null;manager.uploadFile(selection.first,selection.second,selection.third)}){Text("开始上传")}},dismissButton={TextButton(onClick={selectedFile=null}){Text("取消")}})
         }
         certificate?.let { question -> AlertDialog(onDismissRequest={manager.certificates.value=null},title={Text("确认设备证书")},text={SelectionContainer {Text(

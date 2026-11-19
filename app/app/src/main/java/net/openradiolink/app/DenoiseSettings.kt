@@ -14,7 +14,17 @@ internal data class DenoisePath(val setting:Int,val label:String) {
 
 internal data class DenoiseSettings(val mode:Int,val levels:Int) {
     val paths get()=paths(mode)
+    val localPaths get()=local
+    val networkPaths get()=paths.filterNot(local::contains)
     fun level(path:DenoisePath)=DenoiseLevel.entries[(levels shr path.shift) and 7]
+
+    fun uniformLevel(group: List<DenoisePath>): DenoiseLevel? {
+        val first = group.firstOrNull()?.let(::level) ?: return null
+        return first.takeIf { group.all { level(it) == first } }
+    }
+
+    fun preset(group: List<DenoisePath>, level: DenoiseLevel): DenoiseWrite =
+        DenoiseWrite(mode, group.associateWith { DenoiseDraft(this.level(it), level) })
 
     companion object {
         private val handset=DenoisePath(4,"手台发话 → 本机射频")

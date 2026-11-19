@@ -6,6 +6,7 @@
   const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '当前使用原声'];
   const modes = ['本地模拟', '公网直连', 'MQTT 网络中继'];
   const levelNames = ['关闭', '轻度', '标准', '强力', '极强'];
+  const localPaths = ['handset', 'speaker'];
   const pathNames = ['手台发话 → 本机射频', '手台发话 → 网络', '射频来话 → 本机喇叭',
     '射频来话 → 网络转发', '网络来话 → 本机喇叭', '网络来话 → 模拟桥接'];
   const drafts = new Map();
@@ -35,6 +36,22 @@
     return selects.map(select => settingFor(select.dataset.path, mode)).filter(setting => drafts.has(setting));
   }
 
+  function presetSettings(mode, local) {
+    return selects
+      .filter(select => localPaths.includes(select.dataset.path) === local)
+      .map(select => settingFor(select.dataset.path, mode))
+      .filter(Boolean);
+  }
+
+  function renderPreset(select, mode, levels, local) {
+    const group = presetSettings(mode, local);
+    const first = levelFor(levels, group[0]);
+    const value = group.length && group.every(setting => levelFor(levels, setting) === first)
+      ? String(first) : 'mixed';
+    if (select.value !== value) select.value = value;
+    select.disabled = pending || !group.length;
+  }
+
   function text(node, value) {
     if (node.textContent !== value) node.textContent = value;
   }
@@ -47,6 +64,10 @@
     if (!saved) return;
     const {mode, levels} = saved;
     text(get('mode'), modes[mode]);
+    text(get('networkPresetLabel'), modes[mode]);
+    get('networkPresetRow').hidden = mode === 0;
+    renderPreset(get('localPreset'), mode, levels, true);
+    renderPreset(get('networkPreset'), mode, levels, false);
     text(get('txLabel'), '发到' + modes[mode]);
     text(get('forwardLabel'), '转发到' + modes[mode]);
     get('network').hidden = mode === 0;
@@ -157,15 +178,12 @@
     }
   }
 
-  async function save() {
-    if (pending || !saved) return;
+  async function save(changes) {
+    if (pending || !saved || !changes.size) return;
     const mode = saved.mode;
-    const settings = modeDrafts(mode);
-    if (!settings.length) return;
     const body = {mode, mask: 0, expected_levels: 0, levels: 0};
     let fields = 0;
-    for (const setting of settings) {
-      const {expected, value} = drafts.get(setting);
+    for (const [setting, {expected, value}] of changes) {
       const shift = (setting - 1) * 3;
       body.mask |= 1 << setting;
       body.expected_levels |= expected << shift;
@@ -190,23 +208,24 @@
       readError = '';
     }
     if (next && (next.levels & fields) === body.levels) {
-      for (const setting of settings) drafts.delete(setting);
+      for (const setting of changes.keys()) drafts.delete(setting);
       messages.set(mode, '已保存，下一话段生效');
-    } else if (next && (conflict || (next.levels & fields) !== body.expected_levels)) {
+    } else {
       const latest = [];
-      for (const setting of settings) {
-        const draft = drafts.get(setting);
-        const expected = levelFor(next.levels, setting);
-        if (draft.expected !== expected) {
+      for (const [setting, draft] of changes) {
+        const expected = next ? levelFor(next.levels, setting) : draft.expected;
+        if (expected === draft.value && next) {
+          drafts.delete(setting);
+          continue;
+        }
+        if (expected !== draft.expected) {
           const index = selects.findIndex(select => settingFor(select.dataset.path, mode) === setting);
           latest.push(pathNames[index] + '为' + levelNames[expected]);
-          draft.expected = expected;
         }
+        drafts.set(setting, {expected, value: draft.value});
       }
       messages.set(mode, latest.length ? '设备设置有变化（' + latest.join('、') + '），请核对后再保存' :
-        '设置未保存，请重试');
-    } else {
-      messages.set(mode, '保存未确认，请重试');
+        conflict ? '设置未保存，请重试' : '保存未确认，请重试');
     }
     pending = false;
     render();
@@ -227,7 +246,23 @@
       render();
     });
   }
-  get('save').onclick = save;
+  for (const [select, local] of [[get('localPreset'), true], [get('networkPreset'), false]]) {
+    const mixed = new Option('分线路', 'mixed');
+    mixed.disabled = true;
+    select.replaceChildren(...levelNames.map((label, level) => new Option(label, level)), mixed);
+    select.addEventListener('change', () => {
+      if (pending || !saved) { render(); return; }
+      const value = Number(select.value);
+      if (!Number.isInteger(value) || !levelNames[value]) { render(); return; }
+      const group = presetSettings(saved.mode, local);
+      const changes = new Map(group.map(setting =>
+        [setting, {expected: levelFor(saved.levels, setting), value}]));
+      if ([...changes.values()].some(draft => draft.expected !== value)) void save(changes);
+    });
+  }
+  get('save').onclick = () => {
+    if (saved) void save(new Map(modeDrafts(saved.mode).map(setting => [setting, drafts.get(setting)])));
+  };
   get('retry').onclick = read;
   get('undo').onclick = () => {
     if (pending || !saved) return;
