@@ -184,8 +184,9 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    const tailType=page.locator('#ixTailSel'), tailStatus=page.locator('#ixTailState');
    await tailType.selectOption('1');
    await page.waitForFunction(()=>document.querySelector('#ixTailState').textContent.includes('当前模式已启用'));
-   await page.locator('#ixTailM1').uncheck();
+   await page.locator('#ixTailM1').click();
    await page.waitForFunction(()=>document.querySelector('#ixTailState').textContent.includes('当前模式未启用'));
+   assert(!await page.locator('#ixTailM1').isChecked());
    assert.equal(status.tail.modes,5);
    await page.locator('#ixTailFile').setInputFiles({name:'tail.wav',mimeType:'audio/wav',buffer:Buffer.from('test audio')});
    // The selector stays on the board-confirmed tone during a delayed upload.
