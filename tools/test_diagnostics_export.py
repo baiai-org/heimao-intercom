@@ -40,6 +40,7 @@ static size_t heap_caps_get_largest_free_block(unsigned caps){(void)caps;return 
 static int64_t esp_timer_get_time(void){return INT64_C(4294967295)*1000;}
 static const char *device_identity_id(void){return "orl-test";}
 static const app_desc_t *esp_app_get_description(void){static app_desc_t a={"r11-93"};return &a;}
+static unsigned tx_timeout_seconds(void){return 600;}
 static int httpd_get_client_list(httpd_handle_t h,size_t *n,int *fds){(void)h;assert(*n>=2);*n=2;fds[0]=7;fds[1]=8;return ESP_OK;}
 static int httpd_resp_send_err(httpd_req_t *req,int code,const char *text){(void)req;(void)text;assert(code==500);return ESP_FAIL;}
 static void httpd_resp_set_hdr(httpd_req_t *req,const char *key,const char *value){(void)req;assert(!strcmp(key,"Cache-Control")&&!strcmp(value,"no-store"));}
@@ -66,7 +67,8 @@ def main():
         assert len(data['events'])==64 and data['event_sequence']==4294967295
         assert all(len(e)==6 and all(isinstance(x,int) for x in e) for e in data['events'])
         assert data['memory']['internal_free']==4294967295 and data['connections']['last_tls_error']==-30592
-        assert set(data)=={'version','device_id','firmware','uptime_ms','memory','connections','rf_config','event_sequence','events'}
+        assert data['tx_timeout_s']==600
+        assert set(data)=={'version','device_id','firmware','uptime_ms','memory','connections','rf_config','tx_timeout_s','event_sequence','events'}
         assert len(raw)<12288
         print('PASS: diagnostic export maximum counters/64 events form valid bounded JSON; both PSRAM allocation failures reclaim memory')
 if __name__=='__main__':main()
