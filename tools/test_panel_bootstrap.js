@@ -38,6 +38,8 @@ function runtime() {
     log: (...args) => state.logs.push(args), wifiIcon: () => '', setSegMeter() {},
     renderChannels: () => {state.renders++;}, syncBridge() {}, applyMode() {},
     renderRadio: r => {context.window._radio = r;}, renderNp2p() {}, useClockDevice() {},
+    txTimeoutDevice: null, txTimeoutEpoch: 0, txTimeoutSaving: false, txTimeoutReadState: 'loading',
+    validTxTimeout: () => false, syncTxTimeout: async () => {}, renderTxTimeout() {},
     holdSyncUntil: Infinity, txOn: false, txEnd: 0, monOn: false, SDR: {on: false}, last: '',
     fetch: (url, options) => {state.requests.push({url, options}); return state.fetch(url, options);},
     setTimeout: (fn, ms) => {const id = ++state.id; state.timers.set(id, {fn, ms}); return id;},

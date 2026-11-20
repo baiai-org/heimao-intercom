@@ -4865,14 +4865,15 @@ refresh();
   move(document.querySelector('.name-plate'),'device');
   const lcd=document.querySelector('.lcd-cockpit');
   const telemetry=document.createElement('details');telemetry.innerHTML='<summary>详细运行状态</summary>';
-  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);move(lcd,'talk');
+  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);
   move(document.getElementById('ixSeg').parentElement,'network');
   const handheld=card('手台麦克风');handheld.append(document.querySelector('.ptt-console'));pages.talk.append(handheld);
-  move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
   const browser=document.getElementById('sdrBtn').closest('.card');browser.querySelector('h2').textContent='浏览器麦克风与收听';move(browser,'talk');
   const source=document.createElement('div');source.className='panel-subnav';source.innerHTML='<button data-source="handheld" class="on">手台麦克风</button><button data-source="browser">浏览器麦克风</button>';
   pages.talk.insertBefore(source,handheld);browser.hidden=true;
   pages.talk.insertBefore(document.getElementById('txTimeoutForm'),handheld);
+  move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
+  move(lcd,'talk');
   for(const mode of [1,2]) {
     const stage=document.querySelector('.mode-stage[data-modes="'+mode+'"]');
     const bridge=card(mode===1?'公网直连桥接':'网络中继桥接');bridge.dataset.modes=String(mode);
