@@ -165,6 +165,50 @@ static void test_rx(uint8_t mode) {
     dac_held = false;
 }
 
+static void test_completed_over(uint8_t mode, bool rf, bool split_drain) {
+    current_mode = mode;
+    keyed = rf;
+    owner = rf ? PTT_OWNER_NETWORK : PTT_OWNER_NONE;
+    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
+    levels = RF_DENOISE_LEVEL_STANDARD << ((first + rf - 1) * 3);
+    const uint8_t mac[6] = {2, 0, 0, 0, 0, 23};
+    const net_audio_source_t old = net_audio_source(mac, 545, 501, true);
+    net_audio_source_t end = old;
+    end.feeding = false;
+    net_audio_source_t next = net_audio_source(mac, 546, 504, true);
+    next.previous_completed = true;
+    int16_t block[320];
+    process(640, 256);
+    memcpy(reference, output, 640 * sizeof(*output));
+    const unsigned before = discarded;
+    const rf_denoise_route_t route = bridge_denoise_route(first + rf);
+    rf_denoise_stats_t stats;
+    rf_denoise_stats(route, &stats);
+    const uint32_t prior_discarded = stats.discarded_samples;
+    net_audio_denoise_t dn = {0};
+    for (unsigned i = 0; i < 2; ++i) {
+        fill_block(block, 320 * i);
+        assert(net_audio_denoise_render(&dn, mode, old, true, true, block, 100 + 20 * i));
+    }
+    assert(!memcmp(block + 160, reference, 160 * sizeof(*block)));
+    assert(net_audio_denoise_defer(&dn, next));
+    assert(!net_audio_denoise_render(&dn, mode, next, false, false, block, 135));
+    assert(rf_denoise_play_pending(route) == 480);
+    const net_audio_source_t closing = split_drain ? end : next;
+    assert(net_audio_denoise_render(&dn, mode, closing, false, true, block, 140));
+    assert(!memcmp(block, reference + 160, sizeof(block)));
+    assert(net_audio_denoise_defer(&dn, next));
+    assert(net_audio_denoise_render(&dn, mode, next, false, true, block, 160));
+    assert(!memcmp(block, reference + 480, 160 * sizeof(*block)));
+    assert(!net_audio_denoise_defer(&dn, next) && discarded == before);
+    rf_denoise_stats(route, &stats);
+    assert(stats.discarded_samples == prior_discarded);
+    fill_block(block, 640);
+    assert(net_audio_denoise_render(&dn, mode, next, true, true, block, 180));
+    assert(dn.source.sender_epoch == next.sender_epoch);
+    net_audio_denoise_reset(&dn);
+}
+
 int main(void) {
     uint32_t rand_state = 42;
     for (size_t i = 0; i < sizeof(input) / sizeof(*input); ++i) {
@@ -174,6 +218,9 @@ int main(void) {
     for (unsigned route = 0; route < RF_DENOISE_ROUTE_COUNT; ++route) rf_denoise_prepare(route);
     for (uint8_t mode = 1; mode <= 2; ++mode) {
         test_rx(mode);
+        for (unsigned repeat = 0; repeat < 1000; ++repeat) {
+            test_completed_over(mode, repeat & 1, repeat & 2);
+        }
         const size_t short_length = 109;
         process(short_length, 64);
         memcpy(reference, output, short_length * sizeof(*output));
@@ -202,6 +249,7 @@ int main(void) {
         rf_denoise_stop(RF_DENOISE_NET_TX);
     }
     puts("PASS: P2P/MQTT four-way RX routing, exact tail PCM, RF priority, timeout and sender/owner changes");
+    puts("PASS: 1000 completed-over transitions per mode retain all 480 samples through prefill and backpressure");
     puts("PASS: real network TX denoise output enters mic shaping once, short drain and PTT/mode/room fences");
     return 0;
 }

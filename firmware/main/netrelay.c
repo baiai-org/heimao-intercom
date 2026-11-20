@@ -873,17 +873,32 @@ static void bridge_key_update(bool played, bool denoise_pending)
 
 /* Sample the accepted sender and jitter-buffer state under the same lock
  * as the PCM pull. A prefill miss is still part of the current over. */
-static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *out)
+static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *out,
+                               const net_audio_denoise_t *denoise)
 {
     int peak = 0;
     *out = (net_audio_source_t){0};
     rx_lock();
     rel_rx_source_t *source = s_stream_source;
-    const bool have = pull && (rel_jbuf_next(block, &peak));
+    bool have = false;
     if (source) {
-        const bool feeding = net_rx_order_keyed(&source->order, now_ms(), REL_RX_PTT_TIMEOUT_MS) ||
+        *out = net_audio_source(source->mac, source->order.epoch, s_stream_first, false);
+        if (net_audio_source_changed(denoise, *out)) {
+            const uint8_t *identity = (const uint8_t *)&denoise->source.sender_epoch;
+            uint16_t epoch;
+            memcpy(&epoch, identity + 6, sizeof(epoch));
+            for (unsigned i = 0; i < sizeof(s_rx_sources) / sizeof(*s_rx_sources); ++i) {
+                const rel_rx_source_t *previous = &s_rx_sources[i];
+                if (previous->used && memcmp(previous->mac, identity, 6) == 0) {
+                    out->previous_completed =
+                        net_rx_order_completed(&previous->order, epoch, denoise->source.first_seq);
+                    break;
+                }
+            }
+        }
+        have = pull && !net_audio_denoise_defer(denoise, *out) && rel_jbuf_next(block, &peak);
+        out->feeding = net_rx_order_keyed(&source->order, now_ms(), REL_RX_PTT_TIMEOUT_MS) ||
             (source->order.audio && s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0));
-        *out = net_audio_source(source->mac, source->order.epoch, s_stream_first, feeding);
     }
     rx_unlock();
     return have;
@@ -907,7 +922,7 @@ static void relay_play_task(void *arg)
             for (int due = 0; due < 4 && now >= next_ms; ++due) {
                 const bool room = voice_bridge_room() >= REL_PKT_SAMPLES;
                 net_audio_source_t source;
-                const bool have = network_audio_read(room, block, &source);
+                const bool have = network_audio_read(room, block, &source, &denoise);
                 if (have) {
                     sdr_rx_network_push(NETCOM_MODE_RELAY, block, REL_PKT_SAMPLES);
                 }
@@ -936,7 +951,7 @@ static void relay_play_task(void *arg)
         }
         const bool ready = voice_bridge_network_ready();
         net_audio_source_t source;
-        const bool have = network_audio_read(ready, block, &source);
+        const bool have = network_audio_read(ready, block, &source, &denoise);
         if (have) { sdr_rx_network_push(NETCOM_MODE_RELAY, block, REL_PKT_SAMPLES); }
         const bool rendered = net_audio_denoise_render(&denoise, NETCOM_MODE_RELAY,
             source, have, ready && dac_owned, block, now_ms());

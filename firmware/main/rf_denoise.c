@@ -19,12 +19,23 @@ enum {
     DRY_CAPACITY = RF_DENOISE_CAPTURE_LEAD_SAMPLES + RF_DENOISE_MAX_BLOCK,
     MAILBOX_CAPACITY = 8,
     READY_TO_RESUME = 3,
+    ONSET_LOOKAHEAD = 2,
+    ONSET_HOLD = 4,
+    ONSET_MIX = 64, /* dry weight, on a 0..256 scale */
+    ONSET_AVERAGE = 8,
 };
 static const int suppression_db[] = {
     [RF_DENOISE_LEVEL_LIGHT] = -6,
     [RF_DENOISE_LEVEL_STANDARD] = -15,
     [RF_DENOISE_LEVEL_STRONG] = -24,
     [RF_DENOISE_LEVEL_EXTREME] = -36,
+};
+/* A small aligned dry share limits damage to weak sounds that fall below
+ * the onset detector. Heavier presets retain a smaller stationary share. */
+static const uint8_t minimum_dry_mix[] = {
+    [RF_DENOISE_LEVEL_STANDARD] = 12,
+    [RF_DENOISE_LEVEL_STRONG] = 8,
+    [RF_DENOISE_LEVEL_EXTREME] = 4,
 };
 enum { PSRAM_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT };
 _Static_assert(RF_DENOISE_CAPTURE_LEAD_SAMPLES >= RF_DENOISE_NETWORK_LEAD_SAMPLES &&
@@ -69,6 +80,9 @@ typedef struct {
     unsigned ready_run, fade_left;
     bool finished, use_wet, recovering;
     int32_t last_correction, fade_from;
+    uint32_t background_power;
+    unsigned onset_left;
+    int dry_mix, prior_dry_mix;
 
     /* Worker only. */
     uint32_t worker_session, worker_frame;
@@ -77,6 +91,7 @@ typedef struct {
     atomic_int state, level;
     atomic_uint frames, max_us, wait_max_us, overruns;
     atomic_uint input_frames, wet_frames, dry_frames, queue_full, recoveries;
+    atomic_uint discarded_samples;
 } stream_t;
 
 static stream_t s_streams[RF_DENOISE_ROUTE_COUNT];
@@ -229,6 +244,9 @@ bool rf_denoise_start(rf_denoise_route_t route, rf_denoise_level_t level)
     s->ready_run = READY_TO_RESUME;
     s->fade_left = 0;
     s->last_correction = 0;
+    s->background_power = 0;
+    s->onset_left = 0;
+    s->dry_mix = s->prior_dry_mix = 0;
     atomic_store(&s->needed_frame, 0);
     atomic_store(&s->result_tail, atomic_load(&s->result_head));
     atomic_store(&s->input_frames, 0);
@@ -245,6 +263,7 @@ void rf_denoise_stop(rf_denoise_route_t route)
 {
     stream_t *s = &s_streams[route];
     rf_denoise_invalidate(route);
+    atomic_fetch_add(&s->discarded_samples, s->dry_n);
     s->work = NULL;
     s->dry_n = s->lead = 0;
     atomic_store(&s->state, RF_DENOISE_OFF);
@@ -320,6 +339,47 @@ static bool take_result(stream_t *s)
     return found;
 }
 
+static uint32_t dry_frame_power(const stream_t *s, size_t offset)
+{
+    if (offset >= s->dry_n) { return 0; }
+    size_t n = s->dry_n - offset;
+    if (n > FRAME_SAMPLES) { n = FRAME_SAMPLES; }
+    size_t pos = (s->dry_head + offset) % DRY_CAPACITY;
+    uint32_t power = 0;
+    int32_t group = 0;
+    for (size_t i = 0; i < n; ++i) {
+        group += s->work->dry[pos];
+        if (++pos == DRY_CAPACITY) { pos = 0; }
+        if (i % ONSET_AVERAGE == ONSET_AVERAGE - 1 || i + 1 == n) {
+            const int32_t average = group / (16 * ONSET_AVERAGE);
+            power += (uint32_t)(average * average);
+            group = 0;
+        }
+    }
+    return power / (FRAME_SAMPLES / ONSET_AVERAGE);
+}
+
+static void update_dry_mix(stream_t *s)
+{
+    const int level = atomic_load_explicit(&s->level, memory_order_relaxed);
+    if (level < RF_DENOISE_LEVEL_STANDARD) { return; }
+    const uint32_t power = dry_frame_power(s, 0);
+    if (!s->playing) { s->background_power = power; }
+    /* Short averages suppress broadband noise in this estimate only.
+     * Peek within the existing playout lead for a rise in the voice band. */
+    const uint32_t threshold = s->background_power * 2 + 4;
+    for (unsigned i = 0; i <= ONSET_LOOKAHEAD && s->onset_left < ONSET_HOLD; ++i) {
+        if ((i == 0 ? power : dry_frame_power(s, i * FRAME_SAMPLES)) > threshold) {
+            s->onset_left = ONSET_HOLD;
+        }
+    }
+    s->background_power = (15 * s->background_power + power + 8) / 16;
+    s->prior_dry_mix = s->dry_mix;
+    s->dry_mix = (s->playing < 3 || s->onset_left ||
+                  (s->finished && s->dry_n <= 2 * FRAME_SAMPLES)) ? ONSET_MIX : minimum_dry_mix[level];
+    if (s->onset_left) { --s->onset_left; }
+}
+
 static void select_frame(stream_t *s)
 {
     const bool ready = take_result(s);
@@ -332,6 +392,7 @@ static void select_frame(stream_t *s)
         ++s->ready_run;
     }
     const bool wet = ready && s->ready_run == READY_TO_RESUME;
+    update_dry_mix(s);
     if (wet != s->use_wet) {
         s->fade_left = FADE_SAMPLES;
         s->fade_from = s->last_correction;
@@ -356,6 +417,12 @@ static void take_pcm(stream_t *s, int16_t *pcm, size_t n)
         for (size_t i = 0; i < count; ++i) {
             const int32_t dry = w->dry[s->dry_head + i];
             int32_t correction = s->use_wet ? w->selected[s->frame_offset + i] - dry : 0;
+            if (s->use_wet && (s->dry_mix || s->prior_dry_mix)) {
+                const int32_t offset = (int32_t)(s->frame_offset + i + 1);
+                const int32_t mix = s->prior_dry_mix +
+                    ((s->dry_mix - s->prior_dry_mix) * offset) / FRAME_SAMPLES;
+                correction = correction * (256 - mix) / 256;
+            }
             if (s->fade_left) {
                 const int32_t old_weight = (int32_t)s->fade_left--;
                 correction = (s->fade_from * old_weight +
@@ -483,5 +550,6 @@ void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *out)
         .dry_frames = atomic_load(&s->dry_frames),
         .queue_full = atomic_load(&s->queue_full),
         .recoveries = atomic_load(&s->recoveries),
+        .discarded_samples = atomic_load(&s->discarded_samples),
     };
 }

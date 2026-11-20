@@ -7,6 +7,7 @@
  */
 #include "netcom.h"
 #include "netrelay.h"
+#include "netp2pnet.h"
 #include "audio_i2s.h"   /* AUDIO_SAMPLE_RATE_HZ / AUDIO_PKT_SAMPLES */
 
 #include <stdio.h>
@@ -691,9 +692,8 @@ void netcom_test_tone(int ms)
 /* ------------------------------------------------------------------------ */
 uint32_t netcom_tx_qdrop(void)
 {
-    /* Frames the relay's TX queue had to drop when the broker stalled (P2P has
-     * no such queue and always reports 0). */
-    return (s_cfg.mode == NETCOM_MODE_RELAY) ? netrelay_tx_qdrop() : 0;
+    if (s_cfg.mode == NETCOM_MODE_RELAY) { return netrelay_tx_qdrop(); }
+    return s_cfg.mode == NETCOM_MODE_NETP2P ? netp2pnet_tx_qdrop() : 0;
 }
 
 void netcom_stats(uint32_t *tx_msgs, uint32_t *rx_msgs, int *peers, const char **state)

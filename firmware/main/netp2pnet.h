@@ -19,6 +19,7 @@ extern "C" {
 
 /* Register the NET-P2P engine; must run before netcom_init(). */
 void netp2pnet_init(void);
+uint32_t netp2pnet_tx_qdrop(void);
 
 /*
  * Append the "\"np2p\":{...}" JSON fragment (no surrounding commas) to buf,

@@ -36,7 +36,8 @@ static unsigned injections,writes,packet_reads;
 static size_t available_room=8192;
 static bool ready_for_direct=true,pre_key_seen;
 static bool packet(int16_t *out){++packet_reads;memcpy(out,expected,sizeof(expected));return true;}
-static bool network_audio_read(bool pull,int16_t *pcm,net_audio_source_t *source){
+static bool network_audio_read(bool pull,int16_t *pcm,net_audio_source_t *source,const net_audio_denoise_t *dn){
+ (void)dn;
  *source=(net_audio_source_t){.present=true,.feeding=true};
  return pull && packet(pcm);
 }

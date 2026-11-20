@@ -362,6 +362,7 @@ static uint32_t s_inject_token;
 static ptt_owner_t s_inject_owner;
 static bool s_net_feeding, s_net_rf_required, s_net_rf_keyed, s_net_write_pending;
 static int64_t s_net_ready_us, s_net_close_us;
+static _Atomic uint32_t s_net_ring_discarded_samples;
 #define NET_TX_LEAD_US 300000LL
 #define NET_DRAIN_LIMIT_US 2000000LL
 /* Set by voice_bridge_play() for the block it just returned. */
@@ -2796,6 +2797,7 @@ void voice_bridge_network_discard(void)
     if (s_inject_owner == PTT_OWNER_NETWORK) {
         const bool feeding = s_net_feeding, rf = s_net_rf_required, keyed = s_net_rf_keyed;
         const int64_t ready = s_net_ready_us;
+        s_net_ring_discarded_samples += (uint32_t)voice_bridge_level();
         voice_inject_reset();
         s_net_feeding = feeding;
         s_net_rf_required = rf;
@@ -2803,6 +2805,11 @@ void voice_bridge_network_discard(void)
         s_net_ready_us = ready;
     }
     ptt_control_unlock();
+}
+
+uint32_t voice_bridge_network_discarded_samples(void)
+{
+    return s_net_ring_discarded_samples;
 }
 
 bool voice_bridge_network_ready(void)

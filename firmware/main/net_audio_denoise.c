@@ -44,18 +44,24 @@ bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
         !voice_dac_held_by_talk();
     const bool allowed = current_mode == mode && owns_output;
     const uint16_t room = netcom_room();
-    const bool changed = dn->latched && source.present &&
-        (dn->source.sender_epoch != source.sender_epoch || dn->source.first_seq != source.first_seq);
+    const bool changed = net_audio_source_changed(dn, source);
+    const bool defer = net_audio_denoise_defer(dn, source);
     const bool route_changed = dn->latched && dn->rf != rf;
     const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
     const uint32_t levels = bridge_denoise_levels();
     const rf_denoise_level_t speaker_level = bridge_denoise_level(levels, first);
     const rf_denoise_level_t rf_level = first ? bridge_denoise_level(levels, first + 1) : RF_DENOISE_LEVEL_OFF;
     const bool opt_in = speaker_level || rf_level;
-    if (!allowed || changed || route_changed || (dn->latched && dn->room != room)) {
+    if (!allowed || route_changed || (dn->latched && dn->room != room) ||
+        (changed && !source.previous_completed && !defer)) {
         if (dn->requested || (dn->latched && opt_in)) { voice_bridge_network_discard(); }
         net_audio_denoise_reset(dn);
         if (!allowed) { return have && !opt_in && current_mode == mode; }
+    } else if (defer) {
+        have = false;
+        source.feeding = false;
+    } else if (changed) {
+        net_audio_denoise_reset(dn);
     }
     if (have && !dn->latched) {
         const rf_denoise_level_t level = rf ? rf_level : speaker_level;

@@ -87,6 +87,31 @@ static void burst(int frames,int end_at){
  }
  assert(!"batch failed to drain/release");
 }
+static void completed_handoff(unsigned next_peer, bool completed) {
+ fixture();
+ net_audio_denoise_t dn={0};
+ net_audio_source_t source;
+ int16_t pcm[320];
+ wire_epoch++;
+ for (unsigned i=0;i<12;i++) { wire_pcm=1000+i;receive(0,tx_seq++,true); }
+ if (completed) { wire_pcm=9000;receive(0,tx_seq++,false); }
+ assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==1000);
+ dn.latched=true;dn.pending=true;dn.source=source;
+ if (completed) {
+  for (int i=1;i<12;i++) { assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==1000+i); }
+  assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==9000);
+ }
+ advance(20);wire_epoch++;
+ for (unsigned i=0;i<12;i++) { wire_pcm=2000+i;receive(next_peer,tx_seq++,true); }
+ assert(network_audio_read(true,pcm,&source,&dn)==!completed);
+ assert(source.previous_completed==completed);
+ if (completed) {
+  assert(net_audio_denoise_defer(&dn,source));
+  dn.pending=false;
+  assert(network_audio_read(true,pcm,&source,&dn));
+ }
+ assert(pcm[0]==2000);
+}
 int main(void){
  setvbuf(stdout,NULL,_IONBF,0);rx_guard_init();ptt_init();fixture();
  int gaps[]={0,1000,5000,30000};int lengths[]={1,2,3,14,15,50};
@@ -96,6 +121,8 @@ int main(void){
  printf("PASS %s 640/1280ms startup batches and 800ms late EOF drain in full\n",ENGINE);
  for(int i=0;i<1000;i++)clip(1+i%3,0);
  printf("PASS %s 1000 consecutive short overs: no residue, no head/tail loss\n",ENGINE);
+ for (unsigned peer=0;peer<2;peer++) { completed_handoff(peer,true);completed_handoff(peer,false); }
+ printf("PASS %s completed sender defers new jitter pull; live preemption still pulls first new block\n",ENGINE);
 
  // A short over can finish the network jitter buffer before the DSP emits speech.
  fixture();int16_t delayed=321,filtered[256];
@@ -204,19 +231,23 @@ def run(out):
         'voice_bridge_network_pending','voice_bridge_network_ready','voice_bridge_network_written','voice_bridge_network_cancel',
         'voice_bridge_room','voice_bridge_inject','voice_bridge_level','voice_bridge_take_resampled','voice_bridge_play','voice_bridge_take')
     voice_code=VOICE+''.join(function(voice,n) for n in funcs)
-    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h'):
+    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h','net_audio_denoise.h','rf_denoise.h'):
         shutil.copy2(ROOT/'firmware/main'/name,out/name)
     (out/'freertos').mkdir(exist_ok=True);(out/'stubs.h').write_text(STUBS,encoding='utf-8')
     for name in ('esp_err.h','esp_timer.h','esp_log.h','board_hw.h','sa818_cfg.h','nvs.h','freertos/FreeRTOS.h','freertos/semphr.h','freertos/task.h'):
         (out/name).write_text('#include "stubs.h"\n',encoding='utf-8')
     codes={}
+    adapter=(ROOT/'firmware/main/net_audio_denoise.c').read_text(encoding='utf-8')
+    transition='#include "net_audio_denoise.h"\n'+function(adapter,'net_audio_source')
     for engine in ('netp2pnet.c','netrelay.c'):
         src=(ROOT/'firmware/main'/engine).read_text(encoding='utf-8')
         if engine=='netp2pnet.c':
-            production=''.join(function(src,n) for n in ('peer_reset_stream','jbuf_audio','handle_frame','peer_jbuf_next','select_active_peer','bridge_key_update'))
+            production=''.join(function(src,n) for n in ('peer_reset_stream','jbuf_audio','handle_frame','peer_jbuf_next','select_active_peer','bridge_key_update','peer_by_mac'))
             post=order.NP_POST.replace('np_addr_t src={.fam=4', 'pkt[24]=(uint8_t)wire_pcm;pkt[25]=(uint8_t)(wire_pcm>>8);np_addr_t src={.fam=4')
+            post=post.replace('s_peer[i].in_use=true;', 's_peer[i].in_use=true;s_peer[i].mac[5]=(uint8_t)(i+1);')
+            np_env=order.NP_ENV.replace('bool in_use,via_hub,selftest;uint8_t fam;', 'bool in_use,via_hub,selftest;uint8_t mac[6],fam;')
             adapter='static bool engine_take(int16_t *out){int peak;rt_peer_t *p=select_active_peer();return p&&peer_jbuf_next(p,out,&peak);}\n'
-            code=common+voice_code+order.NP_ENV+production+post+adapter
+            code=common+voice_code+np_env+production+post+adapter
             mode=1
         else:
             production=''.join(function(src,n) for n in ('relay_source','relay_reset_stream','relay_store_packet','rel_jbuf_next','bridge_key_update'))
@@ -224,7 +255,8 @@ def run(out):
             adapter='static bool pull_audio(void){int16_t out[320];int peak;return rel_jbuf_next(out,&peak);}\nstatic bool engine_take(int16_t *out){int peak;return rel_jbuf_next(out,&peak);}\n'
             code=common+voice_code+order.REL_ENV+production+post+order.mqtt_data_case(src)+'\n}\n}\n'+adapter
             mode=2
-        codes[engine]=f'#define MODE {mode}\n#define ENGINE "{engine}"\n'+code+TEST
+        codes[engine]=(f'#define MODE {mode}\n#define ENGINE "{engine}"\n'+code+
+                       transition+function(src,'network_audio_read')+TEST)
     mute='if (rf_audio && (speaker_settling || (rx_blocked & RX_GUARD_OUT_SPK))) '+body(voice,'if (rf_audio && (speaker_settling')
     codes['rf-prefix']=RF_ENV+function(voice,'clamp16')+function(voice,'gain_mul')+function(voice,'rf_forward_one')+function(voice,'rf_forward_block')+RF_TEST.replace('SPEAKER_MUTE',mute)
     results=[]

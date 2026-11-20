@@ -9,10 +9,12 @@
 
 #define NET_RX_FLAG_EPOCH 0x20u
 #define NET_RX_RETIRED 16
+#define NET_RX_COMPLETED 4
 typedef struct {
-    uint16_t epoch, latest, retired[NET_RX_RETIRED];
+    uint16_t epoch, latest, first_seq, retired[NET_RX_RETIRED];
+    uint16_t completed_epoch[NET_RX_COMPLETED], completed_first[NET_RX_COMPLETED];
     uint16_t probe_seq;
-    uint8_t retired_next, probe_count;
+    uint8_t retired_next, probe_count, completed_next, completed_count;
     bool seen, ptt, audio;
     int64_t last_ms, probe_ms;
 } net_rx_order_t;
@@ -62,10 +64,24 @@ static inline int net_rx_order_accept(net_rx_order_t *s, uint16_t epoch,
         }
         s->epoch = epoch; s->seen = true;
     }
-    if (start) { s->audio = false; }
+    if (start) { s->audio = false; s->first_seq = seq; }
+    if (!ptt && s->audio && s->ptt) {
+        const unsigned i = s->completed_next++ % NET_RX_COMPLETED;
+        s->completed_epoch[i] = epoch;
+        s->completed_first[i] = s->first_seq;
+        if (s->completed_count < NET_RX_COMPLETED) { ++s->completed_count; }
+    }
     s->latest = seq; s->ptt = ptt; s->audio |= ptt;
     s->last_ms = now; s->probe_count = 0;
     return start ? NET_RX_NEW : NET_RX_FORWARD;
+}
+
+static inline bool net_rx_order_completed(const net_rx_order_t *s, uint16_t epoch, uint16_t first_seq)
+{
+    for (unsigned i = 0; i < s->completed_count; ++i) {
+        if (s->completed_epoch[i] == epoch && s->completed_first[i] == first_seq) { return true; }
+    }
+    return false;
 }
 
 static inline bool net_rx_order_keyed(const net_rx_order_t *s, int64_t now,

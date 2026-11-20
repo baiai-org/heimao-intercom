@@ -26,6 +26,7 @@ typedef struct {
     uint32_t workspace_bytes;
     uint32_t wait_max_us;
     uint32_t input_frames, wet_frames, dry_frames, queue_full, recoveries;
+    uint32_t discarded_samples;
     rf_denoise_state_t state;
     rf_denoise_level_t level;  /* Current or most recent talkspurt. */
 } rf_denoise_stats_t;

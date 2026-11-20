@@ -49,6 +49,7 @@
  * different room or with a bad psk_check is dropped.
  */
 #include "netp2pnet.h"
+#include <stdatomic.h>
 #include "np_access.h"
 #include "net_rx_order.h"
 #include "peer_labels.h"
@@ -557,6 +558,7 @@ static volatile bool    s_rx_ptt;
 static volatile int64_t s_rx_ptt_ms;
 static volatile int64_t s_rx_hang_ms;      /* unkey pending since (0 = none) */
 static uint32_t s_tx_msgs, s_tx_errs;
+static atomic_uint s_tx_qdrop;
 static int      s_last_send_rc = -999;  /* lwip_sendto of the last frame */
 static char     s_last_del[72] = "";    /* last delete: peer, fam, result */
 static uint32_t s_bye_rx;              /* BYE frames received */
@@ -1813,17 +1815,27 @@ static void bridge_key_update(bool played, bool denoise_pending)
 
 /* Sample the accepted sender and jitter-buffer state under the same lock
  * as the PCM pull. A prefill miss is still part of the current over. */
-static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *out)
+static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *out,
+                               const net_audio_denoise_t *denoise)
 {
     int peak = 0;
     *out = (net_audio_source_t){0};
     peer_lock();
     rt_peer_t *source = select_active_peer();
-    const bool have = pull && (source && peer_jbuf_next(source, block, &peak));
+    bool have = false;
     if (source) {
-        const bool feeding = net_rx_order_keyed(&source->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) ||
+        *out = net_audio_source(source->mac, source->order.epoch, source->stream_first, false);
+        if (net_audio_source_changed(denoise, *out)) {
+            const uint8_t *identity = (const uint8_t *)&denoise->source.sender_epoch;
+            const rt_peer_t *previous = peer_by_mac(identity);
+            uint16_t epoch;
+            memcpy(&epoch, identity + 6, sizeof(epoch));
+            out->previous_completed = previous &&
+                net_rx_order_completed(&previous->order, epoch, denoise->source.first_seq);
+        }
+        have = pull && !net_audio_denoise_defer(denoise, *out) && peer_jbuf_next(source, block, &peak);
+        out->feeding = net_rx_order_keyed(&source->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) ||
             (source->have_latest && (!source->head_valid || (int16_t)(source->head - source->latest) <= 0));
-        *out = net_audio_source(source->mac, source->order.epoch, source->stream_first, feeding);
     }
     peer_unlock();
     return have;
@@ -1847,7 +1859,7 @@ static void netp2pnet_play_task(void *arg)
             for (int due = 0; due < 4 && now >= next_ms; ++due) {
                 const bool room = voice_bridge_room() >= NP_PKT_SAMPLES;
                 net_audio_source_t source;
-                const bool have = network_audio_read(room, block, &source);
+                const bool have = network_audio_read(room, block, &source, &denoise);
                 if (have) {
                     sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES);
                 }
@@ -1876,7 +1888,7 @@ static void netp2pnet_play_task(void *arg)
         }
         const bool ready = voice_bridge_network_ready();
         net_audio_source_t source;
-        const bool have = network_audio_read(ready, block, &source);
+        const bool have = network_audio_read(ready, block, &source, &denoise);
         if (have) { sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES); }
         const bool rendered = net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P,
             source, have, ready && dac_owned, block, now_ms());
@@ -1965,6 +1977,25 @@ typedef struct {
 static QueueHandle_t s_txq_pcm;
 static TaskHandle_t  s_tx_task;
 
+uint32_t netp2pnet_tx_qdrop(void)
+{
+    return atomic_load(&s_tx_qdrop);
+}
+
+/* Submit under the TX accumulator lock. Count evictions separately from DSP misses. */
+static void np_enqueue_pcm(const int16_t *pcm, bool ptt)
+{
+    if (!s_txq_pcm) { return; }
+    np_tx_item_t item;
+    memcpy(item.pcm, pcm, sizeof(item.pcm));
+    item.ptt = ptt;
+    item.end_ms = ptt ? 0 : now_ms();
+    if (xQueueSend(s_txq_pcm, &item, 0) == pdTRUE) { return; }
+    np_tx_item_t dump;
+    if (xQueueReceive(s_txq_pcm, &dump, 0) == pdTRUE) { atomic_fetch_add(&s_tx_qdrop, 1); }
+    if (xQueueSend(s_txq_pcm, &item, 0) != pdTRUE) { atomic_fetch_add(&s_tx_qdrop, 1); }
+}
+
 /*
  * The audio task only fills the queue; this task pays the Opus cost.
  * Encoding 40 ms of audio takes ~12 ms on this chip, which would stall the
@@ -1996,17 +2027,7 @@ static void netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool ptt)
         s_tx_acc[s_tx_acc_n++] = pcm[i];
         if (s_tx_acc_n == NP_PKT_SAMPLES) {
             s_tx_acc_n = 0;
-            if (s_txq_pcm) {
-                np_tx_item_t item;
-                memcpy(item.pcm, s_tx_acc, sizeof(item.pcm));
-                item.ptt = 1;
-                item.end_ms = 0;
-                if (xQueueSend(s_txq_pcm, &item, 0) != pdTRUE) {
-                    np_tx_item_t dump;
-                    (void)xQueueReceive(s_txq_pcm, &dump, 0);
-                    (void)xQueueSend(s_txq_pcm, &item, 0);
-                }
-            }
+            np_enqueue_pcm(s_tx_acc, true);
         }
     }
     tx_unlock();
@@ -2025,16 +2046,7 @@ static void netp2pnet_tx_end(void)
         memset(s_tx_acc, 0, sizeof(s_tx_acc));
     }
     s_tx_acc_n = 0;
-    if (s_txq_pcm) {
-        np_tx_item_t item, dump;
-        memcpy(item.pcm, s_tx_acc, sizeof(item.pcm));
-        item.ptt = 0;
-        item.end_ms = now_ms();
-        if (xQueueSend(s_txq_pcm, &item, 0) != pdTRUE) {
-            (void)xQueueReceive(s_txq_pcm, &dump, 0);
-            (void)xQueueSend(s_txq_pcm, &item, 0);
-        }
-    }
+    np_enqueue_pcm(s_tx_acc, false);
     tx_unlock();
 }
 
@@ -2167,6 +2179,7 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
     s_last_tx_ms = 0;
     s_tx_msgs = 0;
     s_tx_errs = 0;
+    atomic_store(&s_tx_qdrop, 0);
     /* One TX serialisation mutex for the whole engine lifetime; producers only
      * run while s_started, so creating it here (before s_started flips) is
      * enough to guarantee every tx_sample/tx_end sees a valid handle. */
