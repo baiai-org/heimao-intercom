@@ -166,7 +166,8 @@ class BoardSession(
         profile=bind(profile,id)
         if(capabilities.optInt("custom_name")>=1)acceptName(info,true)
         else if(profile.nameRevision>=0) { profile=profile.copy(customName="",nameRevision=-1);nameCache(profile) }
-        publish { it.copy(profileId=profile.id,deviceId=id,phase="读取实际状态",error="") }
+        publish { it.copy(profileId=profile.id,deviceId=id,phase="读取实际状态",error="",
+            eqPresetsSupported=capabilities.optInt("eq_presets")>=1) }
     }
     private suspend fun acceptName(data:JSONObject,verified:Boolean=false)=nameLock.withLock {
         if(closed || data.optString("device_id")!=api.deviceId || !data.has("custom_name") || !data.has("name_revision"))return@withLock
@@ -317,6 +318,10 @@ class BoardSession(
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
         val response = api.json("api/set", JSONObject().put("k", key).put("v", value))
         when (key) {
+            "spk_vol" -> {
+                refresh()
+                check(view.value.status.optInt("spk",-1)==value.toInt()) { "手台喇叭档位未确认" }
+            }
             "tail" -> check(acceptTail(response).id == value.toInt()) { "尾音类型回读不一致" }
             "tail_modes" -> check(acceptTail(response).modes == value.toInt()) { "尾音应用模式回读不一致" }
             "tail_custom_del" -> {
@@ -358,6 +363,50 @@ class BoardSession(
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
         api.json("api/set",JSONObject().put("k","eq_reset").put("v","0"));refresh()
     }
+    internal suspend fun readEqSlots(): EqSlots {
+        check(capabilities.optInt("eq_presets")>=1) { "手台固件尚未提供 EQ 保存栏" }
+        return EqSlots.parse(api.json("api/eq_presets"), api.deviceId)
+    }
+
+    internal suspend fun writeEqSlot(write: EqSlotWrite): EqSlots {
+        check(api.deviceId == write.base.device) { "设备身份已变化，请重新连接" }
+        check(capabilities.optInt("eq_presets")>=1) { "手台固件尚未提供 EQ 保存栏" }
+        val body = write.body()
+        ensureLease()
+        if (write.op == EqSlotOp.APPLY) { reads.incrementAndGet() }
+        val result = try {
+            EqSlots.parse(api.json("api/eq_presets", body), api.deviceId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: CertificateFailure) {
+            throw error
+        } catch (error: Exception) {
+            val latest = try {
+                readEqSlots()
+            } catch (retry: CancellationException) {
+                throw retry
+            } catch (retry: CertificateFailure) {
+                throw retry
+            } catch (_: Exception) {
+                null
+            }
+            val conflict = error is ApiFailure && error.status==409
+            if (conflict || latest==null || !write.confirmed(latest)) {
+                throw EqSlotUnconfirmed(
+                    if(conflict)"预设或当前 EQ 已变化，请核对后重试" else error.message ?: "EQ 写入未确认",
+                    latest, error
+                )
+            }
+            latest
+        }
+        if (!write.confirmed(result)) { throw EqSlotUnconfirmed("设备回读未确认，请核对后重试", result) }
+        if (write.op == EqSlotOp.APPLY) {
+            reads.incrementAndGet()
+            publish { it.copy(status=result.active.putInto(JSONObject(it.status.toString()), "eq_")) }
+        }
+        return result
+    }
+
     suspend fun channel(op: String,index: Int?=null,name: String="") {
         ensureLease();reads.incrementAndGet()
         val url=EndpointAddress.api(api.base,"api/channel").newBuilder().addQueryParameter("op",op)

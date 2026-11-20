@@ -136,10 +136,13 @@ import kotlinx.coroutines.delay
     LaunchedEffect(s.ptt){elapsed=0;if(s.ptt){val start=SystemClock.elapsedRealtime();while(true){elapsed=(SystemClock.elapsedRealtime()-start)/1000;delay(250)}}}
     DisposableEffect(p.id){onDispose{manager.pttUp(p.id)}}
     val reason=when{!s.connected->"先连接电台";s.maintenance->"维护中";!s.listening->"先开启收听";!s.mine->if(s.control.optBoolean("held"))"控制权由其他端持有" else "正在取得控制权…";else->s.pttReason.ifBlank{"松开即结束"}}
-    val networkSummary=RadioStateRules.networkSummary(s.activity.live(s.live),s.status)
+    val live=s.activity.live(s.live)
+    val inRelay=RadioStateRules.mode(live,s.status)==2
+    val networkSummary=RadioStateRules.networkSummary(live,s.status).takeUnless{inRelay}
     val fill=if(s.ptt)red else if(pressed||s.pttPending)amber else if(enabled)blue else panel
     val ink=if(s.ptt || pressed || s.pttPending){if(LocalRadioDark.current)Color(0xFF29070B) else Color.White} else if(enabled)MaterialTheme.colorScheme.onPrimary else secondary
     Column(Modifier.fillMaxWidth().padding(horizontal=20.dp).padding(top=4.dp,bottom=10.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+        if(inRelay)RelayStatusBanner(NetworkModes.relayStatus(s.status,live,s.connected))
         Surface(color=panel,shape=RoundedCornerShape(20.dp),modifier=Modifier.fillMaxWidth().toggleable(s.listening,enabled=s.connected&&!s.maintenance,role=Role.Switch,onValueChange={manager.toggleListening(p.id)}).semantics{contentDescription="手机收听"}) {
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).padding(horizontal=16.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(13.dp)) {
                 Icon(Icons.Outlined.Headphones,null,tint=if(s.listening)green else secondary,modifier=Modifier.size(20.dp))

@@ -4,6 +4,7 @@ const main=path.resolve(__dirname,'../firmware/main');
 const output=process.env.PANEL_TEST_OUTPUT || __dirname;fs.mkdirSync(output,{recursive:true});
 const identity={device_id:'orl-example',api_version:2,custom_name:'桥接测试',name_revision:1};
 const originalIdentity=identity.device_id;
+const eqSlots = [null,null,null]; let eqRevision=0, eqConflict=false;
 let failTailUpload=false, tailUploads=0, holdTailUpload=null;
 const status={...identity,build:{version:'r11-110'},wifi:{connected:true,ip:'192.0.2.1',ssid:'测试网络',state:'connected',rssi:-45,host:'heimao',mdns_host:'heimao-2',mdns_state:'conflict',ip6:''},
  mode:'MONITOR',ptt:'IDLE',rssi:80,peak:200,mod_sq:true,sql_open:true,eq_spk:[0,0,0,0,0,0],eq_mic:[0,0,0,0,0,0],
@@ -48,7 +49,7 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
    const p=url.pathname;let json;
    if(p==='/')return route.fulfill({contentType:'text/html; charset=utf-8',body:fs.readFileSync(path.join(main,'panel_index.html'))});
    if(p==='/setup')return route.fulfill({contentType:'text/html; charset=utf-8',body:fs.readFileSync(path.join(main,'setup.html'))});
-   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js','/rf-denoise.js':'rf_denoise.js'};
+   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js','/rf-denoise.js':'rf_denoise.js','/eq-presets.js':'eq_presets.js'};
    if(scripts[p])return route.fulfill({contentType:'application/javascript',body:fs.readFileSync(path.join(main,scripts[p]))});
    if(p==='/api/device')json=identity;
    else if(p==='/api/wifi')json={...status.wifi,profiles:[],scan_running:false,offline_ms:0};
@@ -69,6 +70,26 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
       json={ok:true,device_id:identity.device_id,tail:tailState()};
      }
     }
+   else if(p==='/api/eq_presets'){
+    if(route.request().method()==='POST'){
+     assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+     const body=route.request().postDataJSON();
+     assert.equal(body.boot_id,'1234abcd');
+     const index=body.slot-1;
+     if(eqConflict){eqConflict=false;eqRevision++;}
+     if(body.revision!==eqRevision)return route.fulfill({status:409,json:{ok:false,err:'版本冲突'}});
+     if(body.op==='save'){eqSlots[index]={name:body.name,spk:body.spk,mic:body.mic};eqRevision++;}
+     else if(body.op==='rename'){eqSlots[index].name=body.name;eqRevision++;}
+     else if(body.op==='delete'){eqSlots[index]=null;eqRevision++;}
+     else if(body.op==='apply'){
+      assert.deepEqual(body.expected_spk,status.eq_spk);
+      assert.deepEqual(body.expected_mic,status.eq_mic);
+      status.eq_spk=eqSlots[index].spk;status.eq_mic=eqSlots[index].mic;
+     }else throw Error('Unexpected EQ mutation '+body.op);
+    }
+    json={ok:true,device_id:identity.device_id,boot_id:'1234abcd',revision:eqRevision,slots:eqSlots,
+     active_spk:status.eq_spk,active_mic:status.eq_mic};
+   }
    else if(p==='/api/rf_denoise'){
     if(route.request().method()==='POST'){
      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
@@ -108,6 +129,7 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
       else status.tail.modes=Number(v);
       return route.fulfill({json:{ok:true,device_id:identity.device_id,tail:tailState()}});
      }else if(k==='ix_mode')status.intercom.mode=Number(v);
+    else if(k==='spk_vol')status.spk=Number(v);
     else if(k==='freq_pair'){
      if(rejectChannel)return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:false,err:'模块拒绝频率或响应超时，请重新提交可用频率'})});
      [status.freq.tx,status.freq.rx]=v.split(',').map(Number);
@@ -356,6 +378,65 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   status.device_id=identity.device_id=originalIdentity;await page.reload();await page.waitForFunction(()=>document.body.dataset.panelLayout==='detail');
   await toggle.click();await page.waitForFunction(()=>document.body.dataset.panelLayout==='simple');
   await page.screenshot({animations:'disabled',path:path.join(output,'layout-simple-mobile.png')});
+  Object.assign(status.intercom,{mode:2,relay_link:'connected',relay_reason:'',peers:27});
+  await page.waitForFunction(()=>document.querySelector('#relayTalkState').textContent.includes('已连接'));
+  await page.locator('[data-page=network]').click();
+  assert.equal(await page.locator('#relayModeState').getAttribute('data-kind'),'connected');
+  assert(!(await page.locator('.mode-stage[data-modes="2"]').innerText()).includes('27'));
+  Object.assign(status.intercom,{relay_link:'error',relay_reason:'authentication'});
+  await page.waitForFunction(()=>document.querySelector('#relayStageState').textContent.includes('用户名'));
+  assert.equal(await page.locator('#relayModeState').getAttribute('data-kind'),'down');
+  Object.assign(status.intercom,{relay_link:'reconnecting',relay_reason:''});
+  await page.waitForFunction(()=>document.querySelector('#relayModeState').textContent.includes('正在重连'));
+  await page.locator('[data-page=talk]').click();
+  status.bridge.keyed=1;
+  await page.waitForFunction(()=>!document.querySelector('#speakerBridgeState').hidden);
+  await page.locator('#spkVol').evaluate(el=>{
+   el.value='4';
+   el.dispatchEvent(new Event('input',{bubbles:true}));
+   el.dispatchEvent(new Event('change',{bubbles:true}));
+  });
+  await page.waitForFunction(()=>document.querySelector('#speakerSaveState').textContent.includes('已确认'));
+  assert.equal(status.spk,4);status.bridge.keyed=0;
+  await page.locator('.panel-more').click();
+  await page.locator('[data-page=device]').click();
+  assert(await page.locator('#panelClock').evaluate(el=>el.nextElementSibling.classList.contains('name-plate')));
+  assert.equal(await page.locator('#panelClockZone').inputValue(),'480');
+  await page.locator('#panelClockZone').selectOption('345');
+  assert.equal(await page.evaluate(()=>{
+   const nativeNow=Date.now;Date.now=()=>Date.UTC(2026,10,19,18,15,1);
+   renderClock();Date.now=nativeNow;
+   return document.querySelector('#panelClockText').textContent;
+  }),'UTC+05:45 00:00:01');
+  await page.locator('#panelClock').screenshot({path:path.join(output,'clock-mobile.png')});
+  await page.locator('.panel-more').click();
+  await page.locator('[data-page=audio]').click();
+  assert.equal(await page.locator('#eqPresetList .eq-user-slot').count(),3);
+  const slot=page.locator('#eqPresetList [data-slot="1"]');
+  await slot.getByRole('button',{name:'保存当前 EQ'}).click();
+  await page.locator('#eqPresetName').fill('车载');
+  await page.locator('#eqPresetSubmit').click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已保存'));
+  eqConflict=true;
+  await slot.getByRole('button',{name:'重命名'}).click();
+  await page.locator('#eqPresetName').fill('夜间');
+  await page.locator('#eqPresetSubmit').click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已变化'));
+  assert.equal(await page.locator('#eqPresetName').inputValue(),'夜间');
+  await page.locator('#eqPresetSubmit').click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已重命名'));
+  assert.equal(eqSlots[0].name,'夜间');
+  await slot.getByRole('button',{name:'应用'}).click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已应用'));
+  await page.locator('#eqUserPresets').screenshot({path:path.join(output,'eq-slots-mobile.png')});
+  await slot.getByRole('button',{name:'删除'}).click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent==='已删除');
+  assert.equal(eqSlots[0],null);
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelector('#panelClockZone').value==='345');
+  await page.locator('#panelLayoutToggle').click();
+  await page.waitForFunction(()=>document.body.dataset.panelLayout==='detail');
+  assert(await page.locator('#panelClock').evaluate(el=>el.nextElementSibling.classList.contains('name-plate')));
   await page.goto('http://heimao.test/setup');
   await page.waitForFunction(()=>document.getElementById('state').textContent.includes('重名'));
   assert.equal(await page.locator('#openHost').getAttribute('href'),'https://heimao-2.local/');

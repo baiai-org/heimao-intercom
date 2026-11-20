@@ -33,6 +33,51 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+.relay-state {
+  display: block; width: fit-content; max-width: 100%; padding: 6px 10px;
+  border: 1px solid var(--line-hi); border-radius: 8px; background: var(--bg-2);
+  color: var(--fg-2); font: 700 14px/1.4 var(--sans); white-space: normal;
+}
+.relay-state[hidden] { display: none; }
+.relay-state[data-kind="connected"] { color: #6ee7b7; background: #0b2927; border-color: #25866c; }
+.relay-state[data-kind="waiting"] { color: #fde68a; background: #312407; border-color: #92610f; }
+.relay-state[data-kind="down"] { color: #fecdd3; background: #321724; border-color: #a83e57; }
+#ixSeg .relay-state { margin-top: 5px; padding: 4px 6px; font-size: 12px; }
+#relayTalkState { margin-bottom: 10px; }
+.panel-clock {
+  display: grid; justify-items: center; gap: 12px; width: 100%;
+  padding: clamp(14px, 3vw, 22px); margin-bottom: 10px;
+  border: 1px solid var(--line-hi); border-radius: var(--radius-lg); background: #090f1d;
+}
+.clock-digits { display: flex; justify-content: center; align-items: center; gap: clamp(3px, 1vw, 7px); width: 100%; }
+.clock-digit { position: relative; width: 10.6%; max-width: 43px; aspect-ratio: 0.58; }
+.clock-digit i { position: absolute; background: #80f7ed; opacity: 0.095; }
+.clock-digit i.on { opacity: 1; }
+.clock-digit :is(.seg-a,.seg-g,.seg-d) {
+  width: 72%; left: 14%; height: 9%; clip-path: polygon(0 50%, 11% 0, 89% 0, 100% 50%, 89% 100%, 11% 100%);
+}
+.clock-digit .seg-a { top: 0; }
+.clock-digit .seg-g { top: 45.5%; }
+.clock-digit .seg-d { bottom: 0; }
+.clock-digit :is(.seg-b,.seg-c,.seg-e,.seg-f) {
+  height: 40%; width: 16%; clip-path: polygon(50% 0, 100% 12%, 100% 88%, 50% 100%, 0 88%, 0 12%);
+}
+.clock-digit :is(.seg-b,.seg-f) { top: 6%; }
+.clock-digit :is(.seg-c,.seg-e) { bottom: 6%; }
+.clock-digit :is(.seg-b,.seg-c) { right: 0; }
+.clock-digit :is(.seg-e,.seg-f) { left: 0; }
+.clock-colon { display: grid; align-content: center; gap: 8px; flex: 0 0 6px; }
+.clock-colon::before,.clock-colon::after { content: ""; width: 6px; height: 6px; border-radius: 1px; background: #80f7ed; }
+.clock-zone { color: var(--fg-2); display: flex; gap: 8px; align-items: center; }
+.clock-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.eq-user-presets { display: grid; gap: 8px; margin-top: 14px; }
+.eq-user-slot { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
+  padding:9px 10px; border:1px solid var(--line); border-radius:8px; }
+.eq-user-slot strong { min-width:0; overflow-wrap:anywhere; }
+.eq-user-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.eq-user-actions button { min-height:36px; }
+#eqPresetForm { margin: 0; }
+#eqPresetForm[hidden], .eq-user-actions button[hidden] { display: none; }
 html, body {
   margin: 0;
   padding: 0;
@@ -1546,6 +1591,11 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
 
     <!-- Left: Dual VFO & Signal Cockpit -->
     <div class="lcd-cockpit">
+      <section class="panel-clock" id="panelClock" aria-label="时钟">
+        <time id="panelClockText" class="clock-text"></time>
+        <div id="panelClockDigits" class="clock-digits" aria-hidden="true"></div>
+        <label class="clock-zone">时区 <select id="panelClockZone"></select></label>
+      </section>
       <div class="name-plate" aria-label="手台名称">
         <div class="stage-head"><span class="stage-title">● 手台名称</span><span id="handsetUse">正在读取…</span></div>
         <div class="name-plate-row">
@@ -1563,6 +1613,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <span class="tag-chip" id="mState">守听 -</span>
         </div>
       </div>
+      <span class="relay-state" id="relayTalkState" role="status" hidden></span>
 
       <div class="vfo-grid">
         <div class="vfo-cell" id="vfoRxCell">
@@ -1624,6 +1675,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <button type="button" data-m="2">
             <span class="m-code">MODE 02 · EMQX</span>
             <span class="m-title">网络中继</span>
+            <span class="relay-state" id="relayModeState">读取中…</span>
           </button>
         </div>
       </div>
@@ -1682,6 +1734,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <span class="stage-title">● 网络中继 · EMQX</span>
           <button id="brTest2" class="pri" style="padding:3px 9px;font-size:11px">注入 3s 接收自检音</button>
         </div>
+        <span class="relay-state" id="relayStageState" role="status">读取中…</span>
         <div class="row" style="margin:3px 0">
           <label>EMQX 服务器</label>
           <input type="text" id="ixBroker2" placeholder="host:port">
@@ -1944,6 +1997,8 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <label>音量档位</label>
         <input type="range" id="spkVol" min="0" max="7" step="1">
         <span class="val" id="spkVolV">-</span>
+        <small id="speakerBridgeState" hidden>桥接发射中 · 共享音频输出</small>
+        <small id="speakerSaveState" role="status"></small>
       </div>
 
       <div class="sec-label"><span>前置面板按键</span></div>
@@ -2013,7 +2068,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
       <!-- Per-path transmit gains: one row per physical route through the board. -->
       <div class="sec-label"><span>发射路径增益 (PER-PATH GAIN)</span></div>
       <div class="row" style="margin-top:0">
-        <label>本机麦克风 → 射频</label>
+        <label>本机麦克风 → 射频／网络</label>
         <input type="range" id="txgain" min="1" max="255" step="1">
         <span class="val" id="txgainV">-</span>
       </div>
@@ -2201,6 +2256,17 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <div class="eq-col"><span class="val" id="eq_mic_presV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_pres" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.2k</span><span class="eq-band-name">临场</span></div>
         <div class="eq-col"><span class="val" id="eq_mic_airV">0dB</span><div class="eq-fader-wrap"><input type="range" id="eq_mic_air" min="-12" max="6" step="1" value="0"></div><span class="eq-freq-lbl">3.8k</span><span class="eq-band-name">空气</span></div>
       </div>
+      <section id="eqUserPresets" class="subcard eq-user-presets" aria-labelledby="eqUserTitle">
+        <div class="subcard-head" id="eqUserTitle">用户 EQ 预设</div>
+        <div id="eqPresetList" class="eq-user-presets"></div>
+        <form class="row" id="eqPresetForm" hidden>
+          <label for="eqPresetName" id="eqPresetEditTitle">预设名称</label>
+          <input type="text" id="eqPresetName" maxlength="48" autocomplete="off">
+          <button type="submit" id="eqPresetSubmit" class="pri">保存</button>
+          <button type="button" id="eqPresetCancel">取消</button>
+        </form>
+        <small id="eqPresetFeedback" role="status">正在读取…</small>
+      </section>
     </div>
 
     <!-- Right: Real-time Event & Telemetry Console -->
@@ -2309,7 +2375,7 @@ $('logClr').onclick = () => { $('log').innerHTML = ''; };
 
 /* Read-only requests only: never retry PTT, setters, uploads or SDR audio. */
 const PANEL_READ_PATHS = new Set(['/api/status', '/api/radio', '/api/live',
-  '/api/ctcss', '/api/dcs', '/api/channels']);
+  '/api/ctcss', '/api/dcs', '/api/channels', '/api/eq_presets']);
 const PANEL_TABLE_PATHS = new Set(['/api/ctcss', '/api/dcs', '/api/channels']);
 const panelReadPending = new Map(), panelReadWaiters = [];
 let panelReadActive = 0;
@@ -2365,7 +2431,104 @@ function panelReadProblem(message, renderError = false) {
     $('wifiPill').textContent = '面板连接断开'; $('wifiPill').className = 'pill down';
     $('hbDot').style.background = 'var(--rose)'; $('hbDot').title = '控制面板离线';
   }
+  if (!renderError && (offline || Date.now() - (panelStatusAt || panelStartedAt) >= 10000)) {
+    renderRelay(window._st, offline ? 'offline' : 'unknown');
+  }
 }
+
+const relayStates = {
+  connected: ['✓ 中继已连接','connected'],
+  connecting: ['◷ 正在连接中继','waiting'],
+  reconnecting: ['◷ 正在重连中继','waiting'],
+  disconnected: ['! 中继未连接','down'],
+  error: ['! 中继连接失败','down'],
+  disabled: ['中继未启用','muted'],
+  offline: ['手台离线 · 中继状态未知','muted'],
+  unknown: ['中继状态待确认','muted']
+};
+const relayReasons = {
+  authentication:'请检查服务器用户名和密码',
+  network:'请检查手台联网和服务器地址',
+  subscribing:'等待服务器确认语音订阅',
+  subscribe_failed:'语音订阅失败，请检查服务器权限',
+  subscribe_timeout:'服务器未确认语音订阅',
+  start_failed:'中继服务启动失败，请检查设置'
+};
+function relayBadge(s, forced) {
+  const ix = s?.intercom;
+  const stale = panelStatusAt && Date.now() - panelStatusAt >= 10000;
+  const key = forced || (stale ? (panelOnline ? 'unknown' : 'offline') : !ix ? 'unknown' :
+    ix.mode !== 2 ? 'disabled' : ix.relay_link);
+  const [title, kind] = relayStates[key] || relayStates.unknown;
+  return {title, kind, reason: forced || stale || ix?.mode !== 2 ? '' : relayReasons[ix.relay_reason] || ''};
+}
+function renderRelay(s, forced) {
+  const badge = relayBadge(s, forced);
+  for (const id of ['relayModeState','relayTalkState','relayStageState']) {
+    const el = $(id);
+    const label = id === 'relayModeState' || !badge.reason ? badge.title : badge.title + ' · ' + badge.reason;
+    if (el.textContent !== label) { el.textContent = label; }
+    el.dataset.kind = badge.kind;
+    if (id === 'relayTalkState') { el.hidden = s?.intercom?.mode !== 2; }
+  }
+}
+
+const clockZone = $('panelClockZone');
+const clockDigits = $('panelClockDigits');
+const clockText = $('panelClockText');
+const digitSegments = ['abcdef','bc','abdeg','abcdg','bcfg','acdfg','acdefg','abc','abcdefg','abcdfg'];
+const clockDigitsSegments = [];
+for (let index = 0; index < 6; index++) {
+  if (index && index % 2 === 0) {
+    const colon = document.createElement('span'); colon.className = 'clock-colon'; clockDigits.append(colon);
+  }
+  const digit = document.createElement('span'); digit.className = 'clock-digit';
+  const segments = [...'abcdefg'].map(part => {
+    const segment = document.createElement('i'); segment.className = 'seg-' + part; digit.append(segment); return segment;
+  });
+  clockDigits.append(digit);
+  clockDigitsSegments.push(segments);
+}
+const clockOffsets = [...Array.from({length: 27}, (_, index) => (index - 12) * 60),
+  -570,-210,210,270,330,345,390,525,570,630,765,825].sort((a,b) => a - b);
+const padClock = n => String(n).padStart(2, '0');
+for (const offset of clockOffsets) {
+  const option = document.createElement('option'); option.value = offset;
+  option.textContent = 'UTC' + (offset >= 0 ? '+' : '−') + padClock(Math.floor(Math.abs(offset) / 60)) + ':' + padClock(Math.abs(offset) % 60);
+  clockZone.append(option);
+}
+clockZone.value = '480';
+let clockKey = '', clockTimer, clockEdited = false;
+function renderClock() {
+  clearTimeout(clockTimer);
+  const now = Date.now(), time = new Date(now + Number(clockZone.value) * 60000);
+  const label = [time.getUTCHours(),time.getUTCMinutes(),time.getUTCSeconds()].map(padClock).join(':');
+  const digits = label.replaceAll(':','');
+  clockDigitsSegments.forEach((segments, index) => segments.forEach((segment, part) => {
+    segment.classList.toggle('on',digitSegments[Number(digits[index])].includes('abcdefg'[part]));
+  }));
+  clockText.textContent = (clockZone.selectedOptions[0]?.textContent || 'UTC+08:00') + ' ' + label;
+  clockTimer = setTimeout(renderClock, 1000 - now % 1000);
+}
+function useClockDevice(device) {
+  if (!device || clockKey === 'heimao.panel.clock.' + device) { return; }
+  clockKey = 'heimao.panel.clock.' + device;
+  try {
+    if (clockEdited) { localStorage.setItem(clockKey, clockZone.value); }
+    else {
+      const stored = localStorage.getItem(clockKey);
+      clockZone.value = stored !== null && clockOffsets.includes(Number(stored)) ? stored : '480';
+    }
+  } catch (_) {}
+  renderClock();
+}
+clockZone.addEventListener('change', () => {
+  clockEdited = true;
+  if (clockKey) { try { localStorage.setItem(clockKey, clockZone.value); } catch (_) {} }
+  renderClock();
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { renderClock(); } });
+renderClock();
 const diagButton = document.createElement('button'); diagButton.textContent = '导出连接与通联诊断';
 $('logClr').after(diagButton);
 diagButton.onclick = async () => {
@@ -3255,8 +3418,8 @@ async function cmd(k, v) {
   const channelChange = k === 'bridge_chan' || k === 'ix_mode' || k === 'ix_room';
   if (channelChange && channelCommandPending) { log('正在切换，请等待结果', 'err'); return {ok:false}; }
   if (channelChange) { channelCommandPending = true; }
-  const controller = channelChange ? new AbortController() : null;
-  const timeout = controller ? setTimeout(() => controller.abort(), 12000) : null;
+  const controller = channelChange || k === 'spk_vol' ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), channelChange ? 12000 : 4500) : null;
   try {
     const r = await fetch('/api/set?k=' + encodeURIComponent(k) + '&v=' + encodeURIComponent(v),
       controller ? {signal:controller.signal} : undefined);
@@ -3273,13 +3436,35 @@ async function cmd(k, v) {
   }
 }
 
+let speakerSaving = false;
+const speakerLabel = v => Number(v) === 0 ? '静音' : '第 ' + v + ' 档';
 $('spkVol').addEventListener('input', () => {
   touchInput();
-  $('spkVolV').textContent = $('spkVol').value;
+  $('spkVolV').textContent = speakerLabel($('spkVol').value);
 });
-$('spkVol').addEventListener('change', () => {
+$('spkVol').addEventListener('change', async () => {
+  if (speakerSaving) { return; }
   touchInput();
-  cmd('spk_vol', $('spkVol').value);
+  const step = Number($('spkVol').value);
+  const device = window._st?.device_id;
+  if (!device) { return; }
+  speakerSaving = true; $('spkVol').disabled = true;
+  $('speakerSaveState').textContent = '正在保存…';
+  try {
+    const reply = await cmd('spk_vol', step);
+    await panelReadPending.get('/api/status')?.catch(() => {});
+    const confirmed = await panelReadJson('/api/status');
+    if (confirmed.device_id !== device || !Number.isInteger(confirmed.spk)) { throw Error('档位回读无效'); }
+    $('spkVol').value = confirmed.spk;
+    $('spkVolV').textContent = speakerLabel(confirmed.spk);
+    if (reply?.ok === false) { throw Error(reply.err || '档位保存失败'); }
+    if (confirmed.spk !== step) { throw Error('手台仍为' + speakerLabel(confirmed.spk)); }
+    $('speakerSaveState').textContent = speakerLabel(step) + '已确认';
+  } catch (e) {
+    $('speakerSaveState').textContent = e.message || '档位未确认';
+  } finally {
+    speakerSaving = false; $('spkVol').disabled = false; last = '';
+  }
 });
 $('ixRoomSet1').onclick = () => cmd('ix_room', $('ixRoom1').value);
 $('ixBrokerSet2').onclick = () => cmd('ix_broker', $('ixBroker2').value.trim());
@@ -4226,7 +4411,7 @@ async function refreshMeter() {
       if (!b) { return; }
       b.disabled = (netBlocked || rfBlocked) && !isTx;
       b.title = (rfBlocked && !isTx) ? '射频待设置：请确认模块频段并提交收发频率' : (netBlocked && !isTx)
-        ? '网络中继未就绪（EMQX 未连接或没有对端）——填好 broker 与账号，或切回 MODE 00 用电台发射'
+        ? (s.ic_mode === 2 ? '中继未就绪 · 请检查服务器连接' : '公网直连未就绪 · 请检查对端连接')
         : '';
     });
   } catch (e) {
@@ -4266,6 +4451,10 @@ async function refresh() {
     renderRadio(radio);
     if (bandChanged) { loadChannels(); loadBridgeChans(); }
     window._st = s;
+    window.HMEqPresets?.observe(s);
+    useClockDevice(s.device_id);
+    renderRelay(s);
+    $('speakerBridgeState').hidden = !s.bridge?.keyed;
     if (window.HMDeviceName) window.HMDeviceName.accept(s);
     if (s.audio_rate) SDR.wire = s.audio_rate;
 
@@ -4330,8 +4519,8 @@ async function refresh() {
     const kv = [
       ['音频通路', s.mode.indexOf('MONITOR') >= 0 ? 'MONITOR 守听' : (s.mode.indexOf('TALK') >= 0 ? 'TALK 发射' : 'IDLE 待机')],
       ['PTT 键控累计', s.ptt + ' (' + s.tx_count + '次)'],
-      ['网络房间 / 节点', s.intercom.mode === 0 ? '本地直频'
-        : ((s.intercom.mode === 1 ? '#' + s.intercom.room + ' · ' : '') + s.intercom.peers + ' 在线')],
+      ['网络状态', s.intercom.mode === 0 ? '本地直频' : s.intercom.mode === 1 ?
+        '#' + s.intercom.room + ' · ' + s.intercom.peers + ' 在线' : relayBadge(s).title],
       ['模拟桥接转发', s.bridge.en ? (s.bridge.active ? (s.bridge.keyed ? 'TX 发射中' : 'RX 守听转发') : '待命') : '已关闭'],
       ['喇叭音量', s.spk],
       ['峰值 / 硬削顶计数', s.peak + ' / ' + s.clip],
@@ -4363,8 +4552,7 @@ async function refresh() {
       'no-engine': '无引擎',
       connecting: '连接服务器中'
     };
-    const ist = '在线 ' + s.intercom.peers + ' · ' +
-      (sm[s.intercom.state] || s.intercom.state) +
+    const ist = (sm[s.intercom.state] || s.intercom.state) +
       ' · TX ' + s.intercom.tx + ' / RX ' + s.intercom.rx;
     $('ixState2').textContent = ist;
     $('ixDiag2').textContent = s.intercom.diag ? ('诊断: ' + s.intercom.diag) : '状态正常';
@@ -4432,7 +4620,10 @@ async function refresh() {
         if (el && document.activeElement !== el) el.value = val;
         if (vid && $(vid)) $(vid).textContent = fmtSlider(id, val);
       };
-      setVal('spkVol', 'spkVolV', s.spk);
+      if (!speakerSaving) {
+        setVal('spkVol', 'spkVolV', s.spk);
+        $('spkVolV').textContent = speakerLabel(s.spk);
+      }
       setVal('sq', 'sqV', s.freq.sq);
       setVal('vol', 'volV', s.freq.vol);
       setVal('txgain', 'txgainV', s.txgain);
@@ -4529,6 +4720,7 @@ refresh();
   main.prepend(nav,content);
   const move=(el,page)=>{if(el)pages[page].append(el);};
   const card=(title)=>{const e=document.createElement('div');e.className='card';const h=document.createElement('h3');h.textContent=title;e.append(h);return e;};
+  move(document.getElementById('panelClock'),'device');
   move(document.querySelector('.name-plate'),'device');
   const lcd=document.querySelector('.lcd-cockpit');
   const telemetry=document.createElement('details');telemetry.innerHTML='<summary>详细运行状态</summary>';
@@ -4590,7 +4782,9 @@ refresh();
   nav.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>change(b.dataset.page));
   source.querySelectorAll('button').forEach(b=>b.onclick=async()=>{if(busy||b.classList.contains('on'))return;busy=true;try{if(!await release())return;const useBrowser=b.dataset.source==='browser';handheld.hidden=useBrowser;browser.hidden=!useBrowser;source.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));}catch(e){notice.textContent='切换音源失败：'+e.message;}finally{busy=false;}});
   const summary=card('通联概况');const summaryText=document.createElement('p');summary.append(summaryText);pages.talk.append(summary);
-  function status(){const s=window._st;if(!s)return;const mode=s.intercom?.mode;const peers=mode===1?s.np2p?.links:mode===2?s.intercom?.peers:0;summaryText.textContent='当前模式：'+(['本地模拟','公网直连','网络中继'][mode]||'读取中')+' · 对端 '+(peers??0)+' · 桥接'+(s.bridge?.en?'已开启':'已关闭')+' · 网页收听'+(SDR.on?'已开启':'已关闭');}
+  function status(){const s=window._st;if(!s)return;const mode=s.intercom?.mode;
+    const links=mode===1?' · 对端 '+(s.np2p?.links??0):mode===2?' · '+relayBadge(s).title:'';
+    summaryText.textContent='当前模式：'+(['本地模拟','公网直连','网络中继'][mode]||'读取中')+links+' · 桥接'+(s.bridge?.en?'已开启':'已关闭')+' · 网页收听'+(SDR.on?'已开启':'已关闭');}
   const changedEdges=originalTree.filter(x=>x.nodes.length!==x.el.childNodes.length||x.nodes.some((n,i)=>x.el.childNodes[i]!==n));
   const hiddenChanges=originalTree.filter(x=>x.hidden!==x.el.hidden);
   const parents=new Set(changedEdges.map(x=>x.el));
@@ -4632,6 +4826,7 @@ refresh();
 </script>
 <script src="/maintenance.js"></script>
 <script src="/rf-denoise.js"></script>
+<script src="/eq-presets.js"></script>
 </body>
 </html>
 

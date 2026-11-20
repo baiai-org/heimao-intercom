@@ -372,9 +372,12 @@ bool voice_get_autostart(void);
  * immediately (coefficient recomputation + state reset).
  */
 void voice_eq_load(void);
-void voice_eq_set(int dir, const int db[6]);
+esp_err_t voice_eq_set(int dir, const int db[6]);
 void voice_eq_get(int dir, int db[6]);
-void voice_eq_reset(void);
+void voice_eq_snapshot(int db[2][6]);
+esp_err_t voice_eq_set_band(int dir, int band, int db);
+esp_err_t voice_eq_replace(const int expected[2][6], const int next[2][6]);
+esp_err_t voice_eq_reset(void);
 
 /*
  * Speaker volume, eight steps (0..7).  This is the volume the operator changes
@@ -413,7 +416,7 @@ void voice_eq_reset(void);
 #define VOICE_SPK_MAX 7
 #define VOICE_SPK_REF 7          /* 0 dB: the 70 step, unity at the codec's own volume */
 
-void voice_set_speaker_level(int level);
+esp_err_t voice_set_speaker_level(int level);
 int  voice_get_speaker_level(void);
 void voice_speaker_level_load(void);
 

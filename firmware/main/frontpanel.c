@@ -167,8 +167,7 @@ static void act_channel_step(int delta)
 }
 
 /*
- * Volume keys move the five-step SPEAKER volume (voice_set_speaker_level):
- * 0 = amplifier shut down, 1..4 = -10 / -5 / 0 / +5 dB on the speaker path.
+ * Volume keys move the same eight speaker steps as the control panel.
  *
  * Not the codec's DAC volume and not the receive gain: the DAC output on this
  * board also feeds the SA818's transmit input, and the receive gain only covers
@@ -184,7 +183,11 @@ static void act_volume_step(int delta)
         ESP_LOGI(TAG, "speaker volume already at step %d/%d", v, VOICE_SPK_MAX);
         return;
     }
-    voice_set_speaker_level(v);
+    const esp_err_t err = voice_set_speaker_level(v);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "speaker step %d could not be saved: %s", v, esp_err_to_name(err));
+        return;
+    }
     ESP_LOGI(TAG, "speaker volume %d -> %d/%d%s", cur, v, VOICE_SPK_MAX,
              v == 0 ? " (amplifier off)" : "");
 }

@@ -1,5 +1,6 @@
 package net.openradiolink.app
 
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -35,19 +36,36 @@ class NetworkModesTest {
         assertEquals("无网络",noNet.first)
         assertFalse(noNet.second)
     }
-    @Test fun relayIsLinkedOnlyWhenAnEngineIsConnected() {
-        assertTrue(NetworkModes.status(2,2,"idle",5).second)
-        assertEquals("待机 · 5 个在线用户",NetworkModes.status(2,2,"idle",5).first)
-        assertTrue(NetworkModes.status(2,2,"tx",5).second)
-        assertFalse(NetworkModes.status(2,2,"connecting",0).second)
-        assertFalse(NetworkModes.status(2,2,"stopped",0).second)
-        assertFalse(NetworkModes.status(2,2,"no-net",0).second)
+    @Test fun mqttConnectionIgnoresPeerCountsAndRecentTraffic() {
+        val intercom=JSONObject().put("mode",2).put("state","rx").put("peers",5)
+        val status=JSONObject().put("intercom",intercom)
+        val live=JSONObject().put("ic_mode",2).put("net_ready",true)
+        val disconnected=NetworkModes.relayStatus(status,live,true)
+        assertEquals(NetworkModes.RelayTone.NEUTRAL,disconnected.tone)
+        intercom.put("relay_link","connected")
+        val linked=NetworkModes.relayStatus(status,live,true)
+        assertEquals(NetworkModes.RelayTone.CONNECTED,linked.tone)
+        assertEquals("✓ 中继已连接",linked.title)
+        intercom.put("peers",0)
+        assertEquals(linked,NetworkModes.relayStatus(status,live,true))
+        intercom.put("relay_link","disconnected")
+        assertEquals(NetworkModes.RelayTone.DOWN,NetworkModes.relayStatus(status,live,true).tone)
+        assertEquals(NetworkModes.RelayTone.NEUTRAL,NetworkModes.relayStatus(status,live,false).tone)
+    }
+    @Test fun relayAuthenticationFailureAndRetryHaveExplicitText() {
+        val intercom=JSONObject().put("mode",2).put("relay_link","error").put("relay_reason","authentication")
+        val status=JSONObject().put("intercom",intercom)
+        val failed=NetworkModes.relayStatus(status,JSONObject(),true)
+        assertEquals(NetworkModes.RelayTone.DOWN,failed.tone)
+        assertTrue(failed.reason.contains("用户名"))
+        intercom.put("relay_link","reconnecting")
+        assertEquals(NetworkModes.RelayTone.WAITING,NetworkModes.relayStatus(status,JSONObject(),true).tone)
     }
     @Test fun missingEngineNeverReadsAsLinked() {
         for(state in listOf("no-engine","stub","off")) {
-            val (label,linked)=NetworkModes.status(2,2,state,0)
-            assertEquals(NetworkModes.stateLabel(state),label)
-            assertFalse(state,linked)
+            val intercom=JSONObject().put("mode",2).put("state",state)
+            assertEquals(NetworkModes.RelayTone.DOWN,
+                NetworkModes.relayStatus(JSONObject().put("intercom",intercom),JSONObject(),true).tone)
         }
         assertFalse(NetworkModes.status(1,1,"no-engine",0).second)
     }

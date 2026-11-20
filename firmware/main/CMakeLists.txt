@@ -29,6 +29,7 @@ idf_component_register(
         "audio_i2s.c"
         "audio_codec.c"
         "eq6.c"
+        "eq_presets.c"
         "voice.c"
         "speaker_diag.c"
         "adc_audio_clock.c"
@@ -78,6 +79,7 @@ idf_component_register(
         "maintenance.js"
         "release_update_public.pem"
         "rf_denoise.js"
+        "eq_presets.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
         "serverkey.pem"

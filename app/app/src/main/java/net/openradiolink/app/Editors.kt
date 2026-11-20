@@ -107,9 +107,14 @@ import java.util.Date
 @Composable internal fun AudioFields(manager:DeviceManager,p:DeviceProfile,s:SessionView,file:(Boolean)->Unit,confirm:(String,()->Unit)->Unit) {
     Section("固定音频参数") {
         Parameter(manager,p,s,"monitor","本地守听",if(s.status.optString("mode").startsWith("MONITOR"))"1" else "0",yesNo)
-        Parameter(manager,p,s,"spk_vol","手台喇叭音量",s.status.value("spk"),(0..7).map{it.toString() to if(it==0)"关闭" else "第 $it 档"})
+        Parameter(manager,p,s,"spk_vol","手台喇叭音量",s.status.value("spk"),
+            (0..7).map{it.toString() to if(it==0)"静音" else "第 $it 档"},
+            hint="控制手台实体喇叭")
+        if(s.connected && s.status.value("bridge.keyed")=="1") {
+            Text("桥接发射中 · 共享音频输出",color=amber,style=MaterialTheme.typography.bodySmall)
+        }
         Text("发射路径增益（每条线独立）",color=blue,style=MaterialTheme.typography.titleSmall)
-        Parameter(manager,p,s,"txgain","本机麦克风 → 射频",s.status.value("txgain"),hint="机身麦克风专用；16 = 1 倍")
+        Parameter(manager,p,s,"txgain","本机麦克风 → 射频／网络",s.status.value("txgain"),hint="机身麦克风数字增益，16 = 1×")
         Parameter(manager,p,s,"ntxgain","手机/网络语音 → 射频",s.status.value("ntxgain"),hint="只影响 App/网页发话；16 = 1 倍")
         Parameter(manager,p,s,"bgtx","网络桥接 → 射频重发",s.status.value("bgtx"),hint="只影响模拟↔网络转发；16 = 1 倍，0 = 关闭")
         Parameter(manager,p,s,"gain","射频 → 喇叭",s.status.value("gain"),hint="只影响本机喇叭这条接收路；16 = 1 倍")
@@ -273,6 +278,7 @@ import java.util.Date
     val active=s.status.value("intercom.mode").toIntOrNull() ?: 0
     val state=s.status.value("intercom.state")
     val peers=s.status.optJSONObject("intercom")?.optInt("peers",0) ?: 0
+    val relay=NetworkModes.relayStatus(s.status,s.activity.live(s.live),s.connected)
     var switching by remember(p.id){mutableStateOf(false)}
     fun switchTo(mode:Int) {
         if(switching || mode==active || !s.connected || s.maintenance) return
@@ -286,9 +292,10 @@ import java.util.Date
     Section("工作模式") {
         NetworkModes.cards.forEachIndexed{i,card->
             if(i>0)Spacer(Modifier.height(8.dp))
-            val (label,linked)=NetworkModes.status(card.mode,active,state,peers)
+            val (label,linked)=if(card.mode==2) "" to false else NetworkModes.status(card.mode,active,state,peers)
             ModeCard(card.title,card.hint,label,linked,NetworkModes.isCurrent(card.mode,active),
-                enabled=s.connected&&!s.maintenance&&!switching,accent=accents[i]){switchTo(card.mode)}
+                enabled=s.connected&&!s.maintenance&&!switching,accent=accents[i],
+                relay=relay.takeIf{card.mode==2}){switchTo(card.mode)}
         }
         Spacer(Modifier.height(4.dp))
         Text(if(switching)"正在切换工作模式…" else "切换模式会重建网络语音通道；正在发话时请先松开 PTT。",
@@ -530,7 +537,8 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
     }
 }
 
-@Composable private fun ModeCard(title:String,hint:String,status:String,linked:Boolean,current:Boolean,enabled:Boolean,accent:Color,click:()->Unit) {
+@Composable private fun ModeCard(title:String,hint:String,status:String,linked:Boolean,current:Boolean,enabled:Boolean,accent:Color,
+    relay:NetworkModes.RelayStatus?,click:()->Unit) {
     /* accent is the mode color (local green / P2P purple / relay amber) the web
      * panel paints its mode buttons with; it borders and badges the active card. */
     Surface(color=if(current)MaterialTheme.colorScheme.primaryContainer else panel,shape=RoundedCornerShape(18.dp),
@@ -546,7 +554,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
                 }
             }
             Text(hint,color=secondary,style=MaterialTheme.typography.bodySmall)
-            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+            if(relay!=null)RelayStatusBanner(relay) else Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 Box(Modifier.size(8.dp).background(if(linked)green else MaterialTheme.colorScheme.outline,CircleShape))
                 Text(status,color=if(linked)green else secondary,style=MaterialTheme.typography.bodySmall)
             }

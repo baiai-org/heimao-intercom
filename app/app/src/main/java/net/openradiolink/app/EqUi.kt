@@ -77,12 +77,13 @@ private fun EqualizerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView) 
     val spk=remember{initialValues(s,"spk")}
     val mic=remember{initialValues(s,"mic")}
     var saving by remember{mutableStateOf(false)}
+    var slotBusy by remember{mutableStateOf(false)}
     var error by remember{mutableStateOf("")}
     val values=if(direction=="spk")spk else mic
-    val enabled=s.connected&&!s.maintenance&&!saving
+    val enabled=s.connected&&!s.maintenance&&!saving&&!slotBusy
 
     fun run(done:String,block:suspend BoardSession.()->Unit) {
-        if(saving)return
+        if(saving||slotBusy)return
         saving=true;error=""
         manager.action(p.id){
             try {
@@ -100,7 +101,7 @@ private fun EqualizerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView) 
         verticalArrangement=Arrangement.spacedBy(12.dp)) {
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
             Text("均衡器",style=MaterialTheme.typography.headlineSmall,modifier=Modifier.weight(1f))
-            Text(if(saving)"正在写入…" else "固定 EQ · −12 ～ +6 dB",color=secondary,style=MaterialTheme.typography.bodySmall)
+            Text(if(saving||slotBusy)"正在写入…" else "固定 EQ · −12 ～ +6 dB",color=secondary,style=MaterialTheme.typography.bodySmall)
         }
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             listOf("spk" to "接收 EQ（SPK）","mic" to "发话 EQ（MIC）").forEach{(key,label)->
@@ -146,6 +147,12 @@ private fun EqualizerSheet(manager:DeviceManager,p:DeviceProfile,s:SessionView) 
             Button(onClick={run("均衡器已保存"){setEq(direction,values.toList())}},enabled=enabled,
                 shape=RoundedCornerShape(17.dp),modifier=Modifier.weight(1f)){Text(if(saving)"正在保存…" else "保存这 6 段")}
         }
+        UserEqSlots(manager,p,s,enabled=!saving,
+            curves={ EqCurves(spk.toList(),mic.toList()) },
+            onApplied={ values ->
+                for(i in 0..5){spk[i]=values.spk[i];mic[i]=values.mic[i]}
+            },
+            onBusy={ slotBusy=it })
     }
 }
 

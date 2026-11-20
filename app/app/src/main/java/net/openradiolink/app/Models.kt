@@ -107,6 +107,7 @@ data class SessionView(
     val microphoneLevel: MicrophoneLevel = MicrophoneLevel(),
     val audioSid:Long=0,
     val audioTx:Long=0,
+    val eqPresetsSupported:Boolean=false,
 )
 
 fun SessionView.boardTxClipped():Boolean = status.optJSONObject("sdr")?.let {

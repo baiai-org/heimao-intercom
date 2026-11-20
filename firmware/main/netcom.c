@@ -629,6 +629,9 @@ bool netcom_tx_ready(void)
     if (!s_engine_up || !e || !e->stats) {
         return false;
     }
+    if (s_cfg.mode == NETCOM_MODE_RELAY) {
+        return netrelay_broker_connected();
+    }
     uint32_t tx = 0, rx = 0;
     int peers = 0;
     const char *state = NULL;

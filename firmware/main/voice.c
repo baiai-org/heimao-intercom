@@ -388,8 +388,23 @@ static bool s_sdr_net_tx;
 
 /* 6-band EQ chains, used by the audio tasks; defined with the NVS layer at
  * the bottom of this file. */
-static eq6_t s_eq_spk;
-static eq6_t s_eq_mic;
+static eq6_t s_eq_spk = { .flat = true };
+static eq6_t s_eq_mic = { .flat = true };
+static eq6_t s_eq_monitor_mic = { .flat = true };
+static eq6_t s_eq_phone_mic = { .flat = true };
+static eq6_t s_eq_config[2] = {{ .flat = true }, { .flat = true }};
+static portMUX_TYPE s_eq_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Audio tasks own the filter history. Only complete coefficient sets are
+ * published by a settings writer and transferred at block boundaries. */
+static void eq_sync(eq6_t *working, int dir)
+{
+    portENTER_CRITICAL(&s_eq_mux);
+    if (memcmp(working->db, s_eq_config[dir].db, sizeof(working->db)) != 0) {
+        *working = s_eq_config[dir];
+    }
+    portEXIT_CRITICAL(&s_eq_mux);
+}
 
 /* --------------------------------------------------- input-level indicator */
 
@@ -1576,7 +1591,9 @@ static void monitor_task(void *arg)
             s_blk_injected = false;
             s_blk_tx_processed = false;
             if (!tx_processed) {
-                eq6_run(injected ? &s_eq_mic : &s_eq_spk, out, (size_t)m);
+                eq6_t *eq = injected ? &s_eq_monitor_mic : &s_eq_spk;
+                eq_sync(eq, injected ? 1 : 0);
+                eq6_run(eq, out, (size_t)m);
             }
 
             /*
@@ -1924,6 +1941,7 @@ static int talk_shape(int16_t *buf, size_t n, eq6_t *eq, tx_history_t *history)
     if (!buf || n == 0) {
         return 0;
     }
+    eq_sync(eq, 1);
     eq6_run(eq, buf, n);
     tx_preemph(buf, n, history);
     const int peak = tx_gain_apply(buf, n);
@@ -1944,7 +1962,8 @@ int voice_apply_net_tx_processing(int16_t *buf, size_t n)
     if (!buf || n == 0) {
         return 0;
     }
-    eq6_run(&s_eq_mic, buf, n);
+    eq_sync(&s_eq_phone_mic, 1);
+    eq6_run(&s_eq_phone_mic, buf, n);
     tx_preemph(buf, n, &s_tx_history);
     const int peak = gain_mul(buf, n, s_net_tx_gain);
     tx_limit(buf, n, &s_tx_history);
@@ -2078,10 +2097,6 @@ static void talk_task(void *arg)
             if (network && netcom_mode() == tx.mode) {
                 netcom_tx_sample(buf, got, ptt_get_state() == PTT_TX);
             }
-        }
-        if (split && memcmp(rf_eq.db, s_eq_mic.db, sizeof(rf_eq.db)) != 0) {
-            rf_eq = s_eq_mic;
-            eq6_reset_state(&rf_eq);
         }
         if (denoising) {
             if (!talk_denoise_owned(generation) ||
@@ -2423,6 +2438,8 @@ static esp_err_t voice_start_locked(voice_mode_t mode)
     /* Stale EQ filter state would ring on the first block of a new session. */
     eq6_reset_state(&s_eq_spk);
     eq6_reset_state(&s_eq_mic);
+    eq6_reset_state(&s_eq_monitor_mic);
+    eq6_reset_state(&s_eq_phone_mic);
     if (mode == VOICE_MONITOR) {
         s_gate_guard_ms = (uint32_t)(esp_timer_get_time() / 1000) + GATE_GUARD_MS;
         if (s_instant_start) {
@@ -3470,9 +3487,11 @@ int voice_get_net_tx_gain(void)
  *
  * Measured microphone peaks at the vendor's own codec defaults (30 dB PGA,
  * ADC volume 0xC8) are 920-12837 counts with no clipping, so a factor near 2
- * puts the peaks just under full scale.  32/16 = 2.0 is the default.
+ * puts the peaks just under full scale. Start at unity; a saved microphone
+ * setting takes precedence.
  */
-static int s_tx_gain = 36;
+enum { HANDSET_TX_GAIN_DEFAULT = 16 };
+static int s_tx_gain = HANDSET_TX_GAIN_DEFAULT;
 
 /* Handset microphone PGA (ES8311 REG16, 0/6/.../42 dB).
  *
@@ -3567,43 +3586,37 @@ int voice_get_tx_gain(void)
 
 /* -------------------------------------------------------------------- EQ */
 
-/*
- * One chain per direction.  The speaker chain runs at the end of the MONITOR
- * path (after gain, before the DAC); the microphone chain runs at the start
- * of the TALK path (before the TX gain and limiter).  Both are 8 kHz.
- * (s_eq_spk / s_eq_mic are declared up top with the other audio state.)
- */
-
 #define NVS_KEY_EQ   "veq"
-
-/* Factory transmit curve (150/400/900/2k/3.2k/3.8k Hz).  The receive chain still
- * starts flat; the web panel's "全部归 0" zeroes both chains. */
-static const int EQ_MIC_DEFAULT[EQ6_BANDS] = { 0, 0, 0, 0, 0, 0 };
 
 typedef struct {
     int8_t db[2][EQ6_BANDS];   /* [0] = speaker, [1] = microphone */
 } eq_nvs_blob_t;
 
-static eq6_t *eq_chain(int dir)
+static void eq_publish(const eq6_t prepared[2])
 {
-    return dir ? &s_eq_mic : &s_eq_spk;
+    portENTER_CRITICAL(&s_eq_mux);
+    memcpy(s_eq_config, prepared, sizeof(s_eq_config));
+    portEXIT_CRITICAL(&s_eq_mux);
 }
 
-static void voice_eq_save(void)
+static esp_err_t eq_write_locked(const int db[2][EQ6_BANDS])
 {
+    eq6_t prepared[2];
     eq_nvs_blob_t blob;
     for (int d = 0; d < 2; ++d) {
+        eq6_set(&prepared[d], db[d]);
         for (int b = 0; b < EQ6_BANDS; ++b) {
-            blob.db[d][b] = (int8_t)eq_chain(d)->db[b];
+            blob.db[d][b] = (int8_t)prepared[d].db[b];
         }
     }
     nvs_handle_t h;
-    if (nvs_open(NVS_NS_VOICE, NVS_READWRITE, &h) == ESP_OK) {
-        if (nvs_set_blob(h, NVS_KEY_EQ, &blob, sizeof(blob)) == ESP_OK) {
-            (void)nvs_commit(h);
-        }
-        nvs_close(h);
-    }
+    esp_err_t err = nvs_open(NVS_NS_VOICE, NVS_READWRITE, &h);
+    if (err != ESP_OK) { return err; }
+    err = nvs_set_blob(h, NVS_KEY_EQ, &blob, sizeof(blob));
+    if (err == ESP_OK) { err = nvs_commit(h); }
+    nvs_close(h);
+    if (err == ESP_OK) { eq_publish(prepared); }
+    return err;
 }
 
 void voice_eq_load(void)
@@ -3614,28 +3627,23 @@ void voice_eq_load(void)
      * 400 Hz, 900 Hz) and start the top of the range flat; anything else is
      * treated as empty.
      */
-    eq_nvs_blob_t blob;
-    bool have = false;
-    memset(&blob, 0, sizeof(blob));
+    eq_nvs_blob_t blob = {0};
+    int8_t stored[sizeof(blob)] = {0};
     nvs_handle_t h;
     if (nvs_open(NVS_NS_VOICE, NVS_READONLY, &h) == ESP_OK) {
-        size_t len = sizeof(blob);
-        if (nvs_get_blob(h, NVS_KEY_EQ, &blob, &len) == ESP_OK) {
-            have = true;
+        size_t len = sizeof(stored);
+        if (nvs_get_blob(h, NVS_KEY_EQ, stored, &len) == ESP_OK) {
             if (len == 6) {
                 for (int d = 0; d < 2; ++d) {
-                    const int8_t old[3] = { blob.db[d][0], blob.db[d][1], blob.db[d][2] };
-                    memset(blob.db[d], 0, EQ6_BANDS);
-                    memcpy(blob.db[d], old, 3);
+                    memcpy(blob.db[d], stored + d * 3, 3);
                 }
-            } else if (len != sizeof(blob)) {
-                memset(&blob, 0, sizeof(blob));
+            } else if (len == sizeof(blob)) {
+                memcpy(&blob, stored, sizeof(blob));
             }
-        } else {
-            memset(&blob, 0, sizeof(blob));
         }
         nvs_close(h);
     }
+    eq6_t prepared[2];
     for (int d = 0; d < 2; ++d) {
         bool bad = false;
         for (int b = 0; b < EQ6_BANDS; ++b) {
@@ -3644,18 +3652,14 @@ void voice_eq_load(void)
                 break;
             }
         }
-        if (bad) { have = false; memset(blob.db[d], 0, sizeof(blob.db[d])); }
+        if (bad) { memset(blob.db[d], 0, sizeof(blob.db[d])); }
         int db6[EQ6_BANDS];
         for (int b = 0; b < EQ6_BANDS; ++b) {
             db6[b] = blob.db[d][b];
         }
-        /* No stored curve on a fresh board: transmit starts on the factory curve,
-         * receive stays flat. */
-        if (!have && d == 1) {
-            for (int b = 0; b < EQ6_BANDS; ++b) { db6[b] = EQ_MIC_DEFAULT[b]; }
-        }
-        eq6_set(eq_chain(d), db6);
+        eq6_set(&prepared[d], db6);
     }
+    eq_publish(prepared);
     ESP_LOGI(TAG, "EQ loaded: spk %d/%d/%d/%d/%d/%d dB, mic %d/%d/%d/%d/%d/%d dB",
              blob.db[0][0], blob.db[0][1], blob.db[0][2],
              blob.db[0][3], blob.db[0][4], blob.db[0][5],
@@ -3663,29 +3667,60 @@ void voice_eq_load(void)
              blob.db[1][3], blob.db[1][4], blob.db[1][5]);
 }
 
-void voice_eq_set(int dir, const int db[EQ6_BANDS])
+esp_err_t voice_eq_set(int dir, const int db[EQ6_BANDS])
 {
-    if (dir < 0 || dir > 1) {
-        return;
-    }
-    eq6_set(eq_chain(dir), db);
-    voice_eq_save();
-    ESP_LOGI(TAG, "EQ set %s: %d/%d/%d/%d/%d/%d dB (persisted)",
-             dir ? "mic" : "spk",
-             db[0], db[1], db[2], db[3], db[4], db[5]);
+    if (dir < 0 || dir > 1) { return ESP_ERR_INVALID_ARG; }
+    int next[2][EQ6_BANDS];
+    control_lock();
+    voice_eq_snapshot(next);
+    memcpy(next[dir], db, sizeof(next[dir]));
+    const esp_err_t err = eq_write_locked(next);
+    control_unlock();
+    return err;
 }
 
 void voice_eq_get(int dir, int db[EQ6_BANDS])
 {
-    const eq6_t *e = eq_chain(dir ? 1 : 0);
-    memcpy(db, e->db, EQ6_BANDS * sizeof(int));
+    portENTER_CRITICAL(&s_eq_mux);
+    memcpy(db, s_eq_config[dir ? 1 : 0].db, sizeof(s_eq_config[0].db));
+    portEXIT_CRITICAL(&s_eq_mux);
 }
 
-void voice_eq_reset(void)
+void voice_eq_snapshot(int db[2][EQ6_BANDS])
 {
-    const int zero[EQ6_BANDS] = { 0 };
-    voice_eq_set(0, zero);
-    voice_eq_set(1, zero);
+    portENTER_CRITICAL(&s_eq_mux);
+    memcpy(db[0], s_eq_config[0].db, sizeof(db[0]));
+    memcpy(db[1], s_eq_config[1].db, sizeof(db[1]));
+    portEXIT_CRITICAL(&s_eq_mux);
+}
+
+esp_err_t voice_eq_set_band(int dir, int band, int db)
+{
+    if (dir < 0 || dir > 1 || band < 0 || band >= EQ6_BANDS) { return ESP_ERR_INVALID_ARG; }
+    int next[2][EQ6_BANDS];
+    control_lock();
+    voice_eq_snapshot(next);
+    next[dir][band] = db;
+    const esp_err_t err = eq_write_locked(next);
+    control_unlock();
+    return err;
+}
+
+esp_err_t voice_eq_replace(const int expected[2][EQ6_BANDS], const int next[2][EQ6_BANDS])
+{
+    int current[2][EQ6_BANDS];
+    control_lock();
+    voice_eq_snapshot(current);
+    const esp_err_t err = expected && memcmp(expected, current, sizeof(current)) != 0 ?
+        ESP_ERR_INVALID_STATE : eq_write_locked(next);
+    control_unlock();
+    return err;
+}
+
+esp_err_t voice_eq_reset(void)
+{
+    const int flat[2][EQ6_BANDS] = {{0}};
+    return voice_eq_replace(NULL, flat);
 }
 
 /*
@@ -3741,7 +3776,7 @@ void voice_output_volume_load(void)
     (void)audio_codec_set_volume(s_output_volume);
 }
 
-/* ------------------------------------------------- five-step speaker volume */
+/* ------------------------------------------------ eight-step speaker volume */
 
 /*
  * See voice.h for why this is an attenuation on the speaker-bound audio rather
@@ -3765,7 +3800,7 @@ void voice_output_volume_load(void)
 #define NVS_KEY_SPKV "spkv"     /* step-numbering stamp, see load below */
 
 static const float SPK_MUL[VOICE_SPK_MAX + 1] = {
-    1.0000f,      /* 0: amplifier shut down, level does not matter */
+    0.0000f,     /* 0: speaker PCM is silent while the amplifier is off */
     0.01188f,     /* 1: 40  -38.5 dB */
     0.02512f,     /* 2: 45  -32   dB */
     0.05309f,     /* 3: 50  -25.5 dB */
@@ -3784,29 +3819,30 @@ static const float SPK_MUL[VOICE_SPK_MAX + 1] = {
  */
 #define SPK_NUMBERING 3
 
-static int s_speaker_level = VOICE_SPK_REF;
+static _Atomic int s_speaker_level = VOICE_SPK_REF;
 
-void voice_set_speaker_level(int level)
+esp_err_t voice_set_speaker_level(int level)
 {
-    if (level < VOICE_SPK_MIN) { level = VOICE_SPK_MIN; }
-    if (level > VOICE_SPK_MAX) { level = VOICE_SPK_MAX; }
-    s_speaker_level = level;
-
-    /* Step 0 is the amplifier, not the signal: shut it down and hold it there
-     * (the audio gates keep asking for it while audio plays). */
-    board_amp_mute_set(level == 0);
-
+    if (level < VOICE_SPK_MIN || level > VOICE_SPK_MAX) { return ESP_ERR_INVALID_ARG; }
+    control_lock();
     nvs_handle_t h;
-    if (nvs_open(NVS_NS_VOICE, NVS_READWRITE, &h) == ESP_OK) {
-        int32_t v = level;
-        if (nvs_set_i32(h, NVS_KEY_SPK, v) == ESP_OK) {
-            (void)nvs_set_i32(h, NVS_KEY_SPKV, SPK_NUMBERING);
-            (void)nvs_commit(h);
-        }
+    esp_err_t err = nvs_open(NVS_NS_VOICE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(h, NVS_KEY_SPK, level);
+        if (err == ESP_OK) { err = nvs_set_i32(h, NVS_KEY_SPKV, SPK_NUMBERING); }
+        if (err == ESP_OK) { err = nvs_commit(h); }
         nvs_close(h);
     }
+    if (err == ESP_OK) {
+        if (level == 0) { board_amp_mute_set(true); }
+        s_speaker_level = level;
+        if (level != 0) { board_amp_mute_set(false); }
+    }
+    control_unlock();
+    if (err != ESP_OK) { return err; }
     ESP_LOGI(TAG, "speaker level -> step %d/%d (%s)", level, VOICE_SPK_MAX,
              level == 0 ? "amplifier off" : "attenuation step");
+    return ESP_OK;
 }
 
 int voice_get_speaker_level(void)
@@ -3863,10 +3899,11 @@ bool voice_speaker_muted(void)
 
 void voice_speaker_apply(int16_t *pcm, size_t n)
 {
-    if (!pcm || n == 0 || s_speaker_level == VOICE_SPK_REF) {
+    const int level = s_speaker_level;
+    if (!pcm || n == 0 || level == VOICE_SPK_REF) {
         return;             /* the 70 step is unity: leave the samples untouched */
     }
-    const float mul = SPK_MUL[s_speaker_level];
+    const float mul = SPK_MUL[level];
     for (size_t i = 0; i < n; ++i) {
         int v = (int)((float)pcm[i] * mul);
         /* Plain saturation: the speaker boost must not wrap the int16 range. */
@@ -3878,16 +3915,15 @@ void voice_speaker_apply(int16_t *pcm, size_t n)
 /*
  * Factory defaults for the whole audio chain.
  *
- * The values are exactly the file-scope initialisers above (s_gain 80, s_tx_gain
- * 48 = 3.0x, SQ_OPEN_COUNTS_DEF 10, fixed gain, speaker step 7, codec DAC volume
- * 60), so a factory reset and a fresh boot land in the same place.  Everything
+ * Reset the operator controls including the microphone's unity gain.
+ * Everything
  * that has an NVS shadow (TX gain, EQ, autostart, speaker level, DAC volume) is
  * written through its own setter so the reset survives a reboot.
  */
 void voice_restore_defaults(void)
 {
     voice_set_gain(96);
-    voice_set_tx_gain(36);
+    voice_set_tx_gain(HANDSET_TX_GAIN_DEFAULT);
     voice_set_net_tx_gain(254);
     voice_set_net_rx_gain(16);
     voice_set_tx_preemph(true);
@@ -3897,9 +3933,7 @@ void voice_restore_defaults(void)
     voice_set_quiet(false);
     voice_set_amp_noise_test(false);
     voice_set_bypass_squelch(false);
-    const int flat[EQ6_BANDS] = { 0 };
-    voice_eq_set(0, flat);
-    voice_eq_set(1, EQ_MIC_DEFAULT);
+    (void)voice_eq_reset();
     voice_set_speaker_level(VOICE_SPK_REF);
 
     /* Codec-side defaults (ES8311 DAC volume, mic PGA, ADC volume). */
@@ -3907,8 +3941,8 @@ void voice_restore_defaults(void)
     voice_set_mic_gain_index(4);             /* 24 dB: 30 dB clipped the capsule */
     (void)audio_codec_set_adc_volume(0xC8);
 
-    ESP_LOGW(TAG, "audio defaults restored: gain 80, txgain 3.0x, "
-                  "ntxgain 6.0x, AGC off, LED threshold %d, EQ flat, "
+    ESP_LOGW(TAG, "audio defaults restored: gain 96, txgain 1.0x, "
+                  "ntxgain 254/16, AGC off, LED threshold %d, EQ flat, "
                   "speaker step %d, DAC volume 60, mic 24 dB",
              SQ_OPEN_COUNTS_DEF, VOICE_SPK_REF);
 }

@@ -372,7 +372,11 @@ static void console_run_line(char *line)
                    "7 = 70 unity); usage: spk 0-7\n", voice_get_speaker_level());
             return;
         }
-        voice_set_speaker_level(atoi(argv[1]));
+        const esp_err_t err = voice_set_speaker_level(atoi(argv[1]));
+        if (err != ESP_OK) {
+            printf("  speaker volume error: %s\n", esp_err_to_name(err));
+            return;
+        }
         printf("  speaker volume -> step %d/7\n", voice_get_speaker_level());
         return;
     } else if (!strcmp(argv[0], "cvol")) {

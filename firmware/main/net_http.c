@@ -77,6 +77,8 @@
 #include "frontpanel.h"
 #include "radio_activity.h"
 #include "speaker_diag.h"
+#include "netrelay.h"
+#include "eq_presets.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
@@ -669,6 +671,14 @@ static esp_err_t h_rf_denoise_script(httpd_req_t *req)
     return httpd_resp_send(req, rf_denoise_script, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t h_eq_presets_script(httpd_req_t *req)
+{
+    extern const char eq_presets_script[] asm("_binary_eq_presets_js_start");
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, eq_presets_script, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t h_provision(httpd_req_t *req)
 {
     if (req->method != HTTP_POST) {
@@ -757,7 +767,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1,\"eq_presets\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -1596,8 +1606,7 @@ static esp_err_t h_status(httpd_req_t *req)
     voice_get_stats(&vs);
 
     int vs_eq[2][6];
-    voice_eq_get(0, vs_eq[0]);
-    voice_eq_get(1, vs_eq[1]);
+    voice_eq_snapshot(vs_eq);
 
     int mic_db = 0;
     const int mic_idx = audio_codec_get_mic_gain(&mic_db);
@@ -1615,6 +1624,8 @@ static esp_err_t h_status(httpd_req_t *req)
     netcom_stats(&ix_tx, &ix_rx, &ix_peers, &ix_state);
     char ix_diag[256] = "";
     netcom_diag(ix_diag, sizeof(ix_diag));
+    const netrelay_link_t relay_link = netcom_mode() == NETCOM_MODE_RELAY ?
+        netrelay_link_status() : (netrelay_link_t){ "disabled", "" };
     netcom_ptt_diag_t ptd;
     netcom_ptt_diag_get(&ptd);
     bridge_rx_stats_t br_rx;
@@ -1701,7 +1712,7 @@ static esp_err_t h_status(httpd_req_t *req)
         "\"flt\":[%d,%d,%d]},"
         "\"intercom\":{\"mode\":%d,\"room\":%u,\"state\":\"%s\","
         "\"tx\":%u,\"rx\":%u,\"peers\":%d,\"qdrop\":%u,\"broker\":\"%s\",\"diag\":\"%s\","
-        "\"user\":\"%s\",\"pass\":%d},"
+        "\"user\":\"%s\",\"pass\":%d,\"relay_link\":\"%s\",\"relay_reason\":\"%s\"},"
         "\"ptt_net\":{\"tx_end_req\":%u,\"tx_end_sent\":%u,\"tx_end_fail\":%u,"
         "\"tx_end_ms\":%lld,\"tx_sent_ms\":%lld,\"tx_delay_ms\":%lld,"
         "\"rx_end\":%u,\"rx_end_ms\":%lld,\"rx_release_ms\":%lld,"
@@ -1759,7 +1770,7 @@ static esp_err_t h_status(httpd_req_t *req)
         /* intercom (netcom): mode / room / engine state / stats / broker. */
         (int)netcom_mode(), (unsigned)netcom_room(), ix_state,
         (unsigned)ix_tx, (unsigned)ix_rx, ix_peers, (unsigned)netcom_tx_qdrop(), esc_broker,
-        esc_diag, esc_user, ix_pass_set ? 1 : 0,
+        esc_diag, esc_user, ix_pass_set ? 1 : 0, relay_link.state, relay_link.reason,
         (unsigned)ptd.tx_end_requests, (unsigned)ptd.tx_end_sent, (unsigned)ptd.tx_end_failed,
         (long long)ptd.tx_end_ms, (long long)ptd.tx_sent_ms, (long long)ptd.tx_delay_ms,
         (unsigned)ptd.rx_ends, (long long)ptd.rx_end_ms, (long long)ptd.rx_release_ms,
@@ -2091,11 +2102,15 @@ static esp_err_t h_set(httpd_req_t *req)
          * panel's "喇叭音量" is spk_vol below. */
         voice_set_output_volume(n);
     } else if (!strcmp(key, "spk_vol")) {
-        /* Speaker volume: eight steps, 0 = amplifier off, 5 = 0 dB reference. */
-        if (n < VOICE_SPK_MIN || n > VOICE_SPK_MAX) {
+        /* Speaker volume: 0 = amplifier off, 7 = 0 dB reference. */
+        char *end;
+        const long step = strtol(val, &end, 10);
+        if (end == val || *end || step < VOICE_SPK_MIN || step > VOICE_SPK_MAX) {
             return send_result(req, false, "spk_vol must be 0..7");
         }
-        voice_set_speaker_level(n);
+        if (voice_set_speaker_level((int)step) != ESP_OK) {
+            return send_result(req, false, "喇叭档位保存失败");
+        }
     } else if (!strcmp(key, "micgain")) {
         if (n < 0 || n > 7) { return send_result(req, false, "micgain must be 0..7"); }
         voice_set_mic_gain_index(n);       /* persists, so a reboot keeps it */
@@ -2138,7 +2153,7 @@ static esp_err_t h_set(httpd_req_t *req)
     } else if (!strcmp(key, "sqgate")) {
         voice_set_squelch_threshold(n);
     } else if (!strcmp(key, "eq_reset")) {
-        voice_eq_reset();
+        if (voice_eq_reset() != ESP_OK) { return send_result(req, false, "均衡器保存失败"); }
     } else if (!strncmp(key, "eq_", 3)) {
         /*
          * eq_<spk|mic>_<bass|warm|body|clear|pres|air>: change one band of
@@ -2172,10 +2187,9 @@ static esp_err_t h_set(httpd_req_t *req)
         if (n < -12 || n > 6) {
             return send_result(req, false, "eq band out of range -12..6");
         }
-        int cur[6];
-        voice_eq_get(dir, cur);
-        cur[band] = n;
-        voice_eq_set(dir, cur);
+        if (voice_eq_set_band(dir, band, n) != ESP_OK) {
+            return send_result(req, false, "均衡器保存失败");
+        }
     } else if (!strcmp(key, "auto")) {
         voice_set_autostart(n != 0);
     } else if (!strcmp(key, "wifi_radio_off")) {
@@ -3170,6 +3184,9 @@ extern const uint8_t serverkey_pem_start[]  asm("_binary_serverkey_pem_start");
 
 static const httpd_uri_t s_routes[] = {
     { .uri = "/rf-denoise.js", .method = HTTP_GET, .handler = h_rf_denoise_script },
+    { .uri = "/eq-presets.js", .method = HTTP_GET, .handler = h_eq_presets_script },
+    { .uri = "/api/eq_presets", .method = HTTP_GET, .handler = eq_presets_http },
+    { .uri = "/api/eq_presets", .method = HTTP_POST, .handler = eq_presets_http },
     { .uri = "/api/rf_denoise", .method = HTTP_GET, .handler = h_rf_denoise },
     { .uri = "/api/rf_denoise", .method = HTTP_POST, .handler = h_rf_denoise },
     { .uri = "/maintenance.js", .method = HTTP_GET, .handler = h_maintenance_script },
@@ -3235,7 +3252,7 @@ static const char s_https_panel_context;
 
 static bool route_needs_control(const httpd_uri_t *route, httpd_req_t *req)
 {
-    if (route->handler == h_rf_denoise) { return req->method == HTTP_POST; }
+    if (route->handler == h_rf_denoise || route->handler == eq_presets_http) { return req->method == HTTP_POST; }
     if (route->handler == maintenance_http || route->handler == release_update_http) { return req->method == HTTP_POST; }
     if (route->handler == peer_labels_http) { return true; }
     if (route->handler == h_wifi) { return route->method == HTTP_POST; }

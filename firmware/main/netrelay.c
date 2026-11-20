@@ -144,11 +144,15 @@ static uint16_t s_prime_first, s_prime_play;  /* last priming: stream start vs p
 static uint32_t s_late;      /* arrived after the play head had passed */
 static uint32_t s_plc;       /* lost frames Opus concealed */                 /* playout waits while a stream is live */
 static volatile bool     s_started;
-static bool     s_connected;
+static _Atomic uint32_t s_connected;
 static char     s_uri[64];
 static char     s_my_topic[32];
 static char     s_sub_topic[32];
-static int      s_sub_id;
+static portMUX_TYPE s_link_mux = portMUX_INITIALIZER_UNLOCKED;
+static netrelay_link_t s_link = { "disconnected", "" };
+static int s_sub_id;
+static int64_t s_sub_deadline_ms;
+enum { SUBACK_TIMEOUT_MS = 8000 };
 
 /* Connection diagnostics, surfaced through /api/status while connecting. */
 static int64_t  s_start_ms;
@@ -156,6 +160,32 @@ static int      s_attempts;
 static char     s_last_err[48];
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+static void relay_link_set(const char *state, const char *reason)
+{
+    portENTER_CRITICAL(&s_link_mux);
+    s_link = (netrelay_link_t){ state, reason };
+    s_sub_id = 0;
+    s_sub_deadline_ms = 0;
+    portEXIT_CRITICAL(&s_link_mux);
+}
+
+netrelay_link_t netrelay_link_status(void)
+{
+    const int64_t now = now_ms();
+    portENTER_CRITICAL(&s_link_mux);
+    netrelay_link_t result = s_link;
+    if (s_sub_deadline_ms && now >= s_sub_deadline_ms) {
+        result = (netrelay_link_t){ "error", "subscribe_timeout" };
+    }
+    portEXIT_CRITICAL(&s_link_mux);
+    return result;
+}
+
+bool netrelay_broker_connected(void)
+{
+    return s_started && s_connected;
+}
 
 /* The device id: last three MAC bytes in hex.  Matches the derivation of
  * esp-mqtt's default client id, so broker logs and topics agree. */
@@ -356,10 +386,15 @@ static void relay_subscribe(void)
     esp_mqtt5_subscribe_property_config_t props = { .no_local_flag = true };
     (void)esp_mqtt5_client_set_subscribe_property((esp_mqtt5_client_handle_t)s_client, &props);
     const int id = esp_mqtt_client_subscribe(s_client, s_sub_topic, 0);
-    if (id >= 0) {
+    if (id > 0) {
+        const int64_t deadline = now_ms() + SUBACK_TIMEOUT_MS;
+        portENTER_CRITICAL(&s_link_mux);
         s_sub_id = id;
-        ESP_LOGI(TAG, "subscribed to %s", s_sub_topic);
+        s_sub_deadline_ms = deadline;
+        portEXIT_CRITICAL(&s_link_mux);
+        ESP_LOGI(TAG, "subscribing to %s", s_sub_topic);
     } else {
+        relay_link_set("error", "subscribe_failed");
         ESP_LOGW(TAG, "subscribe %s failed (%d)", s_sub_topic, id);
     }
 }
@@ -369,23 +404,30 @@ static void relay_mqtt_handler(void *arg, esp_event_base_t base,
 {
     (void)arg;
     (void)base;
+    (void)event_id;
     const esp_mqtt_event_handle_t ev = (const esp_mqtt_event_handle_t)event_data;
+    if (!s_started || ev->client != s_client) { return; }
 
     switch (ev->event_id) {
     case MQTT_EVENT_BEFORE_CONNECT:
         ++s_attempts;
         s_last_err[0] = '\0';
+        relay_link_set(s_attempts > 1 ? "reconnecting" : "connecting", "");
         ESP_LOGI(TAG, "connect attempt %d -> %s ...", s_attempts, s_uri);
         break;
     case MQTT_EVENT_ERROR: {
         const int rc = ev->error_handle
                            ? (int)ev->error_handle->connect_return_code : -1;
-        if (rc == 5) {
+        const bool authentication = rc == MQTT_CONNECTION_REFUSE_BAD_USERNAME ||
+            rc == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED || rc == 0x86 || rc == 0x87;
+        s_connected = false;
+        relay_link_set("error", authentication ? "authentication" : "network");
+        if (authentication) {
             /* CONNACK 5 = not authorized.  The broker rejected the username or
              * password; say so, because "err type ... rc 5" reads like a
              * network fault and sends the operator looking at the wrong thing. */
             snprintf(s_last_err, sizeof(s_last_err),
-                     "not authorized (rc 5) -- check user/password");
+                     "not authorized (rc %d) -- check user/password", rc);
         } else {
             snprintf(s_last_err, sizeof(s_last_err),
                      "err type %d / sock %d / tls %d / rc %d",
@@ -400,13 +442,28 @@ static void relay_mqtt_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_CONNECTED:
         s_connected = true;
         s_last_err[0] = '\0';
+        relay_link_set(s_attempts > 1 ? "reconnecting" : "connecting", "subscribing");
         ESP_LOGI(TAG, "broker connected (%s) after %d attempt(s)", s_uri, s_attempts);
         relay_subscribe();
         break;
 
+    case MQTT_EVENT_SUBSCRIBED: {
+        const bool accepted = ev->data && ev->data_len == 1 &&
+                              (uint8_t)ev->data[0] <= 2;
+        portENTER_CRITICAL(&s_link_mux);
+        if (s_connected && s_sub_deadline_ms && ev->msg_id == s_sub_id) {
+            s_link = accepted ? (netrelay_link_t){ "connected", "" } :
+                                (netrelay_link_t){ "error", "subscribe_failed" };
+            s_sub_id = 0;
+            s_sub_deadline_ms = 0;
+        }
+        portEXIT_CRITICAL(&s_link_mux);
+        break;
+    }
+
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
-        s_sub_id = 0;
+        if (!s_last_err[0]) { relay_link_set("disconnected", ""); }
         ESP_LOGW(TAG, "broker disconnected -- auto-reconnect, resubscribe on reconnect");
         break;
 
@@ -1106,6 +1163,7 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
 
     if (!s_txq) { (void)relay_stop(); return ESP_ERR_NO_MEM; }
     s_tx_stop = false;
+    relay_link_set("connecting", "");
     s_started = true;
     s_start_ms = now_ms();
     s_attempts = 0;
@@ -1134,6 +1192,8 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
 static esp_err_t relay_stop(void)
 {
     tx_lock(); s_started = false; s_tx_stop = true; tx_unlock();
+    s_connected = false;
+    relay_link_set("disconnected", "");
     s_play_stop = true;
     if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
     for (int i = 0; i < 1000 && (s_play_task || s_tx_task || s_test_tone_task); ++i) {
@@ -1151,6 +1211,7 @@ static esp_err_t relay_stop(void)
         s_client = NULL;
     }
     s_connected = false;
+    relay_link_set("disconnected", "");
     tx_lock();
     if (s_txq) { vQueueDeleteWithCaps(s_txq); s_txq = NULL; }
     tx_unlock();
@@ -1164,6 +1225,13 @@ static esp_err_t relay_stop(void)
     ESP_LOGI(TAG, "relay engine down (sent %u / recv %u msgs, %u errors)",
              (unsigned)s_tx_msgs, (unsigned)s_rx_msgs, (unsigned)s_tx_errs);
     return ESP_OK;
+}
+
+static esp_err_t relay_start_reported(void)
+{
+    const esp_err_t err = relay_start();
+    if (err != ESP_OK) { relay_link_set("error", "start_failed"); }
+    return err;
 }
 
 static void relay_stats(uint32_t *tx_msgs, uint32_t *rx_msgs,
@@ -1214,7 +1282,7 @@ static void relay_diag(char *out, size_t n)
 
 static const netcom_engine_t s_engine = {
     .name             = "mqtt-relay",
-    .start            = relay_start,
+    .start            = relay_start_reported,
     .stop             = relay_stop,
     .tx_sample        = relay_tx_sample,
     .tx_end           = relay_tx_end,

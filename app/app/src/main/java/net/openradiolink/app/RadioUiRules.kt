@@ -19,6 +19,9 @@ internal object RadioUiRules {
     fun displayFrequency(value:String):String = value.toBigDecimalOrNull()?.takeIf{it>BigDecimal.ZERO}
         ?.let{exactFrequency(it)} ?: "—.————"
     private fun exactFrequency(value:BigDecimal):String = value.setScale(4,RoundingMode.HALF_UP).toPlainString()
+    fun displayGain(value:String):String = value.toIntOrNull()?.let{
+        BigDecimal(it).divide(BigDecimal(16),2,RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()+"×"
+    } ?: value
     fun stepFrequency(text:String,deltaHz:Int,min:String,max:String,gridHz:Int):String {
         val current=frequency(text,min,max,gridHz).toBigDecimal()
         return frequency(current.add(BigDecimal(deltaHz).movePointLeft(6)).toPlainString(),min,max,gridHz)

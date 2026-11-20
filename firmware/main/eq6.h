@@ -60,10 +60,7 @@ typedef struct {
 /*
  * Set the six band gains (each clamped to EQ6_MIN_DB..EQ6_MAX_DB), recompute
  * the coefficients and reset the filter state so a parameter change cannot
- * ring.  Safe to call from the HTTP task while the audio task runs: the
- * coefficient store is plain float state and a torn read can only produce one
- * sample of the old/new mix at worst (the state reset is the real
- * discontinuity, and it is the same either way).
+ * ring. Call on an EQ instance owned by the caller.
  */
 void eq6_set(eq6_t *e, const int db[EQ6_BANDS]);
 

@@ -18,7 +18,8 @@ import kotlinx.coroutines.withContext
 @Composable internal fun Parameter(manager:DeviceManager,profile:DeviceProfile,state:SessionView,key:String,label:String,current:String,
     options:List<Pair<String,String>> = emptyList(),hint:String="",secret:Boolean=false) {
     var open by remember(profile.id,key){mutableStateOf(false)}
-    val value=if(secret){if(current.isBlank())"未设置" else "已设置"} else options.firstOrNull{it.first==current}?.second ?: current.ifBlank{"等待更新"}
+    val display=if(key=="txgain")RadioUiRules.displayGain(current) else current
+    val value=if(secret){if(current.isBlank())"未设置" else "已设置"} else options.firstOrNull{it.first==current}?.second ?: display.ifBlank{"等待更新"}
     SettingRow(label,value,enabled=state.connected&&!state.maintenance){manager.pttUp(profile.id);open=true}
     if(open) {
         var text by remember{mutableStateOf(if(secret)"" else profile.drafts[key] ?: current)}
