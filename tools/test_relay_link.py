@@ -27,6 +27,7 @@ ENV = r'''
 #define REL_MAGIC 7
 typedef struct {int magic;uint8_t mac[6];} rel_header_t;
 typedef void *esp_mqtt_client_handle_t;
+typedef esp_mqtt_client_handle_t esp_mqtt5_client_handle_t;
 typedef void *esp_event_base_t;
 typedef struct {bool no_local_flag;} esp_mqtt5_subscribe_property_config_t;
 typedef struct {int connect_return_code,error_type,esp_transport_sock_errno,esp_tls_stack_err;} mqtt_error_t;
