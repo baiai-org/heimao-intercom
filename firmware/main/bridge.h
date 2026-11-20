@@ -85,18 +85,26 @@ typedef enum {
 } denoise_network_path_t;
 #define DENOISE_CONFIG_MASK 0x7feu
 #define DENOISE_LEVELS_MAX ((1u << (DENOISE_LEVEL_BITS * DENOISE_SETTING_COUNT)) - 1u)
+typedef struct {
+    uint32_t levels;
+    rf_denoise_level_t selection_level;
+} bridge_denoise_config_t;
+
 uint8_t bridge_denoise_network_setting(uint8_t mode, denoise_network_path_t path);
 uint32_t bridge_denoise_levels(void);
+bridge_denoise_config_t bridge_denoise_config(void);
 rf_denoise_level_t bridge_denoise_level(uint32_t levels, uint8_t setting);
 uint32_t bridge_denoise_flags(uint32_t levels);
 rf_denoise_route_t bridge_denoise_route(uint8_t setting);
+esp_err_t bridge_denoise_save_selection(rf_denoise_level_t level, uint32_t paths,
+                                        bridge_denoise_config_t expected);
 /* The mask uses setting IDs as bit positions. A packed level uses three bits
  * starting at (setting - 1) * 3, with zero for all unmasked settings. */
 esp_err_t bridge_denoise_update_levels(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values);
 /* Legacy Boolean API. Enabling an off route selects Standard. */
 esp_err_t bridge_denoise_update(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values);
 esp_err_t bridge_denoise_set(uint8_t setting, bool enabled, bool expected);
-void bridge_denoise_status(uint8_t mode, uint32_t *levels, uint8_t *active_mode, rf_denoise_stats_t *stats);
+void bridge_denoise_status(uint8_t mode, uint32_t levels, uint8_t *active_mode, rf_denoise_stats_t *stats);
 
 /* Read-only stream-edge diagnostics; timestamps are local uptime in ms. */
 typedef struct {

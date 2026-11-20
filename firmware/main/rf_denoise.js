@@ -2,130 +2,93 @@
   'use strict';
   const card = document.getElementById('rfDenoiseCard');
   const get = name => card.querySelector('[data-dn="' + name + '"]');
-  const selects = [...card.querySelectorAll('select[data-path]')];
-  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '当前使用原声'];
-  const modes = ['本地模拟', '公网直连', 'MQTT 网络中继'];
-  const levelNames = ['关闭', '轻度', '标准', '强力', '极强'];
-  const localPaths = ['handset', 'speaker'];
-  const pathNames = ['手台发话 → 本机射频', '手台发话 → 网络', '射频来话 → 本机喇叭',
-    '射频来话 → 网络转发', '网络来话 → 本机喇叭', '网络来话 → 模拟桥接'];
-  const drafts = new Map();
-  const messages = new Map();
+  const level = get('level');
+  const paths = [...card.querySelectorAll('input[data-path]')];
   const status = document.getElementById('rfDenoiseStatus');
-  let saved;
-  let device;
+  const levels = ['关闭', '轻度', '标准', '强力', '极强'];
+  const states = ['已关闭', '等待下一话段', '正在降噪', '内存不足 · 暂用原声', '当前使用原声'];
+  let saved, device, draft;
   let pending = false;
   let reading = false;
   let readError = '';
+  let feedback = '';
   let epoch = 0;
 
-  function settingFor(path, mode) {
-    if (path === 'handset') return 4;
-    if (path === 'speaker') return 3;
-    if (!mode) return 0;
-    if (path === 'forward') return mode;
-    const first = mode === 1 ? 5 : 8;
-    return first + ['netTx', 'netSpeaker', 'netRf'].indexOf(path);
+  function levelAt(packed, setting) {
+    return (packed >> ((setting - 1) * 3)) & 7;
   }
 
-  function levelFor(levels, setting) {
-    return (levels >> ((setting - 1) * 3)) & 7;
+  function packed(value, mask) {
+    return paths.reduce((result, input) => {
+      const setting = Number(input.dataset.path);
+      return mask & (1 << setting) ? result | (value << ((setting - 1) * 3)) : result;
+    }, 0);
   }
 
-  function modeDrafts(mode) {
-    return selects.map(select => settingFor(select.dataset.path, mode)).filter(setting => drafts.has(setting));
+  function matches(snapshot, value, mask) {
+    return snapshot.selection_level === value && snapshot.levels === packed(value, mask);
   }
 
-  function presetSettings(mode, local) {
-    return selects
-      .filter(select => localPaths.includes(select.dataset.path) === local)
-      .map(select => settingFor(select.dataset.path, mode))
-      .filter(Boolean);
-  }
-
-  function renderPreset(select, mode, levels, local) {
-    const group = presetSettings(mode, local);
-    const first = levelFor(levels, group[0]);
-    const value = group.length && group.every(setting => levelFor(levels, setting) === first)
-      ? String(first) : 'mixed';
-    if (select.value !== value) select.value = value;
-    select.disabled = pending || !group.length;
-  }
-
-  function text(node, value) {
-    if (node.textContent !== value) node.textContent = value;
+  function renderStats() {
+    const stats = {3: saved.speaker_stats, 4: saved.handset_stats};
+    if (saved.mode) {
+      const first = saved.mode === 1 ? 5 : 8;
+      stats[saved.mode] = saved.bridge_stats;
+      saved.network_stats.forEach((value, index) => { stats[first + index] = value; });
+    }
+    const rows = paths.flatMap(input => {
+      const setting = Number(input.dataset.path);
+      const item = stats[setting];
+      if (!item) return [];
+      const configured = levelAt(saved.levels, setting);
+      const active = item.state === 2 || item.state === 4;
+      const state = configured || active ? item.state || 1 : 0;
+      return [input.parentElement.textContent.trim() + ' · 已保存 ' + levels[configured] + ' · ' + states[state] +
+        (item.level && (active || item.input_frames) ?
+          ' · ' + (active ? '当前话段 ' : '最近话段 ') + levels[item.level] : '') +
+        (item.input_frames ? ' · ' + item.input_frames + ' 帧 · 输出降噪 ' +
+          item.wet_frames + ' · 原声 ' + item.dry_frames + ' · 队列满 ' + item.queue_full +
+          ' · 恢复 ' + item.recoveries : '') +
+        (item.frames ? ' · 累计计算 ' + item.frames + ' 帧 · 计算最长 ' + item.max_us +
+          ' μs · 迟到 ' + item.overruns + (Number.isInteger(item.wait_max_us) ?
+            ' · 排队最长 ' + item.wait_max_us + ' μs' : '') : '')];
+    });
+    if (saved.i2s) rows.push('I2S 累计 · 接收欠载 ' + saved.i2s.receive_stalls +
+      ' · 短写 ' + saved.i2s.short_writes + ' · 错误 ' + saved.i2s.errors);
+    const list = get('stats');
+    const summary = rows.join('\n');
+    if (list.dataset.summary !== summary) {
+      list.dataset.summary = summary;
+      list.replaceChildren(...rows.map(value => {
+        const li = document.createElement('li');
+        li.textContent = value;
+        return li;
+      }));
+    }
   }
 
   function render() {
     get('form').hidden = !saved;
     get('retry').hidden = !readError;
     get('connection').hidden = Boolean(saved && !readError);
-    text(get('connection'), readError || (saved ? '' : '正在读取降噪设置…'));
+    get('connection').textContent = readError || (saved ? '' : '正在读取降噪设置…');
     if (!saved) return;
-    const {mode, levels} = saved;
-    text(get('networkPresetLabel'), modes[mode]);
-    get('networkPresetRow').hidden = mode === 0;
-    renderPreset(get('localPreset'), mode, levels, true);
-    renderPreset(get('networkPreset'), mode, levels, false);
-    text(get('txLabel'), '发到' + modes[mode]);
-    text(get('forwardLabel'), '转发到' + modes[mode]);
-    get('network').hidden = mode === 0;
-    let extreme = false;
-    for (const select of selects) {
-      const setting = settingFor(select.dataset.path, mode);
-      select.closest('label').hidden = !setting;
-      if (!setting) continue;
-      const level = drafts.get(setting)?.value ?? levelFor(levels, setting);
-      if (select.value !== String(level)) select.value = level;
-      if (select.getAttribute('aria-disabled') !== String(pending)) {
-        select.setAttribute('aria-disabled', String(pending));
-      }
-      extreme ||= level === 4;
+    const selected = draft?.level ?? saved.selection_level;
+    const mask = draft?.paths ?? saved.flags;
+    const mixed = !matches(saved, saved.selection_level, saved.flags);
+    level.value = String(selected);
+    level.disabled = pending;
+    for (const input of paths) {
+      input.checked = Boolean(mask & (1 << Number(input.dataset.path)));
+      input.disabled = pending;
     }
-    get('levelNote').hidden = !extreme;
-    const notes = {
-      rfNote: mode && !saved.rf_tx ? '启用本机射频发射时使用「发到本机射频」。' : '',
-      bridgeNote: mode ? (saved.bridge_keyed ? '桥接发射中 · 使用射频出口。桥接时本机喇叭与射频共用音频。' :
-        saved.bridge_active ? '桥接发射时，两个出口共用射频音频。' :
-        '两项桥接设置等待模拟桥接开启。') : '',
-    };
-    for (const [name, label] of Object.entries(notes)) {
-      get(name).hidden = !label;
-      text(get(name), label);
-    }
-    const stats = [saved.handset_stats, saved.network_stats[0], saved.speaker_stats,
-      saved.bridge_stats || saved, saved.network_stats[1], saved.network_stats[2]];
-    const rows = selects.map((select, index) => {
-      const setting = settingFor(select.dataset.path, mode);
-      if (!setting) return '';
-      const item = stats[index];
-      const configured = levelFor(levels, setting);
-      const active = item?.state === 2 || item?.state === 4;
-      const state = configured || active ? item?.state || 1 : 0;
-      return pathNames[index] + ' · 已保存 ' + levelNames[configured] + ' · ' + (states[state] || states[1]) +
-        (item?.level && (active || item.input_frames) ?
-          ' · ' + (active ? '当前话段 ' : '最近话段 ') + levelNames[item.level] : '') +
-        (item?.input_frames ? ' · ' + item.input_frames + ' 帧 · 输出降噪 ' +
-          item.wet_frames + ' · 原声 ' + item.dry_frames + ' · 队列满 ' + item.queue_full +
-          ' · 恢复 ' + item.recoveries : '') +
-        (item?.frames ? ' · 累计计算 ' + item.frames + ' 帧 · 计算最长 ' + item.max_us +
-          ' μs · 迟到 ' + item.overruns + (Number.isInteger(item.wait_max_us) ?
-            ' · 排队最长 ' + item.wait_max_us + ' μs' : '') : '');
-    }).filter(Boolean);
-    if (saved.i2s) rows.push('I2S 累计 · 接收欠载 ' + saved.i2s.receive_stalls +
-      ' · 短写 ' + saved.i2s.short_writes + ' · 错误 ' + saved.i2s.errors);
-    const list = get('stats');
-    if (list.dataset.summary !== rows.join('\n')) {
-      list.dataset.summary = rows.join('\n');
-      list.replaceChildren(...rows.map(value => {
-        const li = document.createElement('li'); li.textContent = value; return li;
-      }));
-    }
-    const dirty = modeDrafts(mode).length !== 0;
-    get('save').disabled = pending || !dirty;
-    get('undo').disabled = pending || !dirty;
-    text(status, pending ? '正在确认保存…' :
-      [messages.get(mode), dirty ? '有未保存修改' : ''].filter(Boolean).join(' · '));
+    get('mixed').hidden = !mixed;
+    get('levelNote').hidden = !mask || selected !== 4;
+    get('bridgeNote').hidden = !saved.mode;
+    get('save').disabled = pending || (!draft && !mixed);
+    get('undo').disabled = pending || !draft;
+    status.textContent = pending ? '正在确认保存…' : feedback || (draft ? '有未保存修改' : '');
+    renderStats();
   }
 
   async function request(body, boundDevice) {
@@ -138,19 +101,20 @@
         options.body = JSON.stringify(body);
       }
       const response = await fetch('/api/rf_denoise', options);
-      if (!response.ok) {
-        const error = Error('降噪设置未确认');
-        error.conflict = response.status === 409;
-        throw error;
-      }
+      if (!response.ok) throw Error('降噪设置未确认');
       const next = await response.json();
       const identity = boundDevice || device || window.ORLControl?.device;
       if (!next.ok || !next.device_id || (identity && next.device_id !== identity)) {
         throw Error('设备身份已变化，请重新打开面板');
       }
-      if (!Number.isInteger(next.mode) || !modes[next.mode] || !Number.isInteger(next.levels) ||
-          next.levels < 0 || next.levels > 0x3fffffff || !Array.isArray(next.network_stats) ||
-          !next.speaker_stats || !next.handset_stats) throw Error('降噪状态未确认');
+      if (!Number.isInteger(next.mode) || next.mode < 0 || next.mode > 2 ||
+          !Number.isInteger(next.selection_level) || next.selection_level < 1 || next.selection_level > 4 ||
+          !Number.isInteger(next.levels) || next.levels < 0 || next.levels > 0x3fffffff ||
+          !Number.isInteger(next.flags) || next.flags < 0 || (next.flags & ~0x7fe) ||
+          paths.some(input => levelAt(next.levels, Number(input.dataset.path)) > 4) ||
+          !Array.isArray(next.network_stats) || !next.speaker_stats || !next.handset_stats) {
+        throw Error('降噪状态未确认');
+      }
       return next;
     } finally {
       clearTimeout(timeout);
@@ -177,96 +141,52 @@
     }
   }
 
-  async function save(changes) {
-    if (pending || !saved || !changes.size) return;
-    const mode = saved.mode;
-    const body = {mode, mask: 0, expected_levels: 0, levels: 0};
-    let fields = 0;
-    for (const [setting, {expected, value}] of changes) {
-      const shift = (setting - 1) * 3;
-      body.mask |= 1 << setting;
-      body.expected_levels |= expected << shift;
-      body.levels |= value << shift;
-      fields |= 7 << shift;
-    }
-    const boundDevice = device;
+  function edit() {
+    if (pending || !saved) return;
+    const value = Number(level.value);
+    const mask = paths.reduce((bits, input) =>
+      input.checked ? bits | (1 << Number(input.dataset.path)) : bits, 0);
+    draft = matches(saved, value, mask) ? null : {level: value, paths: mask, expected: draft?.expected ?? saved};
+    feedback = '';
+    render();
+  }
+
+  async function save() {
+    if (pending || !saved) return;
+    const change = draft ?? {level: saved.selection_level, paths: saved.flags, expected: saved};
+    const body = {selection_level: change.level, paths: change.paths,
+      expected_selection_level: change.expected.selection_level, expected_levels: change.expected.levels};
     pending = true;
     ++epoch;
-    messages.delete(mode);
     render();
     let next;
-    let conflict = false;
     try {
-      next = await request(body, boundDevice);
+      next = await request(body, device);
     } catch (error) {
-      conflict = error.conflict;
-      try { next = await request(null, boundDevice); } catch (readFailure) { next = null; }
+      try { next = await request(null, device); } catch (readFailure) { next = null; }
     }
     if (next) {
       saved = next;
       readError = '';
     }
-    if (next && (next.levels & fields) === body.levels) {
-      for (const setting of changes.keys()) drafts.delete(setting);
-      messages.set(mode, '已保存，下一话段生效');
+    if (next && matches(next, change.level, change.paths)) {
+      draft = null;
+      feedback = '已保存，下一话段生效';
     } else {
-      const latest = [];
-      for (const [setting, draft] of changes) {
-        const expected = next ? levelFor(next.levels, setting) : draft.expected;
-        if (expected === draft.value && next) {
-          drafts.delete(setting);
-          continue;
-        }
-        if (expected !== draft.expected) {
-          const index = selects.findIndex(select => settingFor(select.dataset.path, mode) === setting);
-          latest.push(pathNames[index] + '为' + levelNames[expected]);
-        }
-        drafts.set(setting, {expected, value: draft.value});
-      }
-      messages.set(mode, latest.length ? '设备设置有变化（' + latest.join('、') + '），请核对后再保存' :
-        conflict ? '设置未保存，请重试' : '保存未确认，请重试');
+      draft = {...change, expected: next ?? change.expected};
+      feedback = next ? '未确认保存，已读取手台当前设置。请核对后再保存。' : '保存未确认，请重试';
     }
     pending = false;
     render();
   }
 
-  for (const select of selects) {
-    select.replaceChildren(...levelNames.map((label, level) => new Option(label, level)));
-    select.addEventListener('keydown', event => { if (pending && event.key !== 'Tab') event.preventDefault(); });
-    select.addEventListener('change', () => {
-      if (!saved || pending) { render(); return; }
-      const setting = settingFor(select.dataset.path, saved.mode);
-      if (!setting) return;
-      const expected = levelFor(saved.levels, setting);
-      const value = Number(select.value);
-      if (value === expected) drafts.delete(setting);
-      else drafts.set(setting, {value, expected});
-      messages.delete(saved.mode);
-      render();
-    });
-  }
-  for (const [select, local] of [[get('localPreset'), true], [get('networkPreset'), false]]) {
-    const mixed = new Option('分线路', 'mixed');
-    mixed.disabled = true;
-    select.replaceChildren(...levelNames.map((label, level) => new Option(label, level)), mixed);
-    select.addEventListener('change', () => {
-      if (pending || !saved) { render(); return; }
-      const value = Number(select.value);
-      if (!Number.isInteger(value) || !levelNames[value]) { render(); return; }
-      const group = presetSettings(saved.mode, local);
-      const changes = new Map(group.map(setting =>
-        [setting, {expected: levelFor(saved.levels, setting), value}]));
-      if ([...changes.values()].some(draft => draft.expected !== value)) void save(changes);
-    });
-  }
-  get('save').onclick = () => {
-    if (saved) void save(new Map(modeDrafts(saved.mode).map(setting => [setting, drafts.get(setting)])));
-  };
+  level.addEventListener('change', edit);
+  for (const input of paths) input.addEventListener('change', edit);
+  get('save').onclick = save;
   get('retry').onclick = read;
   get('undo').onclick = () => {
-    if (pending || !saved) return;
-    for (const setting of modeDrafts(saved.mode)) drafts.delete(setting);
-    messages.delete(saved.mode);
+    draft = null;
+    feedback = '';
     render();
   };
   void read();

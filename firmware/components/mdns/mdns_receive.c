@@ -151,41 +151,34 @@ static esp_err_t strdup_check(char **out, char *in)
  * */
 static char *mangle_name(char *in)
 {
-    char *p = strrchr(in, '-');
-    int suffix = 0;
-    if (p == NULL) {
-        //No - in ``in``
-        suffix = 2;
-    } else {
+    const char *dash = strrchr(in, '-');
+    size_t prefix = strlen(in);
+    long suffix = 2;
+    if (dash && dash != in && dash[1] >= '1' && dash[1] <= '9' && strlen(dash + 1) <= 8) {
         char *endp = NULL;
-        suffix = strtol(p + 1, &endp, 10);
-        if (*endp != 0) {
-            //suffix is not numerical
-            suffix = 2;
-            p = NULL; //so we append -suffix to the entire string
+        const long previous = strtol(dash + 1, &endp, 10);
+        if (!*endp) {
+            prefix = (size_t)(dash - in);
+            suffix = previous + 1;
         }
     }
-    char *ret;
-    if (p == NULL) {
-        //need to add -2 to string
-        ret = mdns_mem_malloc(strlen(in) + 3);
-        if (ret == NULL) {
-            HOOK_MALLOC_FAILED;
-            return NULL;
+    char ending[16];
+    const size_t length = (size_t)snprintf(ending, sizeof(ending), "-%ld", suffix);
+    const size_t max_prefix = MDNS_NAME_MAX_LEN - length;
+    if (prefix > max_prefix) {
+        prefix = max_prefix;
+        /* Service instance names can contain multibyte UTF-8 characters. */
+        while (prefix && ((unsigned char)in[prefix] & 0xc0) == 0x80) {
+            --prefix;
         }
-        sprintf(ret, "%s-2", in);
-    } else {
-        size_t in_len = strlen(in);
-        ret = mdns_mem_malloc(in_len + 2); //one extra byte in case 9-10 or 99-100 etc
-        if (ret == NULL) {
-            HOOK_MALLOC_FAILED;
-            return NULL;
-        }
-        memcpy(ret, in, in_len);
-        int baseLen = p - in; //length of 'bla' in 'bla-123'
-        //overwrite suffix with new suffix
-        sprintf(ret + baseLen, "-%d", suffix + 1);
     }
+    char *ret = mdns_mem_malloc(prefix + length + 1);
+    if (!ret) {
+        HOOK_MALLOC_FAILED;
+        return NULL;
+    }
+    memcpy(ret, in, prefix);
+    memcpy(ret + prefix, ending, length + 1);
     return ret;
 }
 

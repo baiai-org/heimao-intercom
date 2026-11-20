@@ -28,7 +28,7 @@ class BoardSession(
     private val nameCache: suspend (DeviceProfile)->Unit = {},
 ):OwnedSession {
     var profile=initialProfile;private set
-    val api=BoardApi(profile.endpoint(),network)
+    val api=BoardApi(profile.endpoint(),network,PanelDomain.cachedIp(profile))
     val view=MutableStateFlow(SessionView(profileId=profile.id,phase="核对设备身份"))
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
     private val client="android-"+UUID.randomUUID().toString().replace("-","")

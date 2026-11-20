@@ -983,12 +983,12 @@ button:active:not(:disabled) { transform: translateY(1px); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 .eq-denoise { margin-bottom: 14px; }
 .denoise-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
-.denoise-options label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; }
-.denoise-options label[hidden] { display: none; }
-.denoise-options select { flex: 0 0 88px; min-width: 0; }
-.denoise-options select[aria-disabled="true"] { pointer-events: none; }
+.denoise-options label { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+.denoise-options label input { flex: none; width: auto; }
 .denoise-group { border: 0; padding: 0; margin: 0 0 6px; }
 .denoise-group legend { color: var(--dim); font-size: .9em; }
+.denoise-level { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.denoise-level select { width: auto; }
 .denoise-note { color: var(--dim); font-size: .9em; margin: 6px 0; }
 .eq-denoise details { margin-top: 8px; }
 @media (max-width: 600px) { .denoise-options { grid-template-columns: 1fr; } }
@@ -2109,42 +2109,45 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <p data-dn="connection" class="denoise-note" role="status">正在读取降噪设置…</p>
         <button type="button" data-dn="retry" hidden>重试</button>
         <div data-dn="form" hidden>
-          <div class="denoise-options">
-            <label><span>本机收发 · 各模式共用</span><select data-dn="localPreset"></select></label>
-            <label data-dn="networkPresetRow" hidden><span data-dn="networkPresetLabel"></span><select data-dn="networkPreset"></select></label>
-          </div>
-          <p id="rfDenoiseStatus" class="denoise-note" role="status"></p>
-          <details data-dn="advanced">
-          <summary>按线路调整</summary>
+          <label class="denoise-level">降噪档位 <select data-dn="level">
+            <option value="1">轻度</option><option value="2">标准</option>
+            <option value="3">强力</option><option value="4">极强</option>
+          </select></label>
+          <p data-dn="mixed" class="denoise-note" hidden>手台保存了不同的线路档位。保存后，已勾选的线路会统一使用所选档位。</p>
           <fieldset class="denoise-group">
-            <legend>手台发话</legend>
+            <legend>本机收发 · 各模式共用</legend>
             <div class="denoise-options">
-              <label><span>发到本机射频</span><select data-path="handset"></select></label>
-              <label><span data-dn="txLabel"></span><select data-path="netTx"></select></label>
+              <label><input type="checkbox" data-path="4">手台发话 → 本机射频</label>
+              <label><input type="checkbox" data-path="3">射频来话 → 本机喇叭</label>
             </div>
           </fieldset>
           <fieldset class="denoise-group">
-            <legend>射频来话</legend>
+            <legend>公网直连</legend>
             <div class="denoise-options">
-              <label><span>本机喇叭</span><select data-path="speaker"></select></label>
-              <label><span data-dn="forwardLabel"></span><select data-path="forward"></select></label>
+              <label><input type="checkbox" data-path="5">手台发话 → 网络</label>
+              <label><input type="checkbox" data-path="1">射频来话 → 网络</label>
+              <label><input type="checkbox" data-path="6">网络来话 → 本机喇叭</label>
+              <label><input type="checkbox" data-path="7">网络来话 → 模拟桥接</label>
             </div>
           </fieldset>
-          <fieldset class="denoise-group" data-dn="network" hidden>
-            <legend>网络来话</legend>
+          <fieldset class="denoise-group">
+            <legend>MQTT 中继</legend>
             <div class="denoise-options">
-              <label><span>本机喇叭</span><select data-path="netSpeaker"></select></label>
-              <label><span>模拟桥接 · 射频发出</span><select data-path="netRf"></select></label>
+              <label><input type="checkbox" data-path="8">手台发话 → 网络</label>
+              <label><input type="checkbox" data-path="2">射频来话 → 网络</label>
+              <label><input type="checkbox" data-path="9">网络来话 → 本机喇叭</label>
+              <label><input type="checkbox" data-path="10">网络来话 → 模拟桥接</label>
             </div>
           </fieldset>
-          <p data-dn="rfNote" class="denoise-note" hidden></p>
-          <p data-dn="bridgeNote" class="denoise-note" hidden></p>
           <p data-dn="levelNote" class="denoise-note" hidden>极强档可能削弱弱话音和尾音。</p>
-          <details><summary>运行详情</summary><ul data-dn="stats"></ul></details>
+          <p id="rfDenoiseStatus" class="denoise-note" role="status"></p>
           <div class="row" style="flex-wrap:wrap;margin:8px 0 0">
             <button type="button" class="pri" data-dn="save" disabled>保存降噪设置</button>
             <button type="button" data-dn="undo" disabled>撤销未保存修改</button>
           </div>
+          <details><summary>运行详情</summary>
+            <p data-dn="bridgeNote" class="denoise-note" hidden>桥接键控时，喇叭和射频共用模拟桥接出口的音频。</p>
+            <ul data-dn="stats"></ul>
           </details>
         </div>
       </section>
@@ -4276,12 +4279,14 @@ async function refresh() {
       : (wifiIcon(0) + ' ' + escHtml(s.wifi.state));
     $('wifiPill').className = 'pill ' + (s.wifi.connected ? 'up' : 'down');
 
-    /* The panel lives on https://<host>.local; show that exact address so it can
-     * be copied or tapped instead of a bare hostname. */
-    const lanHost = (s.wifi.host || '').replace(/[^a-z0-9-]/gi, '').toLowerCase();
-    $('lanPill').innerHTML = s.wifi.connected && lanHost
-      ? ('<a href="https://' + lanHost + '.local/" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' +
-         escHtml(s.wifi.ip) + ' · https://' + lanHost + '.local</a>')
+    const defaultHost = s.wifi.mdns_host ?? s.wifi.host ?? '';
+    const lanHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(defaultHost) ? defaultHost + '.local' : '';
+    const lanIp = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(s.wifi.ip) ? s.wifi.ip : '';
+    const lanLink = address => '<a href="https://' + address + '/" target="_blank" rel="noopener" style="color:inherit">' +
+      address + '</a>';
+    const domainStatus = {pending: '域名发布中', error: '域名发布异常', conflict: '配置名重名'};
+    $('lanPill').innerHTML = s.wifi.connected
+      ? [lanIp && lanLink(lanIp), lanHost && lanLink(lanHost), domainStatus[s.wifi.mdns_state]].filter(Boolean).join(' · ')
       : (s.wifi.ap ? ('AP ' + escHtml(s.wifi.ap_ip)) : escHtml(s.wifi.state));
     $('lanPill').className = 'pill ' + (s.wifi.connected ? 'up' : 'down');
 

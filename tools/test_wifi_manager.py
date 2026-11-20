@@ -35,6 +35,16 @@ typedef int esp_err_t;
 #define BIT3 8
 #define BIT4 16
 #define BIT5 32
+#define BIT6 64
+#define HM_DEVICE_NAME "Handset"
+#define HM_PROJECT_NAME "Blackcat"
+#define portENTER_CRITICAL(m) ((void)(m))
+#define portEXIT_CRITICAL(m) ((void)(m))
+#define MDNS_EVENT_ANNOUNCE_IP4 8
+#define MDNS_EVENT_ANNOUNCE_IP6 16
+#define MDNS_NAME_MAX_LEN 63
+#define mdns_mem_malloc malloc
+#define HOOK_MALLOC_FAILED ((void)0)
 #define portMUX_INITIALIZER_UNLOCKED 0
 #define WIFI_AUTH_OPEN 0
 #define WIFI_IF_STA 0
@@ -102,7 +112,26 @@ static int esp_netif_dhcpc_start(void*n){return ESP_OK;}
 static int esp_netif_get_ip_info(void*n,esp_netif_ip_info_t*i){memset(i,0,sizeof(*i));i->ip.addr=ip_ready?1:0;return ESP_OK;}
 static void* start_dns_server(void*c){return (void*)1;}
 static void stop_dns_server(void*d){}
-static int mdns_hostname_set(const char*s){return ESP_OK;}
+typedef struct { const char *key, *value; } mdns_txt_item_t;
+typedef struct { char name[97]; } device_name_t;
+static int mdns_init_calls, mdns_set_calls, mdns_announce_calls, mdns_http_calls, mdns_service_calls;
+static int mdns_init_error, mdns_service_error;
+static char mdns_effective[64];
+static void (*mdns_callback)(const char*,void*);
+static void xTaskNotifyGive(TaskHandle_t task){}
+static void device_name_get(device_name_t *name){strcpy(name->name,"Desk");}
+static int mdns_init(void){++mdns_init_calls;return mdns_init_error;}
+static int mdns_register_hostname_changed_callback(void(*cb)(const char*,void*),void*arg){mdns_callback=cb;return ESP_OK;}
+static int mdns_hostname_set(const char*s){++mdns_set_calls;strcpy(mdns_effective,s);mdns_callback(s,NULL);return ESP_OK;}
+static int mdns_hostname_get(char*s){strcpy(s,mdns_effective);return ESP_OK;}
+static int mdns_service_add(const char*name,const char*type,const char*proto,int port,mdns_txt_item_t*txt,size_t count){
+ if(!strcmp(type,"_openradiolink")){++mdns_service_calls;assert(count==6);return mdns_service_error;}
+ ++mdns_http_calls;return ESP_OK;
+}
+static int mdns_service_txt_item_set(const char*t,const char*p,const char*k,const char*v){return ESP_OK;}
+static int mdns_netif_action(esp_netif_t*n,int mask){
+ assert(n&&mask==(MDNS_EVENT_ANNOUNCE_IP4|MDNS_EVENT_ANNOUNCE_IP6));++mdns_announce_calls;return ESP_OK;
+}
 static void ip6_ensure_linklocal(void){}
 static void announce_gateway(int64_t n){}
 static const char*esp_err_to_name(int e){return "fake";}
@@ -128,8 +157,14 @@ static void visible(const char *a,const char*b){
  if(b){strcpy((char*)scan_records[scan_count].ssid,b);scan_records[scan_count++].rssi=-70;}
 }
 int main(void){
+ char longest[64];memset(longest,'x',63);longest[63]='\0';
+ char *alternative=mangle_name(longest);
+ assert(alternative && strlen(alternative)==63 && !strcmp(alternative+61,"-2"));
+ free(alternative);
+ char numbered[]="heimao-9";alternative=mangle_name(numbered);
+ assert(alternative && !strcmp(alternative,"heimao-10"));free(alternative);
  s_manager=calloc(1,sizeof(*s_manager));reset(0);
- assert(load_profiles()==ESP_OK&&!strcmp(s_hostname,"heimao"));reset(0);
+ assert(load_profiles()==ESP_OK&&!strcmp(s_hostname,"heimao-001122334455"));reset(0);
  strcpy(legacy_ssid,"legacy");strcpy(legacy_pass,"test-only-secret");
  assert(load_profiles()==ESP_OK&&!strcmp(s_hostname,"orl"));reset(0);
  strcpy(legacy_ssid,"legacy");strcpy(legacy_pass,"test-only-secret");strcpy(legacy_host,"legacy-host");
@@ -216,6 +251,33 @@ int main(void){
  tick(1500,0);tick(2250,0);assert(!s_ap_on && connect_calls==1);
  reset(0);a=save("A",true,0);assert(net_wifi_clear()==ESP_OK);
  assert(!s_manager->store.profiles[0].id && have_blob);
+ reset(0);assert(load_profiles()==ESP_OK);
+ a=save("A",true,0);s_connected=true;strcpy(s_ip,"192.168.1.75");s_mdns_dirty=false;s_mdns_announce=true;
+ mdns_init_error=ESP_ERR_NO_MEM;
+ sync_mdns(s_hostname,true,true,0);assert(mdns_init_calls==1 && s_panel.mdns_state==NET_WIFI_MDNS_ERROR);
+ sync_mdns(s_hostname,true,false,1999);assert(mdns_init_calls==1);
+ mdns_init_error=ESP_OK;mdns_service_error=ESP_ERR_NO_MEM;
+ sync_mdns(s_hostname,true,false,2000);assert(mdns_init_calls==2 && mdns_http_calls==1 && mdns_service_calls==1);
+ assert(s_panel.mdns_state==NET_WIFI_MDNS_ERROR && !s_panel.advertised[0] && s_panel.ip[0]);
+ mdns_service_error=ESP_OK;
+ sync_mdns(s_hostname,true,false,8000);assert(mdns_http_calls==1 && mdns_service_calls==2);
+ assert(mdns_announce_calls==1 && s_panel.mdns_state==NET_WIFI_MDNS_READY);
+ assert(!strcmp(s_panel.advertised,"heimao-001122334455"));
+ strcpy(mdns_effective,"heimao-001122334455-2");mdns_callback(mdns_effective,NULL);
+ assert(s_pending_events&EV_MDNS);
+ sync_mdns(s_hostname,true,true,9000);assert(mdns_set_calls==1 && s_panel.mdns_state==NET_WIFI_MDNS_CONFLICT);
+ assert(!strcmp(s_panel.configured,"heimao-001122334455") && !strcmp(s_panel.advertised,mdns_effective));
+ assert(net_wifi_profiles_json(json,sizeof(json))==ESP_OK);
+ assert(strstr(json,"\"mdns_state\":\"conflict\"") && strstr(json,"\"ip\":\"192.168.1.75\""));
+ assert(net_wifi_profile_save(&a,NULL,NULL,true,0,"new-host")==ESP_OK);
+ assert(s_panel.mdns_state==NET_WIFI_MDNS_PENDING && !s_panel.advertised[0] && mdns_set_calls==1);
+ s_mdns_dirty=false;sync_mdns(s_hostname,true,true,10000);
+ assert(s_panel.mdns_state==NET_WIFI_MDNS_READY && !strcmp(s_panel.advertised,"new-host"));
+ s_mdns_announce=true;strcpy(s_ip,"192.168.1.76");sync_mdns(s_hostname,true,true,11000);
+ assert(mdns_announce_calls==2 && !strcmp(s_panel.ip,"192.168.1.76"));
+ s_connected=false;update_panel_locked();
+ assert(s_panel.mdns_state==NET_WIFI_MDNS_OFFLINE && !s_panel.ip[0] && !s_panel.advertised[0]);
+ puts("PASS: mDNS initialization and registration retry, collision readback, live rename, DHCP reannounce and offline status");
  puts("PASS: production manager migration/reboot, atomic save failure, hostname, forgotten profiles, asynchronous scans, all saved candidates, IP-only success, healthy Wi-Fi retention, bounded AP recovery, AP/STA exclusion, manual ACK delay and explicit radio-off");
  free(s_manager);return 0;
 }
@@ -223,11 +285,17 @@ int main(void){
 def main():
     source=(ROOT/'firmware/main/net_wifi.c').read_text(encoding='utf-8')
     declarations=source[source.index('static const char *TAG'):source.index('static int64_t wifi_now')]
-    names=['wifi_now','wifi_lock','wifi_unlock','wifi_escape','persist_profiles','load_profiles',
+    header=(ROOT/'firmware/main/net_wifi.h').read_text(encoding='utf-8')
+    panel_type=header[header.index('typedef enum {'):header.index('void net_wifi_name_changed')]
+    names=['wifi_now','wifi_lock','wifi_unlock','update_panel_locked','net_wifi_panel_snapshot',
+           'net_wifi_mdns_state_name','wifi_escape','persist_profiles','load_profiles',
+           'signal_wifi','mdns_name_changed','register_mdns','sync_mdns',
            'ap_stop','ap_start','disconnect_for_switch','begin_candidate','auto_profiles','collect_scan','manager_step',
            'valid_host','net_wifi_profile_save','net_wifi_profile_connect','net_wifi_profile_can_connect',
            'net_wifi_profile_forget','net_wifi_clear','net_wifi_setup_session','net_wifi_debug_radio_off_schedule','net_wifi_profiles_json']
-    code=STUBS+declarations+''.join(function(source,n) for n in names)+HARNESS
+    mdns_source=(ROOT/'firmware/components/mdns/mdns_receive.c').read_text(encoding='utf-8')
+    code=STUBS+panel_type+declarations+''.join(function(source,n) for n in names)
+    code+=function(mdns_source,'mangle_name')+HARNESS
     with tempfile.TemporaryDirectory(prefix='wifi-manager-',dir=ROOT/'.tmp') as tmp:
         p=Path(tmp)/'test.c';p.write_text(code,encoding='utf-8');exe=Path(tmp)/'test.exe'
         env=dict(os.environ,TEMP=tmp,TMP=tmp,TMPDIR=tmp)

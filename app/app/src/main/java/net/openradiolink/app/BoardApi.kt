@@ -12,6 +12,8 @@ import okio.BufferedSink
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
@@ -28,7 +30,8 @@ class ControlHeld(val holder: String): IOException(if (holder.isBlank()) "控制
 class CertificateFailure(val host: String,val fingerprint: String,val audio: Boolean): IOException("需要确认 $host 的服务端证书")
 data class HttpReply(val code: Int,val body: ByteArray)
 
-class BoardApi(val endpoint: AccessPoint,private val network: Network? = null) {
+class BoardApi(val endpoint: AccessPoint,private val network: Network? = null,
+               private val cachedLanIp: InetAddress? = null) {
     val base=EndpointAddress.parse(endpoint.address)
     @Volatile var deviceId=""
     @Volatile var token=""
@@ -41,9 +44,10 @@ class BoardApi(val endpoint: AccessPoint,private val network: Network? = null) {
     private val client=createClient(endpoint.certificate,observed)
     private val audioUrl=if (endpoint.audioAddress.isBlank()) EndpointAddress.api(base,"ws/sdr") else
         endpoint.audioAddress.replaceFirst("wss://","https://").replaceFirst("ws://","http://").toHttpUrl()
-    private val audioClient=if (endpoint.audioAddress.isBlank()) client else createClient(endpoint.audioCertificate,audioObserved)
+    private val audioClient=if (endpoint.audioAddress.isBlank()) client else
+        createClient(endpoint.audioCertificate,audioObserved,allowLanHint=false)
 
-    private fun createClient(pin: String,seen: AtomicReference<String?>): OkHttpClient {
+    private fun createClient(pin: String,seen: AtomicReference<String?>,allowLanHint:Boolean=true): OkHttpClient {
         val defaults=TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(null as KeyStore?) }
             .trustManagers.filterIsInstance<X509TrustManager>().first()
         val trust=object:X509TrustManager {
@@ -69,6 +73,14 @@ class BoardApi(val endpoint: AccessPoint,private val network: Network? = null) {
                 if (network!=null) {
                     socketFactory(network.socketFactory)
                     dns { host -> network.getAllByName(host).toList() }
+                } else if(allowLanHint && cachedLanIp!=null) {
+                    dns { host ->
+                        try { Dns.SYSTEM.lookup(host) }
+                        catch(e:UnknownHostException) {
+                            if(host!=base.host)throw e
+                            listOf(cachedLanIp)
+                        }
+                    }
                 }
             }.build()
     }

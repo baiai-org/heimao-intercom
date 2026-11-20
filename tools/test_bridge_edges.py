@@ -26,6 +26,7 @@ typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_ERR_INVALID_ARG 1
 #define ESP_ERR_INVALID_STATE 2
+#define ESP_ERR_NVS_NOT_FOUND 3
 #define pdTRUE 1
 #define pdMS_TO_TICKS(n) (n)
 #define RX_GUARD_OUT_NET 1
@@ -148,13 +149,14 @@ esp_err_t nvs_get_u32(nvs_handle_t h, const char *key, uint32_t *v) {
         *v = legacy_config;
         return ESP_OK;
     }
-    assert(strcmp(key, "auddn_lvl1") == 0);
+    if (strcmp(key, "auddn_lvl1") == 0) { return ESP_ERR_NVS_NOT_FOUND; }
+    assert(strcmp(key, "auddn_sel1") == 0);
     if (!denoise_exists) { return ESP_ERR_INVALID_STATE; }
     *v = denoise_config;
     return ESP_OK;
 }
 esp_err_t nvs_set_u32(nvs_handle_t h, const char *key, uint32_t v) {
-    (void)h; assert(strcmp(key, "auddn_lvl1") == 0);
+    (void)h; assert(strcmp(key, "auddn_sel1") == 0);
     if (storage_fail) { return ESP_ERR_INVALID_STATE; }
     denoise_pending = true; pending_config = v;
     return ESP_OK;
@@ -330,7 +332,8 @@ int main(void) {
     assert(channel_current() == 1 && bridge_chan() == 0 && strstr(log, "正在切换"));
     *s_select_mux = 0;
     /* A short denoised over is drained before the unmodified tail and OFF. */
-    assert(bridge_denoise_set(1, true, false) == ESP_OK && denoise_config == LEVEL(1, RF_DENOISE_LEVEL_STANDARD));
+    assert(bridge_denoise_set(1, true, false) == ESP_OK &&
+           (denoise_config & DENOISE_LEVELS_MAX) == LEVEL(1, RF_DENOISE_LEVEL_STANDARD));
     assert(bridge_denoise_set(2, true, false) == ESP_OK && bridge_denoise_flags(denoise_config) == 6);
     storage_fail = true;
     assert(bridge_denoise_set(2, false, true) != ESP_OK && bridge_denoise_flags(denoise_config) == 6);
@@ -380,7 +383,7 @@ int main(void) {
     unsigned commits_before = denoise_commits;
     commit_fail = true;
     assert(bridge_denoise_update(1, p2p, 0, p2p) != ESP_OK);
-    assert(bridge_denoise_levels() == denoise_config && bridge_denoise_flags(denoise_config) == 18 &&
+    assert(bridge_denoise_levels() == (denoise_config & DENOISE_LEVELS_MAX) && bridge_denoise_flags(denoise_config) == 18 &&
            denoise_commits == commits_before);
     commit_fail = false;
     assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK);
@@ -415,7 +418,7 @@ int main(void) {
     assert(bridge_denoise_levels() == migrated && denoise_config == LEVEL(1, 7));
     assert(bridge_denoise_update_levels(1, p2p, LEVEL(6, RF_DENOISE_LEVEL_STANDARD), chosen) == ESP_OK);
     const uint32_t persisted = LEVEL(4, RF_DENOISE_LEVEL_STANDARD) | chosen | LEVEL(10, RF_DENOISE_LEVEL_STANDARD);
-    assert(bridge_denoise_levels() == persisted && denoise_config == persisted);
+    assert(bridge_denoise_levels() == persisted && (denoise_config & DENOISE_LEVELS_MAX) == persisted);
     commits_before = denoise_commits;
     assert(bridge_denoise_update_levels(1, p2p, 0, chosen) == ESP_OK);
     assert(bridge_denoise_update(1, p2p, 0, p2p) == ESP_OK);

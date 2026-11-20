@@ -47,7 +47,7 @@ static inline bool panel_address_location(const char *host, const char *name,
     out[0] = '\0';
     if (!host || !name || !ip || !name[0] || strlen(name) > 63) { return false; }
 
-    /* Only our exact configured .local name, with an optional standard port.
+    /* Only our exact advertised .local name, with an optional standard port.
      * IP literals, provisioning addresses and reverse-proxy hosts stay intact.
      */
     const char *port = strchr(host, ':');

@@ -22,7 +22,7 @@ import android.provider.Settings
 import android.util.AtomicFile
 import java.io.File
 import java.io.IOException
-import java.lang.ref.WeakReference
+import androidx.core.content.FileProvider
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
@@ -37,12 +37,19 @@ import okhttp3.Response
 import okio.ByteString.Companion.toByteString
 
 internal data class AppUpdateView(val message:String="等待检查更新",val asset:ReleaseAsset?=null,
-    val ready:Boolean=false,val busy:Boolean=false,val systemConfirmation:Boolean=false)
+    val ready:Boolean=false,val busy:Boolean=false,val systemConfirmation:Boolean=false,
+    val fileInstall:Boolean=false)
+
+internal enum class AppInstallDestination { PERMISSION, CONFIRMATION, FILE }
+
+internal class AppInstallPrompt(val destination:AppInstallDestination,val intent:Intent,val sha256:String)
 
 internal class AppReleaseUpdater(private val app:OrlApp) {
     private val gate=Mutex()
     private val state=MutableStateFlow(AppUpdateView())
     val view=state.asStateFlow()
+    private val prompts=MutableStateFlow<AppInstallPrompt?>(null)
+    val installPrompts=prompts.asStateFlow()
     private val dir=app.noBackupFilesDir.resolve("release-update").apply{mkdirs()}
     private val policy=AtomicFile(dir.resolve("update.json"))
     private val prefs=app.getSharedPreferences("release-update",Context.MODE_PRIVATE)
@@ -57,7 +64,11 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
     private var confirmation:Intent?=null
     private var waitingForSystem=false
     private var installing=false
-    private var foregroundInstall:WeakReference<Context>?=null
+    private var autoConfirm=false
+    private var fileInstall=false
+    private var callbackTimeout:Job?=null
+    private var permissionAttempt:Pair<String,Boolean>?=null
+    private val sharedApks=app.cacheDir.resolve("verified-updates")
 
     private fun apk(asset:ReleaseAsset)=dir.resolve(asset.sha256+".apk")
 
@@ -86,12 +97,14 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
             prefs.edit().remove("attempt").apply()
         } else {
             waitingForSystem=prefs.getString("attempt","")==candidate?.sha256
+            fileInstall=waitingForSystem
             ready(if(waitingForSystem)"等待系统确认，可继续安装" else "新版已下载")
         }
     }
 
     private fun ready(message:String) {
-        state.value=AppUpdateView(message,candidate,ready=candidate!=null,systemConfirmation=waitingForSystem)
+        state.value=AppUpdateView(message,candidate,ready=candidate!=null,systemConfirmation=waitingForSystem,
+            fileInstall=fileInstall)
     }
     private fun decode(bytes:ByteArray)=ReleaseUpdateManifest.decode(bytes,app.packageName,BuildConfig.VERSION_CODE)
 
@@ -145,7 +158,7 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
                         notify(latest,true)
                     } else {
                         waitingForSystem=false
-                        if(!commit(latest,true,null)) {
+                        if(!commit(latest,true)) {
                             ready("新版已下载，等通联结束后自动安装")
                             return@withLock false
                         }
@@ -171,8 +184,9 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
         if(previous!=null && !asset.sameBinary(previous)) {
             clearCandidate()
         } else if(previous!=null && previous.force!=asset.force) {
-            abandonWaiting()
+            check(abandonWaiting()){"Android 正在处理安装"}
             waitingForSystem=false
+            fileInstall=false
             prefs.edit().remove("attempt").apply()
         }
         val file=apk(asset)
@@ -186,18 +200,28 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
         dir.listFiles()?.filter{it.extension=="apk" && it!=file}?.forEach{it.delete()}
     }
 
-    private fun abandonWaiting() {
-        confirmation=null
+    private fun abandonWaiting():Boolean {
         val id=prefs.getInt("session",-1)
-        if(id>=0)runCatching{installer.abandonSession(id)}
+        if(id>=0 && runCatching{installer.abandonSession(id)}.isFailure && installer.getSessionInfo(id)!=null) {
+            return false
+        }
+        confirmation=null
+        autoConfirm=false
+        prompts.value=null
+        callbackTimeout?.cancel()
+        callbackTimeout=null
         prefs.edit().remove("session").apply()
+        return true
     }
 
     private fun clearCandidate() {
-        abandonWaiting()
+        check(abandonWaiting()){"Android 正在处理安装"}
+        sharedApks.listFiles()?.forEach{it.delete()}
         candidate?.let{apk(it).delete()}
         candidate=null
         waitingForSystem=false
+        fileInstall=false
+        permissionAttempt=null
         policy.delete()
         prefs.edit().remove("attempt").remove("notified").apply()
         notifications.cancel(NOTIFICATION)
@@ -264,38 +288,98 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
     private fun canInstall()=Build.VERSION.SDK_INT<26 || app.packageManager.canRequestPackageInstalls()
     private fun quietInstallAvailable()=Build.VERSION.SDK_INT>=31 && canInstall()
 
-    fun install(context:Context) {
-        app.manager.scope.launch {
-            withContext(Dispatchers.IO) {
-                gate.withLock {
-                    restore()
-                    val asset=candidate ?: return@withLock
-                    if(installing)return@withLock
-                    try {
-                        if(!canInstall()) {
-                            withContext(Dispatchers.Main) {
-                                context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+app.packageName)))
-                            }
-                            ready("请在 Android 允许此应用安装更新，再返回继续")
-                            return@withLock
-                        }
-                        if(app.manager.updateBusy()) {
-                            ready("请先结束发话或收听，再继续安装")
-                            return@withLock
-                        }
-                        val pending=confirmation
-                        if(pending!=null && withContext(Dispatchers.Main){runCatching{context.startActivity(pending)}.isSuccess})
-                            return@withLock
-                        abandonWaiting()
-                        if(!commit(asset,false,context))ready("请先结束发话或收听，再安装")
-                    } catch(e:CancellationException){throw e}
-                    catch(e:Exception){ready("安装未提交，可以重试")}
-                }
+    private fun prompt(destination:AppInstallDestination,intent:Intent,asset:ReleaseAsset) {
+        prompts.value=AppInstallPrompt(destination,intent,asset.sha256)
+    }
+
+    fun takeInstallPrompt(prompt:AppInstallPrompt)=prompts.compareAndSet(prompt,null)
+
+    fun install(viaFile:Boolean=false) {
+        app.manager.scope.launch(Dispatchers.IO) {
+            gate.withLock {
+                restore()
+                val asset=candidate ?: return@withLock
+                beginInstall(asset,viaFile)
             }
         }
     }
 
-    private suspend fun commit(asset:ReleaseAsset,force:Boolean,activity:Context?):Boolean {
+    fun installPermissionReturned() {
+        app.manager.scope.launch(Dispatchers.IO) {
+            gate.withLock {
+                val attempt=permissionAttempt ?: return@withLock
+                permissionAttempt=null
+                val asset=candidate?.takeIf{it.sha256==attempt.first} ?: return@withLock
+                if(canInstall())beginInstall(asset,attempt.second)
+                else ready("请允许此来源安装应用，再点击继续")
+            }
+        }
+    }
+
+    fun installLaunchFailed(prompt:AppInstallPrompt,blockedByCall:Boolean=false) {
+        app.manager.scope.launch(Dispatchers.IO) {
+            gate.withLock {
+                if(candidate?.sha256!=prompt.sha256 || installing)return@withLock
+                if(prompt.destination==AppInstallDestination.PERMISSION)permissionAttempt=null
+                if(!blockedByCall && prompt.destination==AppInstallDestination.CONFIRMATION)fileInstall=true
+                ready(when {
+                    blockedByCall -> "请先结束发话或收听，再继续安装"
+                    prompt.destination==AppInstallDestination.PERMISSION -> "无法打开安装授权页，请在系统设置中允许黑猫互联安装应用"
+                    prompt.destination==AppInstallDestination.FILE -> "无法打开系统安装器，可从 GitHub 下载同签名 APK 覆盖安装"
+                    else -> "无法打开系统确认，可重试或使用兼容安装"
+                })
+            }
+        }
+    }
+
+    private suspend fun beginInstall(asset:ReleaseAsset,viaFile:Boolean) {
+        if(installing || prompts.value!=null || (viaFile && !fileInstall))return
+        if(app.manager.updateBusy()) {
+            ready("请先结束发话或收听，再继续安装")
+            return
+        }
+        try {
+            if(!canInstall()) {
+                permissionAttempt=asset.sha256 to viaFile
+                ready("请在 Android 允许此应用安装更新，再返回继续")
+                prompt(AppInstallDestination.PERMISSION,
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+app.packageName)),asset)
+                return
+            }
+            permissionAttempt=null
+            val pending=confirmation
+            if(!viaFile && pending!=null && installer.getSessionInfo(prefs.getInt("session",-1))!=null) {
+                prompt(AppInstallDestination.CONFIRMATION,pending,asset)
+                return
+            }
+            if(!abandonWaiting()) {
+                ready("Android 正在处理安装，请稍后继续")
+                return
+            }
+            if(viaFile) {
+                openVerifiedApk(asset)
+            } else if(!commit(asset,false)) {
+                ready("请先结束发话或收听，再安装")
+            }
+        } catch(e:CancellationException){throw e}
+        catch(e:IOException){ready("无法准备安装文件，请检查存储空间后重试")}
+        catch(e:Exception){ready("Android 安装未提交，可以重试")}
+    }
+
+    private fun openVerifiedApk(asset:ReleaseAsset) {
+        val source=apk(asset)
+        require(verified(source,asset)){"APK 校验失败"}
+        val shared=sharedApks.resolve(source.name)
+        sharedApks.mkdirs()
+        source.copyTo(shared,overwrite=true)
+        val uri=FileProvider.getUriForFile(app,app.packageName+".update-files",shared)
+        ready("请在系统安装器中确认")
+        prompt(AppInstallDestination.FILE,Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri,"application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),asset)
+    }
+
+    private suspend fun commit(asset:ReleaseAsset,force:Boolean):Boolean {
         if(app.manager.updateBusy())return false
         val file=apk(asset)
         require(verified(file,asset)){"APK 校验失败"}
@@ -317,25 +401,36 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
                 val result=Intent(app,AppUpdateInstallResult::class.java).putExtra("ownerSession",id)
                 val sender=PendingIntent.getBroadcast(app,id,result,PendingIntent.FLAG_UPDATE_CURRENT or
                     (if(Build.VERSION.SDK_INT>=31)PendingIntent.FLAG_MUTABLE else 0)).intentSender
-                withContext(Dispatchers.Main) {
-                    if(!app.manager.reserveAppInstall())return@withContext
-                    try {
-                        check(prefs.edit().putString("attempt",asset.sha256).putInt("session",id).commit())
-                        installing=true
-                        state.value=AppUpdateView("正在交给 Android 安装",asset,busy=true)
-                        foregroundInstall=activity?.let{WeakReference(it)}
-                        session.commit(sender)
-                        committed=true
-                    } finally {
-                        if(!committed) {
-                            installing=false
-                            prefs.edit().remove("attempt").remove("session").apply()
-                            app.manager.releaseAppInstall()
-                        }
+                if(!withContext(Dispatchers.Main){app.manager.reserveAppInstall()})return false
+                try {
+                    check(prefs.edit().putString("attempt",asset.sha256).putInt("session",id).commit())
+                    installing=true
+                    autoConfirm=!force
+                    state.value=AppUpdateView("正在交给 Android 安装",asset,busy=true)
+                    session.commit(sender)
+                    committed=true
+                } finally {
+                    if(!committed) {
+                        installing=false
+                        prefs.edit().remove("attempt").remove("session").apply()
+                        withContext(NonCancellable+Dispatchers.Main){app.manager.releaseAppInstall()}
                     }
                 }
             }
         } finally { if(!committed)runCatching{installer.abandonSession(id)} }
+        if(committed) {
+            callbackTimeout=app.manager.scope.launch(Dispatchers.IO) {
+                delay(20_000)
+                gate.withLock {
+                    if(!installing || prefs.getInt("session",-1)!=id)return@withLock
+                    installing=false
+                    withContext(Dispatchers.Main){app.manager.releaseAppInstall()}
+                    waitingForSystem=true
+                    fileInstall=true
+                    ready("Android 暂未返回安装确认，可以重试或使用兼容安装")
+                }
+            }
+        }
         return committed
     }
 
@@ -363,27 +458,44 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
                         val id=result.getIntExtra(PackageInstaller.EXTRA_SESSION_ID,-1)
                         if(id<0 || id!=result.getIntExtra("ownerSession",-1) || id!=prefs.getInt("session",-1))return@withLock
                         restore()
-                        val activity=foregroundInstall?.get()
-                        foregroundInstall=null
+                        callbackTimeout?.cancel()
+                        callbackTimeout=null
                         installing=false
                         withContext(Dispatchers.Main){app.manager.releaseAppInstall()}
                         val asset=candidate ?: return@withLock
                         when(result.getIntExtra(PackageInstaller.EXTRA_STATUS,PackageInstaller.STATUS_FAILURE)) {
                             PackageInstaller.STATUS_PENDING_USER_ACTION->{
-                                confirmation=result.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+                                confirmation=if(Build.VERSION.SDK_INT>=33)
+                                    result.getParcelableExtra(Intent.EXTRA_INTENT,Intent::class.java)
+                                else result.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                                 waitingForSystem=true
-                                ready("等待系统确认，可继续安装")
+                                fileInstall=confirmation==null
+                                ready(if(confirmation!=null)"等待系统确认，可继续安装" else "Android 未提供确认页面，可重试或使用兼容安装")
                                 notify(asset,true)
-                                if(activity!=null)withContext(Dispatchers.Main) {
-                                    confirmation?.let{runCatching{activity.startActivity(it)}}
-                                }
+                                if(autoConfirm)confirmation?.let{prompt(AppInstallDestination.CONFIRMATION,it,asset)}
+                                autoConfirm=false
                             }
-                            PackageInstaller.STATUS_SUCCESS->{clearCandidate();ready("APP 更新完成")}
+                            PackageInstaller.STATUS_SUCCESS->{
+                                prefs.edit().remove("session").apply()
+                                clearCandidate()
+                                ready("APP 更新完成")
+                            }
                             else->{
                                 prefs.edit().remove("session").apply()
                                 confirmation=null
+                                prompts.value=null
+                                autoConfirm=false
+                                fileInstall=false
                                 waitingForSystem=true
-                                ready("Android 暂未完成安装，可手动重试")
+                                ready(when(result.getIntExtra(PackageInstaller.EXTRA_STATUS,PackageInstaller.STATUS_FAILURE)) {
+                                    PackageInstaller.STATUS_FAILURE_ABORTED -> "系统安装已取消，可以继续安装"
+                                    PackageInstaller.STATUS_FAILURE_BLOCKED -> "Android 安装策略已阻止此次更新"
+                                    PackageInstaller.STATUS_FAILURE_STORAGE -> "存储空间不足，请清理后重试"
+                                    PackageInstaller.STATUS_FAILURE_CONFLICT -> "APK 与手机上已装版本冲突，请核对安装签名"
+                                    PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "此 APK 与当前手机不兼容"
+                                    PackageInstaller.STATUS_FAILURE_INVALID -> "Android 判定 APK 无效，请重新检查更新"
+                                    else -> "Android 暂未完成安装，可手动重试"
+                                })
                             }
                         }
                     }
@@ -429,6 +541,8 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
         private const val NOW=712
     }
 }
+
+class AppUpdateFileProvider:FileProvider()
 
 private fun java.io.InputStream.readNBytesBounded(limit:Int):ByteArray {
     val result=java.io.ByteArrayOutputStream()

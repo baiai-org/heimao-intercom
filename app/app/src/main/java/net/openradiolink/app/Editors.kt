@@ -157,8 +157,14 @@ import java.util.Date
     var scanned by remember(p.id){mutableStateOf(JSONArray())}
     val context=LocalContext.current
     val currentHost=s.wifi.optString("host").trim().lowercase()
-    /* Always start empty: the operator must type the name, so a factory "heimao"
-     * or an old value can never be carried through with zero input. */
+    val publishedHost=if(s.wifi.has("mdns_host"))s.wifi.optString("mdns_host") else currentHost
+    val domainAddress=PanelDomain.address(publishedHost)
+    val boardIp=s.wifi.optString("ip").ifBlank{s.status.optJSONObject("wifi")?.optString("ip").orEmpty()}
+    val ipAddress=PanelDomain.ipAddress(boardIp)?.hostAddress
+    fun openPanel(address:String) {
+        runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(address)))}
+            .onFailure{manager.message("找不到可打开该地址的浏览器")}
+    }
     var domain by remember(p.id){mutableStateOf("")}
     var pendingSave by remember(p.id){mutableStateOf<(() -> Unit)?>(null)}
     var domainSaving by remember(p.id){mutableStateOf(false)}
@@ -190,9 +196,18 @@ import java.util.Date
         }
     }
     Section("管理面板访问域名") {
-        Text(if(currentHost.isBlank())"尚未设置。设好后，同一网络里的手机或电脑用 https://<域名>.local 打开管理面板。"
-            else if(currentHost=="heimao")"当前为出厂默认 ${PanelDomain.address(currentHost)}，建议改成容易记的名字。"
-            else "当前地址：${PanelDomain.address(currentHost)}",color=secondary,style=MaterialTheme.typography.bodySmall)
+        Text(if(currentHost.isBlank())"尚未设置局域网域名" else "已配置 ${currentHost}.local",
+            color=secondary,style=MaterialTheme.typography.bodySmall)
+        val published=s.connected && domainAddress.isNotBlank()
+        val status=when(s.wifi.optString("mdns_state")) {
+            "conflict" -> "配置名重名，当前发布 ${publishedHost}.local"
+            "pending" -> "域名正在发布"
+            "error" -> "域名发布异常，可用 IP 打开"
+            "offline" -> "等待手台连入局域网"
+            else -> if(published)"当前发布 ${publishedHost}.local" else ""
+        }
+        if(status.isNotBlank())Text(status,color=secondary,style=MaterialTheme.typography.bodySmall)
+        if(s.connected && ipAddress!=null)Text("当前 IP $ipAddress",color=secondary,style=MaterialTheme.typography.bodySmall)
         OutlinedTextField(domain,{domain=it},label={Text("域名（必填）")},
             placeholder={Text(if(currentHost.isBlank())"例如 heimao-u13" else "当前 ${currentHost}，改名请重新输入")},
             singleLine=true,isError=!domainOk,modifier=Modifier.fillMaxWidth(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
@@ -201,16 +216,14 @@ import java.util.Date
         Text("只用字母、数字和连字符，首尾须为字母或数字，最长 63 个；后缀 .local 由手台自动补上。",color=secondary,style=MaterialTheme.typography.bodySmall)
         FlowRow {
             Button(onClick={pendingSave={saveDomain()}},enabled=domainOk&&!domainSaving&&s.connected&&!s.maintenance){Text("保存域名")}
-            if(currentHost.isNotBlank())OutlinedButton(onClick={
-                runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(PanelDomain.address(currentHost))))}
-                    .onFailure{manager.message("找不到可打开该地址的浏览器")}
-            }){Text("打开管理面板")}
+            if(published)OutlinedButton(onClick={openPanel(domainAddress)}){Text("按域名打开")}
+            if(s.connected && ipAddress!=null)OutlinedButton(onClick={openPanel("https://$ipAddress/")}){Text("按 IP 打开")}
         }
     }
     pendingSave?.let{ action ->
         AlertDialog(onDismissRequest={pendingSave=null},
             title={Text("请确认局域网内没有重复域名")},
-            text={Text("同一局域网里，每台设备的管理面板域名必须唯一。请先自行检查现有设备是否已在使用 ${domainName}.local。\n\n如果重名：两台会互相抢占，地址会时好时坏，手台可能被自动改成 ${domainName}-2.local。")},
+            text={Text("请确认同一局域网内没有设备使用 ${domainName}.local。遇到重名时，请查看手台实际发布的域名。")},
             confirmButton={TextButton(enabled=!domainSaving,onClick={pendingSave=null;action()}){Text(if(domainSaving)"正在保存…" else "我已确认，继续")}},
             dismissButton={TextButton(onClick={pendingSave=null}){Text("取消")}})
     }

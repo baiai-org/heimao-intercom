@@ -2,6 +2,7 @@ package net.openradiolink.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +13,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -39,8 +43,26 @@ class AppUpdateActivity:ComponentActivity() {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun AppUpdatePage(radio:SessionView) {
     val context=LocalContext.current
-    val updater=(context.applicationContext as OrlApp).updater
+    val app=context.applicationContext as OrlApp
+    val updater=app.updater
     val state by updater.view.collectAsStateWithLifecycle()
+    val activity=LocalActivity.current
+    val lifecycle=LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(updater,activity,lifecycle) {
+        if(activity==null)return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            updater.installPermissionReturned()
+            updater.installPrompts.collect { prompt ->
+                if(prompt==null || !updater.takeInstallPrompt(prompt))return@collect
+                if(app.manager.updateBusy()) {
+                    updater.installLaunchFailed(prompt,blockedByCall=true)
+                } else {
+                    runCatching { activity.startActivity(prompt.intent) }
+                        .onFailure{updater.installLaunchFailed(prompt)}
+                }
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement=Arrangement.spacedBy(16.dp)) {
         Section("黑猫互联 APP") {
@@ -57,9 +79,12 @@ class AppUpdateActivity:ComponentActivity() {
                 OutlinedButton(onClick={updater.checkNow()},enabled=!state.busy){Text("检查 APP 更新")}
                 val asset=state.asset
                 if(state.ready && asset!=null && (!asset.force || state.systemConfirmation)) {
-                    Button(onClick={updater.install(context)},enabled=!radio.ptt && !radio.pttPending &&
-                        !radio.listening && !radio.maintenance) {
+                    val canStart=activity!=null && !radio.ptt && !radio.pttPending && !radio.listening && !radio.maintenance
+                    Button(onClick={updater.install()},enabled=canStart) {
                         Text(if(state.systemConfirmation)"继续安装" else "立即安装")
+                    }
+                    if(state.fileInstall)OutlinedButton(onClick={updater.install(viaFile=true)},enabled=canStart) {
+                        Text("使用兼容安装")
                     }
                     if(!asset.force && !state.systemConfirmation)TextButton(onClick={updater.later()}){Text("稍后")}
                 }

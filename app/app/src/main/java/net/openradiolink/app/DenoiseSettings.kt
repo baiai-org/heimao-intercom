@@ -12,11 +12,16 @@ internal data class DenoisePath(val setting:Int,val label:String) {
     val shift get()=(setting-1)*3
 }
 
-internal data class DenoiseSettings(val mode:Int,val levels:Int) {
+internal data class DenoiseSettings(val mode:Int,val levels:Int,val selectionLevel:DenoiseLevel?=null) {
     val paths get()=paths(mode)
     val localPaths get()=local
     val networkPaths get()=paths.filterNot(local::contains)
     fun level(path:DenoisePath)=DenoiseLevel.entries[(levels shr path.shift) and 7]
+    val selection get()=selectionLevel?.let { strength ->
+        DenoiseSelection(strength,allPaths.fold(0){mask,path->
+            if(level(path)!=DenoiseLevel.OFF)mask or (1 shl path.setting) else mask
+        })
+    }
 
     fun uniformLevel(group: List<DenoisePath>): DenoiseLevel? {
         val first = group.firstOrNull()?.let(::level) ?: return null
@@ -37,6 +42,12 @@ internal data class DenoiseSettings(val mode:Int,val levels:Int) {
             DenoisePath(first+2,"网络来话 → 模拟桥接"),
         )
         private val byMode=listOf(local,network(1,5),network(2,8))
+        val selectionGroups=listOf(
+            "本机收发 · 各模式共用" to local,
+            "公网直连" to byMode[1].filterNot(local::contains),
+            "MQTT 中继" to byMode[2].filterNot(local::contains),
+        )
+        val allPaths=selectionGroups.flatMap{it.second}
         fun paths(mode:Int)=byMode[mode]
 
         fun parse(body:JSONObject,expectedDevice:String):DenoiseSettings {
@@ -50,7 +61,12 @@ internal data class DenoiseSettings(val mode:Int,val levels:Int) {
             if((0..9).any{((levels shr (it*3)) and 7)>DenoiseLevel.EXTREME.ordinal}) {
                 throw IOException("手台降噪档位无效")
             }
-            return DenoiseSettings(mode,levels)
+            val selection=if(body.has("selection_level")) {
+                DenoiseLevel.entries[exactInt(body,"selection_level",4)].also {
+                    if(it==DenoiseLevel.OFF)throw IOException("手台降噪档位无效")
+                }
+            } else null
+            return DenoiseSettings(mode,levels,selection)
         }
 
         private fun exactInt(body:JSONObject,key:String,max:Int):Int {
@@ -67,12 +83,39 @@ internal data class DenoiseSettings(val mode:Int,val levels:Int) {
 internal class DenoiseUnsupported:IOException("五档降噪需要 r11-106 或更新的配套固件")
 internal data class DenoiseDraft(val expected:DenoiseLevel,val requested:DenoiseLevel)
 
-internal class DenoiseWrite(val mode:Int,val changes:Map<DenoisePath,DenoiseDraft>) {
+internal sealed interface DenoiseUpdate {
+    fun body():JSONObject
+    fun confirmed(settings:DenoiseSettings):Boolean
+}
+
+internal data class DenoiseSelection(val level:DenoiseLevel,val paths:Int) {
+    fun includes(path:DenoisePath)=paths and (1 shl path.setting)!=0
+
+    fun toggle(path:DenoisePath)=copy(paths=paths xor (1 shl path.setting))
+
+    fun matches(settings:DenoiseSettings):Boolean =
+        settings.selectionLevel==level && DenoiseSettings.allPaths.all { path ->
+            settings.level(path)==if(includes(path))level else DenoiseLevel.OFF
+        }
+}
+
+internal data class DenoiseSelectionWrite(
+    val selection:DenoiseSelection,
+    val expected:DenoiseSettings,
+):DenoiseUpdate {
+    override fun body()=JSONObject().put("selection_level",selection.level.ordinal)
+        .put("paths",selection.paths).put("expected_levels",expected.levels)
+        .put("expected_selection_level",checkNotNull(expected.selectionLevel).ordinal)
+
+    override fun confirmed(settings:DenoiseSettings)=selection.matches(settings)
+}
+
+internal class DenoiseWrite(val mode:Int,val changes:Map<DenoisePath,DenoiseDraft>):DenoiseUpdate {
     init {
         require(changes.isNotEmpty() && DenoiseSettings.paths(mode).containsAll(changes.keys))
     }
 
-    fun body():JSONObject {
+    override fun body():JSONObject {
         var mask=0
         var expected=0
         var levels=0
@@ -85,7 +128,7 @@ internal class DenoiseWrite(val mode:Int,val changes:Map<DenoisePath,DenoiseDraf
             .put("expected_levels",expected).put("levels",levels)
     }
 
-    fun confirmed(settings:DenoiseSettings)=changes.all{(path,draft)->settings.level(path)==draft.requested}
+    override fun confirmed(settings:DenoiseSettings)=changes.all{(path,draft)->settings.level(path)==draft.requested}
 }
 
 internal suspend fun BoardApi.readDenoise():DenoiseSettings {
@@ -100,7 +143,7 @@ internal suspend fun BoardApi.readDenoise():DenoiseSettings {
     return DenoiseSettings.parse(body,boundDevice)
 }
 
-internal suspend fun BoardApi.writeDenoise(write:DenoiseWrite):DenoiseSettings {
+internal suspend fun BoardApi.writeDenoise(write:DenoiseUpdate):DenoiseSettings {
     val boundDevice=deviceId
     check(boundDevice.isNotBlank()){ "当前手台尚未核对身份" }
     val saved=try {

@@ -36,6 +36,10 @@
         <service android:name=".AppUpdateCheckJob" android:exported="true"
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <receiver android:name=".AppUpdateInstallResult" android:exported="false" />
+        <provider android:name=".AppUpdateFileProvider" android:authorities="${applicationId}.update-files"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_file_paths" />
+        </provider>
         <service android:name=".SessionService" android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice|mediaPlayback|microphone" />

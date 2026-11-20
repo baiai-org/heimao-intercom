@@ -3,10 +3,12 @@
 package net.openradiolink.app
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +25,7 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
 
     var saved by remember(profile.id, device) { mutableStateOf<DenoiseSettings?>(null) }
     val drafts = remember(profile.id, device) { mutableStateMapOf<DenoisePath, DenoiseDraft>() }
+    var selectionDraft by remember(profile.id, device) { mutableStateOf<DenoiseSelectionWrite?>(null) }
     var advanced by remember(profile.id, device) { mutableStateOf(false) }
     var busy by remember(profile.id, device) { mutableStateOf(false) }
     var reading by remember(profile.id, device) { mutableStateOf(false) }
@@ -68,12 +71,18 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
         }
     }
 
-    fun save(write: DenoiseWrite) {
+    fun save(write: DenoiseUpdate) {
         if (busy) return
         busy = true
         ++epoch
         feedback = ""
         saveFailed = false
+        fun retainDraft() {
+            when (write) {
+                is DenoiseWrite -> drafts.putAll(write.changes)
+                is DenoiseSelectionWrite -> selectionDraft = write
+            }
+        }
         val job = manager.action(profile.id) {
             try {
                 check(api.deviceId == device) { "设备身份已变化，请重新连接" }
@@ -82,10 +91,16 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
                     saved = result
                     loadError = ""
                     val confirmed = write.confirmed(result)
-                    write.changes.forEach { (path, draft) ->
-                        val latest = result.level(path)
-                        if (latest == draft.requested) drafts.remove(path)
-                        else drafts[path] = draft.copy(expected = latest)
+                    when (write) {
+                        is DenoiseWrite -> write.changes.forEach { (path, draft) ->
+                            val latest = result.level(path)
+                            if (latest == draft.requested) drafts.remove(path)
+                            else drafts[path] = draft.copy(expected = latest)
+                        }
+                        is DenoiseSelectionWrite -> {
+                            selectionDraft = if (confirmed) null
+                                else if (result.selection != null) write.copy(expected = result) else write
+                        }
                     }
                     saveFailed = !confirmed
                     feedback = if (confirmed) "已保存，下一话段生效"
@@ -95,7 +110,7 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
                 throw error
             } catch (error: Exception) {
                 withContext(Dispatchers.Main) {
-                    drafts.putAll(write.changes)
+                    retainDraft()
                     saveFailed = true
                     feedback = error.message ?: "保存未确认，请重试"
                 }
@@ -104,7 +119,7 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
         }
         if (job == null) {
             busy = false
-            drafts.putAll(write.changes)
+            retainDraft()
             saveFailed = true
             feedback = "手台当前不可操作，请重试"
         } else {
@@ -123,7 +138,49 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
 
     Text("手台语音降噪", style = MaterialTheme.typography.titleSmall)
     val current = saved
-    if (current != null) {
+    val selection = current?.selection
+    if (current != null && selection != null) {
+        val editable = connected && !busy
+        val shown = selectionDraft?.selection ?: selection
+        val mixed = !selection.matches(current)
+        fun edit(value: DenoiseSelection) {
+            selectionDraft = if (value.matches(current)) null
+                else DenoiseSelectionWrite(value, selectionDraft?.expected ?: current)
+            feedback = ""
+        }
+        DenoiseLevelRow("降噪档位", shown.level, editable, DenoiseLevel.entries.drop(1)) {
+            edit(shown.copy(level = it))
+        }
+        if (mixed) Text("手台保存了不同的线路档位。保存后，已勾选的线路会统一使用所选档位。",
+            color = amber, style = MaterialTheme.typography.bodySmall)
+        for ((title, group) in DenoiseSettings.selectionGroups) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = secondary)
+            for (path in group) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .toggleable(value = shown.includes(path), enabled = editable, role = Role.Checkbox,
+                        onValueChange = { edit(shown.toggle(path)) }),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = shown.includes(path), onCheckedChange = null, enabled = editable,
+                        modifier = Modifier.padding(end = 8.dp).size(36.dp))
+                    Text(path.label)
+                }
+            }
+        }
+        if (shown.paths != 0 && shown.level == DenoiseLevel.EXTREME) {
+            Text("极强档可能削弱弱话音和尾音。", color = amber, style = MaterialTheme.typography.bodySmall)
+        }
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (feedback.isNotBlank()) Text(feedback, color = if (saveFailed) red else secondary)
+        if (selectionDraft != null && feedback.isBlank()) {
+            Text("有未保存的线路设置", color = amber, style = MaterialTheme.typography.bodySmall)
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { save(selectionDraft ?: DenoiseSelectionWrite(selection, current)) },
+                enabled = editable && (selectionDraft != null || mixed)) { Text("保存降噪设置") }
+            TextButton(onClick = { selectionDraft = null; feedback = "" },
+                enabled = editable && selectionDraft != null) { Text("撤销修改") }
+        }
+    } else if (current != null) {
         val editable = connected && !busy && (currentMode == null || current.mode == currentMode)
         val local = current.localPaths
         val localLevel = current.uniformLevel(local)
@@ -186,6 +243,7 @@ private fun DenoiseLevelRow(
     title: String,
     level: DenoiseLevel?,
     enabled: Boolean,
+    choices: List<DenoiseLevel> = DenoiseLevel.entries,
     change: (DenoiseLevel) -> Unit,
 ) {
     var expanded by remember(title) { mutableStateOf(false) }
@@ -201,7 +259,7 @@ private fun DenoiseLevelRow(
                 Text(level?.label ?: "分线路")
             }
             DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
-                DenoiseLevel.entries.forEach { choice ->
+                choices.forEach { choice ->
                     DropdownMenuItem(text = { Text(choice.label) }, onClick = { expanded = false; change(choice) })
                 }
             }

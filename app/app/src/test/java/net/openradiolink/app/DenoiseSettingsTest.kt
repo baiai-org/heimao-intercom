@@ -73,6 +73,24 @@ class DenoiseSettingsTest {
         assertThrows(IOException::class.java){DenoiseSettings.parse(state(0,0).put("levels",1.5),"board-A")}
     }
 
+    @Test fun wholeDeviceSelectionRetainsStrengthWhenEveryPathIsOff() {
+        val standard=(0..9).fold(0){packed,index->packed or (2 shl (3*index))}
+        val current=DenoiseSettings.parse(state(0,standard).put("selection_level",2),"board-A")
+        assertEquals(listOf(2,4,4),DenoiseSettings.selectionGroups.map{it.second.size})
+        assertEquals(0x7fe,current.selection?.paths)
+        val write=DenoiseSelectionWrite(DenoiseSelection(DenoiseLevel.EXTREME,0),current)
+        assertEquals(0,write.body().getInt("paths"))
+        assertEquals(2,write.body().getInt("expected_selection_level"))
+        assertEquals(standard,write.body().getInt("expected_levels"))
+        assertTrue(write.confirmed(DenoiseSettings.parse(state(2,0).put("selection_level",4),"board-A")))
+        assertFalse(write.confirmed(DenoiseSettings.parse(state(2,0).put("selection_level",2),"board-A")))
+        assertFalse(write.confirmed(DenoiseSettings.parse(state(2,1 shl 27).put("selection_level",4),"board-A")))
+        assertNull(DenoiseSettings.parse(state(0,0),"board-A").selection)
+        assertThrows(IOException::class.java) {
+            DenoiseSettings.parse(state(0,0).put("selection_level",0),"board-A")
+        }
+    }
+
     @Test fun uncertainSaveReadsBackOnceWithoutResending()=runBlocking {
         val server=MockWebServer();server.start()
         val api=BoardApi(AccessPoint(address=server.url("/proxy/").toString()))

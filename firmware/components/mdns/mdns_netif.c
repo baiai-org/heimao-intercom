@@ -175,6 +175,7 @@ static esp_err_t post_custom_action(mdns_if_t mdns_if, mdns_event_actions_t even
 
     if (!mdns_priv_queue_action(action)) {
         mdns_mem_free(action);
+        return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }

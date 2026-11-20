@@ -36,6 +36,7 @@ static const char *TAG = "wifi";
 #define EV_ASSOC BIT3
 #define EV_LOST_IP BIT4
 #define EV_AP_JOIN BIT5
+#define EV_MDNS BIT6
 
 typedef struct {
     wifi_profile_store_t store;
@@ -54,7 +55,7 @@ static uint32_t s_disc_count;
 static int s_disc_reason = -1;
 static int64_t s_disc_ms;
 static esp_netif_t *s_netif, *s_ap_netif;
-static bool s_started, s_connected, s_ap_on, s_mdns_up, s_storage_fault;
+static bool s_started, s_connected, s_ap_on, s_storage_fault;
 static bool s_debug_stop_pending, s_debug_radio_off;
 static bool s_scan_running, s_scan_requested, s_request_ap, s_request_disconnect;
 static bool s_scan_discard;
@@ -69,10 +70,57 @@ static char s_ip[16], s_ssid[33], s_hostname[64] = "orl", s_ap_ssid[33];
 static char s_state[24] = "off";
 static int s_rssi;
 static dns_server_handle_t s_dns;
+static net_wifi_panel_t s_panel;
+static bool s_mdns_dirty = true, s_mdns_syncing;
+static bool s_mdns_initialized, s_mdns_listener, s_mdns_http, s_mdns_service;
+static unsigned s_mdns_attempts;
+static bool s_mdns_announce;
+static int64_t s_mdns_retry_at;
+static char s_mdns_requested[64], s_mdns_effective[64];
+static esp_err_t s_mdns_error = ESP_ERR_INVALID_STATE;
 
 static int64_t wifi_now(void) { return esp_timer_get_time() / 1000; }
 static bool wifi_lock(void) { return s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(2000)) == pdTRUE; }
 static void wifi_unlock(void) { xSemaphoreGive(s_mutex); }
+
+static void update_panel_locked(void)
+{
+    net_wifi_panel_t panel = {0};
+    strcpy(panel.configured, s_hostname);
+    if (s_connected) {
+        strcpy(panel.ip, s_ip);
+        if (s_mdns_dirty || s_mdns_syncing) {
+            panel.mdns_state = NET_WIFI_MDNS_PENDING;
+        } else if (s_mdns_error != ESP_OK) {
+            panel.mdns_state = NET_WIFI_MDNS_ERROR;
+        } else {
+            strcpy(panel.advertised, s_mdns_effective);
+            panel.mdns_state = strcmp(panel.configured, panel.advertised)
+                ? NET_WIFI_MDNS_CONFLICT : NET_WIFI_MDNS_READY;
+        }
+    }
+    portENTER_CRITICAL(&s_event_mux);
+    s_panel = panel;
+    portEXIT_CRITICAL(&s_event_mux);
+}
+
+void net_wifi_panel_snapshot(net_wifi_panel_t *panel)
+{
+    portENTER_CRITICAL(&s_event_mux);
+    *panel = s_panel;
+    portEXIT_CRITICAL(&s_event_mux);
+}
+
+const char *net_wifi_mdns_state_name(net_wifi_mdns_state_t state)
+{
+    switch (state) {
+    case NET_WIFI_MDNS_PENDING: return "pending";
+    case NET_WIFI_MDNS_READY: return "ready";
+    case NET_WIFI_MDNS_CONFLICT: return "conflict";
+    case NET_WIFI_MDNS_ERROR: return "error";
+    default: return "offline";
+    }
+}
 
 /* No credentials are emitted by any JSON response. */
 static void wifi_escape(const char *in, char *out, size_t len)
@@ -102,9 +150,9 @@ static esp_err_t load_profiles(void)
     wifi_profile_store_t *store = &s_manager->store;
     store->version = 1; store->next_id = 1;
     const char *identity = device_identity_id();
-    /* Short factory name; the setup page forces the operator to pick their own
-     * domain before provisioning, so this one is only the pre-setup fallback. */
-    snprintf(s_hostname, sizeof(s_hostname), "heimao");
+    char factory_name[64];
+    snprintf(factory_name, sizeof(factory_name), "heimao-%s", identity + strlen("orl-"));
+    strcpy(s_hostname, factory_name);
     strcpy(store->hostname, s_hostname);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS_NET, NVS_READONLY, &h);
@@ -112,7 +160,7 @@ static esp_err_t load_profiles(void)
     if (err != ESP_OK) { return err; }
     size_t len = sizeof(s_hostname);
     const bool legacy_host = nvs_get_str(h, "whost", s_hostname, &len) == ESP_OK;
-    if (!legacy_host) { snprintf(s_hostname, sizeof(s_hostname), "heimao"); }
+    if (!legacy_host) { strcpy(s_hostname, factory_name); }
     len = sizeof(*store);
     err = nvs_get_blob(h, NVS_KEY_PROFILES, store, &len);
     if (err == ESP_OK) {
@@ -141,30 +189,96 @@ static esp_err_t load_profiles(void)
     return err;
 }
 
-static void start_mdns(void)
+static void signal_wifi(uint32_t bits)
 {
-    if (s_mdns_up) { return; }
-    if (mdns_init() != ESP_OK) { return; }
-    mdns_hostname_set(s_hostname);
-    mdns_instance_name_set(HM_DEVICE_NAME);
-    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    mdns_txt_item_t txt[] = {{"device_id", device_identity_id()}, {"api", "2"}, {"https", "443"},
-        {"project", HM_PROJECT_NAME}, {"device_name", HM_DEVICE_NAME}};
+    portENTER_CRITICAL(&s_event_mux);
+    s_pending_events |= bits;
+    portEXIT_CRITICAL(&s_event_mux);
+    if (s_worker) { xTaskNotifyGive(s_worker); }
+}
+
+static void mdns_name_changed(const char *hostname, void *arg)
+{
+    (void)hostname;
+    (void)arg;
+    /* Runs under the mDNS component lock. The Wi-Fi worker reads the name. */
+    signal_wifi(EV_MDNS);
+}
+
+static esp_err_t register_mdns(const char *requested)
+{
+    esp_err_t err;
+    if (!s_mdns_initialized) {
+        if ((err = mdns_init()) != ESP_OK) { return err; }
+        s_mdns_initialized = true;
+    }
+    if (!s_mdns_listener) {
+        err = mdns_register_hostname_changed_callback(mdns_name_changed, NULL);
+        if (err != ESP_OK) { return err; }
+        s_mdns_listener = true;
+    }
+    if (strcmp(s_mdns_requested, requested)) {
+        if ((err = mdns_hostname_set(requested)) != ESP_OK) { return err; }
+        strcpy(s_mdns_requested, requested);
+    }
     char display[64];
     const char *id = device_identity_id();
     snprintf(display, sizeof(display), HM_DEVICE_NAME "-%s", id + strlen(id) - 6);
-    mdns_service_add(display, "_openradiolink", "_tcp", 80, txt, 5);
-    s_mdns_up = true;
-    net_wifi_name_changed();
+    if (!s_mdns_http) {
+        err = mdns_service_add(display, "_http", "_tcp", 80, NULL, 0);
+        if (err != ESP_OK) { return err; }
+        s_mdns_http = true;
+    }
+    device_name_t name;
+    device_name_get(&name);
+    if (s_mdns_service) {
+        return mdns_service_txt_item_set("_openradiolink", "_tcp", "custom_name", name.name);
+    }
+    mdns_txt_item_t txt[] = {{"device_id", device_identity_id()}, {"api", "2"}, {"https", "443"},
+        {"project", HM_PROJECT_NAME}, {"device_name", HM_DEVICE_NAME}, {"custom_name", name.name}};
+    err = mdns_service_add(display, "_openradiolink", "_tcp", 80, txt, sizeof(txt) / sizeof(txt[0]));
+    s_mdns_service = err == ESP_OK;
+    return err;
 }
 
 void net_wifi_name_changed(void)
 {
-    device_name_t name; device_name_get(&name);
-    if (s_mdns_up) {
-        (void)mdns_service_txt_item_set("_openradiolink", "_tcp", "custom_name", name.name);
+    signal_wifi(EV_MDNS);
+}
+
+static void sync_mdns(const char *requested, bool online, bool changed, int64_t now)
+{
+    static const int64_t retry_delay[] = {2000, 6000, 15000};
+    if (changed) {
+        s_mdns_attempts = 0;
+        s_mdns_retry_at = now;
     }
-    /* Worker advertises to phone gateways every ten seconds. */
+    if (now < s_mdns_retry_at) { return; }
+    esp_err_t err = register_mdns(requested);
+    if (err == ESP_OK && online && s_mdns_announce) {
+        /* Republish both address families after an accepted STA address change. */
+        err = mdns_netif_action(s_netif, MDNS_EVENT_ANNOUNCE_IP4 | MDNS_EVENT_ANNOUNCE_IP6);
+        if (err == ESP_OK) { s_mdns_announce = false; }
+    }
+    char effective[64] = "";
+    if (err == ESP_OK) { err = mdns_hostname_get(effective); }
+    if (err == ESP_OK || s_mdns_attempts >= sizeof(retry_delay) / sizeof(retry_delay[0])) {
+        s_mdns_retry_at = INT64_MAX;
+    } else {
+        s_mdns_retry_at = now + retry_delay[s_mdns_attempts++];
+    }
+    if (err != ESP_OK) { ESP_LOGW(TAG, "mDNS registration: %s", esp_err_to_name(err)); }
+    if (wifi_lock()) {
+        if (!strcmp(requested, s_hostname) && !s_mdns_dirty) {
+            s_mdns_syncing = false;
+            strcpy(s_mdns_effective, effective);
+            s_mdns_error = err;
+            update_panel_locked();
+        }
+        wifi_unlock();
+    } else {
+        s_mdns_retry_at = now + retry_delay[0];
+    }
 }
 
 static void ip6_ensure_linklocal(void)
@@ -191,10 +305,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) { bits = EV_IP; }
     if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) { bits = EV_LOST_IP; }
-    portENTER_CRITICAL(&s_event_mux);
-    s_pending_events |= bits;
-    portEXIT_CRITICAL(&s_event_mux);
-    if (s_worker) { xTaskNotifyGive(s_worker); }
+    if (bits) { signal_wifi(bits); }
 }
 
 static void ap_stop(void)
@@ -450,8 +561,21 @@ static void wifi_worker(void *arg)
                 s_scan_running = true; s_scan_requested = false; s_scan_discard = false; s_scan_until = wifi_now() + 5000;
             }
         }
-        manager_step(events, wifi_now());
+        char previous_ip[sizeof(s_ip)];
+        strcpy(previous_ip, s_ip);
+        const int64_t now = wifi_now();
+        manager_step(events, now);
+        const bool address_changed = strcmp(previous_ip, s_ip) != 0;
+        const bool changed = s_mdns_dirty || address_changed || (events & (EV_IP | EV_MDNS));
+        const bool online = s_connected;
+        char requested[sizeof(s_hostname)];
+        strcpy(requested, s_hostname);
+        if (address_changed) { s_mdns_announce = online; }
+        if (changed) { s_mdns_syncing = true; }
+        update_panel_locked();
+        s_mdns_dirty = false;
         wifi_unlock();
+        sync_mdns(requested, online, changed, now);
     }
 }
 
@@ -486,7 +610,8 @@ esp_err_t net_wifi_start(void)
     device_identity_init();
     uint8_t mac[6]; ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_AP, mac));
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), HM_SETUP_PREFIX "%02X%02X%02X", mac[3], mac[4], mac[5]);
-    start_mdns();
+    s_mdns_initialized = mdns_init() == ESP_OK;
+    update_panel_locked();
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     s_started = true; s_scan_requested = true;
@@ -543,9 +668,11 @@ esp_err_t net_wifi_profile_save(uint32_t *id, const char *ssid, const char *pass
         s_manager->store = next; *id = p->id;
         memset(&s_manager->policy.candidates[index], 0, sizeof(wifi_candidate_t));
         s_manager->policy.candidates[index].rssi = -128;
-        if (*normalized) {
+        if (*normalized && (strcmp(s_hostname, normalized) || s_mdns_error != ESP_OK)) {
             strcpy(s_hostname, normalized);
-            if (s_mdns_up) { (void)mdns_hostname_set(s_hostname); }
+            s_mdns_dirty = true;
+            update_panel_locked();
+            signal_wifi(EV_MDNS);
         }
         s_next_scan = 0;
     }
@@ -655,7 +782,6 @@ void net_wifi_setup_ap_stop(void)
 bool net_wifi_setup_ap_active(void) { return s_ap_on; }
 const char *net_wifi_setup_ssid(void) { return s_ap_ssid; }
 const char *net_wifi_ap_ip(void) { return s_ap_on ? "192.168.4.1" : ""; }
-const char *net_wifi_hostname(void) { return s_hostname; }
 bool net_wifi_connected(void) { return s_connected; }
 const char *net_wifi_ip(void) { return s_ip; }
 
@@ -694,11 +820,17 @@ esp_err_t net_wifi_profiles_json(char *out, size_t len)
     uint32_t active = p->active >= 0 ? s_manager->store.profiles[p->active].id : 0;
     if (p->active >= 0 && strcmp(s_manager->store.profiles[p->active].ssid, s_ssid)) { active = 0; }
     char current_ssid[200]; wifi_escape(s_ssid, current_ssid, sizeof(current_ssid));
-    char host_esc[200]; wifi_escape(s_hostname, host_esc, sizeof(host_esc));
+    net_wifi_panel_t panel;
+    net_wifi_panel_snapshot(&panel);
+    char host_esc[200], advertised_esc[200];
+    wifi_escape(panel.configured, host_esc, sizeof(host_esc));
+    wifi_escape(panel.advertised, advertised_esc, sizeof(advertised_esc));
     size_t o = (size_t)snprintf(out, len,
-        "{\"state\":\"%s\",\"ssid\":\"%s\",\"host\":\"%s\",\"connected\":%s,\"active_id\":%lu,\"pending_id\":%lu,\"ap\":%s,"
+        "{\"state\":\"%s\",\"ssid\":\"%s\",\"host\":\"%s\",\"mdns_host\":\"%s\",\"mdns_state\":\"%s\",\"ip\":\"%s\","
+        "\"connected\":%s,\"active_id\":%lu,\"pending_id\":%lu,\"ap\":%s,"
         "\"setup_hold_ms\":%lld,\"offline_ms\":%lld,\"scan_running\":%s,\"scan_age_ms\":%lld,\"storage_error\":%s,\"limit\":%d,\"profiles\":[",
-        s_state, current_ssid, host_esc, s_connected ? "true" : "false", (unsigned long)active, (unsigned long)s_apply_id,
+        s_state, current_ssid, host_esc, advertised_esc, net_wifi_mdns_state_name(panel.mdns_state), panel.ip,
+        s_connected ? "true" : "false", (unsigned long)active, (unsigned long)s_apply_id,
         s_ap_on ? "true" : "false", s_ap_on && s_setup_until > now ? (long long)(s_setup_until-now) : 0LL,
         p->offline_since < 0 ? 0LL : (long long)(now-p->offline_since),
         s_scan_running || s_scan_requested ? "true" : "false", s_last_scan < 0 ? -1LL : (long long)(now-s_last_scan),

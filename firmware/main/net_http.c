@@ -560,9 +560,23 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         const cJSON *levels = cJSON_GetObjectItemCaseSensitive(body, "levels");
         const cJSON *expected_levels = cJSON_GetObjectItemCaseSensitive(body, "expected_levels");
         const cJSON *legacy_values = cJSON_GetObjectItemCaseSensitive(body, "values");
+        const cJSON *selection = cJSON_GetObjectItemCaseSensitive(body, "selection_level");
+        const cJSON *expected_selection = cJSON_GetObjectItemCaseSensitive(body, "expected_selection_level");
+        const cJSON *paths = cJSON_GetObjectItemCaseSensitive(body, "paths");
         uint32_t m, bits, before, values;
         esp_err_t err = ESP_ERR_INVALID_ARG;
-        if (mask && denoise_number(mode, NETCOM_MODE_MAX, &m) &&
+        if (selection || expected_selection || paths) {
+            uint32_t previous_level;
+            if (!mode && !mask && !enabled && !expected && !legacy_values && !levels &&
+                denoise_number(selection, RF_DENOISE_LEVEL_EXTREME, &m) &&
+                denoise_number(expected_selection, RF_DENOISE_LEVEL_EXTREME, &previous_level) &&
+                denoise_number(paths, DENOISE_CONFIG_MASK, &bits) &&
+                denoise_number(expected_levels, DENOISE_LEVELS_MAX, &before)) {
+                err = bridge_denoise_save_selection(m, bits, (bridge_denoise_config_t){
+                    .levels = before, .selection_level = previous_level,
+                });
+            }
+        } else if (mask && denoise_number(mode, NETCOM_MODE_MAX, &m) &&
             denoise_number(mask, DENOISE_CONFIG_MASK, &bits)) {
             if (levels || expected_levels) {
                 if (!expected && !enabled && !legacy_values &&
@@ -591,10 +605,11 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         }
     }
     rf_denoise_stats_t stats, speaker, handset;
-    uint32_t levels;
+    const bridge_denoise_config_t config = bridge_denoise_config();
+    const uint32_t levels = config.levels;
     uint8_t active_mode;
     const uint8_t mode = netcom_mode();
-    bridge_denoise_status(mode, &levels, &active_mode, &stats);
+    bridge_denoise_status(mode, levels, &active_mode, &stats);
     const uint32_t flags = bridge_denoise_flags(levels);
     const bool speaker_on = (flags & (1u << DENOISE_SETTING_SPEAKER)) != 0;
     const bool handset_on = (flags & (1u << DENOISE_SETTING_HANDSET_TX)) != 0;
@@ -606,14 +621,15 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
     const int root = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
-        "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
+        "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"selection_level\":%u,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
         "\"speaker\":%s,\"handset\":%s,"
         "\"i2s\":{\"receive_stalls\":%lu,\"short_writes\":%lu,\"errors\":%lu}",
         device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
         (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
         (unsigned long)stats.overruns, (unsigned long)stats.workspace_bytes,
-        (unsigned)mode, (unsigned long)flags, (unsigned long)levels, netcom_rf_tx() ? "true" : "false",
+        (unsigned)mode, (unsigned long)flags, (unsigned long)levels, (unsigned)config.selection_level,
+        netcom_rf_tx() ? "true" : "false",
         bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
         (unsigned long)i2s.receive_queue_stalls, (unsigned long)i2s.short_writes, (unsigned long)i2s.errors);
@@ -1051,10 +1067,12 @@ static esp_err_t h_index(httpd_req_t *req)
      * APP, the fleet scripts and the provisioning flow speak HTTP, and the AP
      * setup form must work before any certificate has been accepted. Only
      * redirect once TLS is actually listening, or the panel would vanish. */
+    net_wifi_panel_t panel;
+    net_wifi_panel_snapshot(&panel);
     char host[96], location[64];
     if (req->user_ctx == NULL && s_https_ready &&
         net_wifi_connected() && !net_wifi_setup_ap_active() &&
-        panel_https_location(net_wifi_ip(), location, sizeof(location))) {
+        panel_https_location(panel.ip, location, sizeof(location))) {
         httpd_resp_set_status(req, "302 Found");
         httpd_resp_set_hdr(req, "Cache-Control", "no-store");
         httpd_resp_set_hdr(req, "Location", location);
@@ -1068,7 +1086,7 @@ static esp_err_t h_index(httpd_req_t *req)
      */
     if (net_wifi_connected() && !net_wifi_setup_ap_active() &&
         httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) == ESP_OK &&
-        panel_address_location(host, net_wifi_hostname(), net_wifi_ip(),
+        panel_address_location(host, panel.advertised, panel.ip,
                                req->user_ctx != NULL, location, sizeof(location))) {
         httpd_resp_set_status(req, "302 Found");
         httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -1624,13 +1642,16 @@ static esp_err_t h_status(httpd_req_t *req)
                      sizeof(br_chan_name), NULL);
     }
 
-    char esc_ssid[100], esc_ap_ssid[100], esc_host[100];
+    char esc_ssid[100], esc_ap_ssid[100], esc_host[100], esc_mdns_host[100];
     char esc_broker[80], esc_diag[256], esc_br_name[80], esc_user[80];
     json_escape_str(net_wifi_ssid(), esc_ssid, sizeof(esc_ssid));
     char ip6all[192] = "[]";
     (void)net_wifi_ip6_json(ip6all, sizeof(ip6all));
     json_escape_str(net_wifi_setup_ssid(), esc_ap_ssid, sizeof(esc_ap_ssid));
-    json_escape_str(net_wifi_hostname(), esc_host, sizeof(esc_host));
+    net_wifi_panel_t panel;
+    net_wifi_panel_snapshot(&panel);
+    json_escape_str(panel.configured, esc_host, sizeof(esc_host));
+    json_escape_str(panel.advertised, esc_mdns_host, sizeof(esc_mdns_host));
     uint32_t wifi_disc = 0;
     int wifi_disc_reason = -1;
     int64_t wifi_disc_age = -1;
@@ -1664,7 +1685,7 @@ static esp_err_t h_status(httpd_req_t *req)
         "\"wifi\":{\"connected\":%s,\"ip\":\"%s\",\"ip6\":\"%s\",\"ip6all\":%s,\"ssid\":\"%s\","
         "\"state\":\"%s\",\"rssi\":%d,"
         "\"disc\":%u,\"disc_reason\":%d,\"disc_age_s\":%lld,"
-        "\"ap\":%s,\"ap_ip\":\"%s\",\"ap_ssid\":\"%s\",\"host\":\"%s\"},"
+        "\"ap\":%s,\"ap_ip\":\"%s\",\"ap_ssid\":\"%s\",\"host\":\"%s\",\"mdns_host\":\"%s\",\"mdns_state\":\"%s\"},"
         "\"mode\":\"%s\",\"ptt\":\"%s\",\"rssi\":%d,\"peak\":%d,"
         "\"sql_open\":%s,\"mod_sq\":%s,"
         "\"eq_spk\":[%d,%d,%d,%d,%d,%d],\"eq_mic\":[%d,%d,%d,%d,%d,%d],"
@@ -1697,12 +1718,12 @@ static esp_err_t h_status(httpd_req_t *req)
         app->version, app->date, app->time, app_sha,
         reset_reason_name(),
         net_wifi_connected() ? "true" : "false",
-        net_wifi_ip(), net_wifi_ip6(), ip6all, esc_ssid, net_wifi_state_name(),
+        panel.ip, net_wifi_ip6(), ip6all, esc_ssid, net_wifi_state_name(),
         net_wifi_rssi_dbm(),
         (unsigned)wifi_disc, wifi_disc_reason, (long long)(wifi_disc_age / 1000),
         net_wifi_setup_ap_active() ? "true" : "false",
         net_wifi_ap_ip(), esc_ap_ssid,
-        esc_host,
+        esc_host, esc_mdns_host, net_wifi_mdns_state_name(panel.mdns_state),
         voice_mode_name(), ptt_state_name(),
         st ? st->rssi : -1,
         voice_get_squelch_peak(),

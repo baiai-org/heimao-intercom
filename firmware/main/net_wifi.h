@@ -29,7 +29,7 @@ esp_err_t net_wifi_debug_radio_off_schedule(void);
 
 /* Store credentials and (re)connect.  Passing an empty ssid clears them.
  * `host` is the mDNS name the panel is published as (without ".local");
- * NULL or empty keeps the current name (default "orl").  With several boards
+ * NULL or empty keeps the current name. With several boards
  * on one LAN each needs its own name or the .local address is ambiguous. */
 esp_err_t net_wifi_set_credentials(const char *ssid, const char *password,
                                    const char *host);
@@ -93,7 +93,23 @@ int net_wifi_ip6_json(char *out, size_t out_len);
 /* Log the IPv6 state of the STA interface (esp_netif + lwIP). */
 void net_wifi_ip6_debug(const char *why);        /* dotted quad, or "" */
 const char *net_wifi_ssid(void);
-const char *net_wifi_hostname(void);  /* mDNS name without ".local", e.g. "orl" */
+typedef enum {
+    NET_WIFI_MDNS_OFFLINE,
+    NET_WIFI_MDNS_PENDING,
+    NET_WIFI_MDNS_READY,
+    NET_WIFI_MDNS_CONFLICT,
+    NET_WIFI_MDNS_ERROR,
+} net_wifi_mdns_state_t;
+
+typedef struct {
+    char configured[64];
+    char advertised[64];
+    char ip[16];
+    net_wifi_mdns_state_t mdns_state;
+} net_wifi_panel_t;
+
+void net_wifi_panel_snapshot(net_wifi_panel_t *panel);
+const char *net_wifi_mdns_state_name(net_wifi_mdns_state_t state);
 void net_wifi_name_changed(void);
 int         net_wifi_rssi_dbm(void);  /* 0 when not connected */
 const char *net_wifi_state_name(void);
