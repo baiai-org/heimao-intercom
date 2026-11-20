@@ -6,6 +6,7 @@
   const feedback = $('eqPresetFeedback');
   const endpoint = '/api/eq_presets';
   let saved = null, editing = null, loading = false, busy = false, checkedAt = 0, epoch = 0;
+  let openMenu = null;
 
   const equal = (a, b) => a.length === b.length && a.every((n, i) => n === b[i]);
   const bands = (a, max = 6) => Array.isArray(a) && a.length === 6 &&
@@ -26,34 +27,102 @@
     return raw;
   }
 
+  function actionButton(label, handler) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', handler);
+    return button;
+  }
+
+  function closeMenu(returnFocus = false) {
+    if (!openMenu) { return; }
+    const {menu, more} = openMenu;
+    openMenu = null;
+    menu.hidden = true;
+    more.setAttribute('aria-expanded', 'false');
+    if (returnFocus) { more.focus(); }
+  }
+
+  function placeMenu(menu, more) {
+    const anchor = more.getBoundingClientRect();
+    const footer = document.querySelector(document.body.dataset.panelLayout === 'simple' ? '.panel-nav' : '.mobile-dock');
+    const bottom = footer?.offsetHeight && getComputedStyle(footer).position === 'fixed'
+      ? footer.getBoundingClientRect().top : window.innerHeight;
+    const headerBottom = Math.max(0, document.querySelector('.topbar').getBoundingClientRect().bottom);
+    const below = bottom - anchor.bottom - 4;
+    const above = anchor.top - headerBottom - 4;
+    menu.style.maxHeight = '';
+    const opensAbove = menu.offsetHeight > below && above > below;
+    menu.classList.toggle('opens-above', opensAbove);
+    menu.style.maxHeight = Math.max(0, opensAbove ? above : below) + 'px';
+  }
+
   const rows = [1, 2, 3].map(slot => {
     const row = document.createElement('div');
     row.className = 'eq-user-slot'; row.dataset.slot = slot;
     const title = document.createElement('strong');
     const actions = document.createElement('div'); actions.className = 'eq-user-actions';
-    const buttons = [
-      ['保存当前 EQ', () => beginEdit(slot, 'save')],
-      ['应用', () => change(slot, 'apply')],
+    const menu = document.createElement('div');
+    menu.className = 'eq-user-menu';
+    menu.id = 'eqSlotMenu' + slot;
+    menu.hidden = true;
+    const menuName = document.createElement('span');
+    menu.append(menuName);
+    const save = actionButton('保存', () => beginEdit(slot, 'save'));
+    const apply = actionButton('应用', () => change(slot, 'apply'));
+    const more = actionButton('⋯', () => {
+      const wasOpen = openMenu?.more === more;
+      closeMenu();
+      if (wasOpen) { return; }
+      openMenu = {menu, more};
+      menu.hidden = false;
+      placeMenu(menu, more);
+      more.setAttribute('aria-expanded', 'true');
+    });
+    more.className = 'eq-user-more';
+    more.setAttribute('aria-label', '槽位 ' + slot + ' 更多操作');
+    more.setAttribute('aria-controls', menu.id);
+    more.setAttribute('aria-expanded', 'false');
+    const menuButtons = [
       ['重命名', () => beginEdit(slot, 'rename')],
       ['覆盖', () => beginEdit(slot, 'save')],
       ['删除', () => change(slot, 'delete')]
-    ].map(([label, handler]) => {
-      const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
-      b.addEventListener('click', handler); actions.append(b); return b;
-    });
+    ].map(([label, handler]) => actionButton(label, () => {
+      closeMenu(true);
+      handler();
+    }));
+    menu.append(...menuButtons);
+    actions.append(save, apply, more, menu);
     row.append(title, actions); $('eqPresetList').append(row);
-    return {slot, title, buttons};
+    return {slot, title, save, apply, more, menuName, menuButtons};
   });
 
+  document.addEventListener('click', event => {
+    if (openMenu && !openMenu.more.contains(event.target) && !openMenu.menu.contains(event.target)) { closeMenu(); }
+  });
+  document.addEventListener('keydown', event => {
+    if (openMenu && event.key === 'Escape') {
+      event.preventDefault();
+      closeMenu(true);
+    }
+  });
+  window.addEventListener('resize', () => closeMenu());
+
   function render() {
-    for (const {slot,title,buttons} of rows) {
+    const available = Boolean(saved) && !busy && !editing;
+    for (const {slot,title,save,apply,more,menuName,menuButtons} of rows) {
       const item = saved?.slots[slot - 1];
       const text = '槽位 ' + slot + (item ? ' · ' + item.name : saved ? ' · 空槽' : '');
-      if (title.textContent !== text) { title.textContent = text; }
-      buttons.forEach((button, i) => {
-        button.hidden = i === 0 ? Boolean(item) : !item;
-        button.disabled = !saved || busy || Boolean(editing);
-      });
+      if (title.textContent !== text) {
+        title.textContent = text;
+        title.title = text;
+        menuName.textContent = item?.name || '';
+      }
+      save.hidden = Boolean(item);
+      apply.hidden = more.hidden = !item;
+      for (const button of [save, apply, more, ...menuButtons]) { button.disabled = !available; }
+      if ((!available || !item) && openMenu?.more === more) { closeMenu(); }
     }
     $('eqPresetSubmit').disabled = busy || !saved;
     $('eqPresetCancel').disabled = busy;

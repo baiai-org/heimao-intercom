@@ -42,7 +42,6 @@
 .relay-state[data-kind="connected"] { color: #6ee7b7; background: #0b2927; border-color: #25866c; }
 .relay-state[data-kind="waiting"] { color: #fde68a; background: #312407; border-color: #92610f; }
 .relay-state[data-kind="down"] { color: #fecdd3; background: #321724; border-color: #a83e57; }
-#ixSeg .relay-state { margin-top: 5px; padding: 4px 6px; font-size: 12px; }
 #relayTalkState { margin-bottom: 10px; }
 .panel-clock {
   display: grid; justify-items: center; gap: 12px; width: 100%;
@@ -70,14 +69,20 @@
 .clock-colon::before,.clock-colon::after { content: ""; width: 6px; height: 6px; border-radius: 1px; background: #80f7ed; }
 .clock-zone { color: var(--fg-2); display: flex; gap: 8px; align-items: center; }
 .clock-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.eq-user-presets { display: grid; gap: 8px; margin-top: 14px; }
-.eq-user-slot { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
-  padding:9px 10px; border:1px solid var(--line); border-radius:8px; }
-.eq-user-slot strong { min-width:0; overflow-wrap:anywhere; }
-.eq-user-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.eq-user-presets { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 14px; }
+.eq-user-slot { display:flex; align-items:center; gap:6px;
+  padding:4px 8px; border:1px solid var(--line); border-radius:8px; }
+.eq-user-slot strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.eq-user-actions { position:relative; display:flex; flex:none; gap:4px; white-space:nowrap; }
 .eq-user-actions button { min-height:36px; }
+.eq-user-actions .eq-user-more { width:40px; padding:0; font-size:18px; }
+.eq-user-menu { position:absolute; z-index:12; top:calc(100% + 4px); right:0; width:164px;
+  display:grid; gap:4px; padding:6px; border:1px solid var(--line-hi); border-radius:8px;
+  background:var(--bg-2); overflow-y:auto; }
+.eq-user-menu.opens-above { top:auto; bottom:calc(100% + 4px); }
+.eq-user-menu span { padding:4px; color:var(--fg-2); white-space:normal; overflow-wrap:anywhere; }
+.eq-user-menu button { text-align:left; }
 #eqPresetForm { margin: 0; }
-#eqPresetForm[hidden], .eq-user-actions button[hidden] { display: none; }
 html, body {
   margin: 0;
   padding: 0;
@@ -1675,7 +1680,6 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <button type="button" data-m="2">
             <span class="m-code">MODE 02 · EMQX</span>
             <span class="m-title">网络中继</span>
-            <span class="relay-state" id="relayModeState">读取中…</span>
           </button>
         </div>
       </div>
@@ -2464,13 +2468,13 @@ function relayBadge(s, forced) {
 }
 function renderRelay(s, forced) {
   const badge = relayBadge(s, forced);
-  for (const id of ['relayModeState','relayTalkState','relayStageState']) {
+  const label = badge.reason ? badge.title + ' · ' + badge.reason : badge.title;
+  for (const id of ['relayTalkState','relayStageState']) {
     const el = $(id);
-    const label = id === 'relayModeState' || !badge.reason ? badge.title : badge.title + ' · ' + badge.reason;
     if (el.textContent !== label) { el.textContent = label; }
     el.dataset.kind = badge.kind;
-    if (id === 'relayTalkState') { el.hidden = s?.intercom?.mode !== 2; }
   }
+  $('relayTalkState').hidden = s?.intercom?.mode !== 2;
 }
 
 const clockZone = $('panelClockZone');

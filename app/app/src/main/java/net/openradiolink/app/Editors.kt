@@ -278,7 +278,6 @@ import java.util.Date
     val active=s.status.value("intercom.mode").toIntOrNull() ?: 0
     val state=s.status.value("intercom.state")
     val peers=s.status.optJSONObject("intercom")?.optInt("peers",0) ?: 0
-    val relay=NetworkModes.relayStatus(s.status,s.activity.live(s.live),s.connected)
     var switching by remember(p.id){mutableStateOf(false)}
     fun switchTo(mode:Int) {
         if(switching || mode==active || !s.connected || s.maintenance) return
@@ -292,10 +291,9 @@ import java.util.Date
     Section("工作模式") {
         NetworkModes.cards.forEachIndexed{i,card->
             if(i>0)Spacer(Modifier.height(8.dp))
-            val (label,linked)=if(card.mode==2) "" to false else NetworkModes.status(card.mode,active,state,peers)
+            val (label,linked)=if(card.mode==2) null to false else NetworkModes.status(card.mode,active,state,peers)
             ModeCard(card.title,card.hint,label,linked,NetworkModes.isCurrent(card.mode,active),
-                enabled=s.connected&&!s.maintenance&&!switching,accent=accents[i],
-                relay=relay.takeIf{card.mode==2}){switchTo(card.mode)}
+                enabled=s.connected&&!s.maintenance&&!switching,accent=accents[i]){switchTo(card.mode)}
         }
         Spacer(Modifier.height(4.dp))
         Text(if(switching)"正在切换工作模式…" else "切换模式会重建网络语音通道；正在发话时请先松开 PTT。",
@@ -326,11 +324,12 @@ import java.util.Date
             }
         }
         else -> Section("网络中继") {
+            RelayStatusBanner(NetworkModes.relayStatus(s.status,s.activity.live(s.live),s.connected))
             Parameter(manager,p,s,"ix_broker","服务器 / 域名与端口",s.status.value("intercom.broker"))
             Parameter(manager,p,s,"ix_user","用户名",s.status.value("intercom.user"))
             Parameter(manager,p,s,"ix_pass","密码",if(s.status.value("intercom.pass")=="1")"已设置" else "",secret=true)
             TextButton(onClick={confirm("清除手台保存的中继密码？",{manager.action(p.id){set("ix_pass","")}})}){Text("清除已保存密码")}
-            Text("服务器地址与账号由你自行维护；连接状态见上方卡片。",color=secondary,style=MaterialTheme.typography.bodySmall)
+            Text("服务器地址与账号由你自行维护。",color=secondary,style=MaterialTheme.typography.bodySmall)
         }
     }
     if(active!=0) {
@@ -537,8 +536,8 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
     }
 }
 
-@Composable private fun ModeCard(title:String,hint:String,status:String,linked:Boolean,current:Boolean,enabled:Boolean,accent:Color,
-    relay:NetworkModes.RelayStatus?,click:()->Unit) {
+@Composable private fun ModeCard(title:String,hint:String,status:String?,linked:Boolean,current:Boolean,enabled:Boolean,accent:Color,
+    click:()->Unit) {
     /* accent is the mode color (local green / P2P purple / relay amber) the web
      * panel paints its mode buttons with; it borders and badges the active card. */
     Surface(color=if(current)MaterialTheme.colorScheme.primaryContainer else panel,shape=RoundedCornerShape(18.dp),
@@ -554,7 +553,7 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
                 }
             }
             Text(hint,color=secondary,style=MaterialTheme.typography.bodySmall)
-            if(relay!=null)RelayStatusBanner(relay) else Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+            if(status!=null)Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                 Box(Modifier.size(8.dp).background(if(linked)green else MaterialTheme.colorScheme.outline,CircleShape))
                 Text(status,color=if(linked)green else secondary,style=MaterialTheme.typography.bodySmall)
             }

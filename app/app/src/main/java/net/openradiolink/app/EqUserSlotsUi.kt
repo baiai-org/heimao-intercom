@@ -1,12 +1,14 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-
 package net.openradiolink.app
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +118,7 @@ internal fun UserEqSlots(
     }
 
     val interactive = enabled && canReach && !busy
+    val allowed = interactive && edit == null && confirmation == null
     Text("用户 EQ 预设", style = MaterialTheme.typography.titleMedium)
     repeat(EqSlots.COUNT) { index ->
         val base = saved
@@ -126,27 +129,42 @@ internal fun UserEqSlots(
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f),
             shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall)
-                val allowed = interactive && edit == null && confirmation == null
+            Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (base != null && item != null) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { submit(EqSlotWrite(EqSlotOp.APPLY, slot, base)) }, enabled = allowed) { Text("应用") }
-                        TextButton(onClick = { startEdit(EqSlotOp.RENAME, slot, base) }, enabled = allowed) { Text("重命名") }
-                        TextButton(onClick = {
-                            confirmation = EqSlotConfirm("覆盖「${item.name}」的 EQ 曲线？") {
-                                startEdit(EqSlotOp.SAVE, slot, base)
-                            }
-                        }, enabled = allowed) { Text("覆盖") }
-                        TextButton(onClick = {
-                            confirmation = EqSlotConfirm("删除「${item.name}」？") {
-                                submit(EqSlotWrite(EqSlotOp.DELETE, slot, base))
-                            }
-                        }, enabled = allowed) { Text("删除") }
+                    TextButton(onClick = { submit(EqSlotWrite(EqSlotOp.APPLY, slot, base)) }, enabled = allowed) {
+                        Text("应用", maxLines = 1)
+                    }
+                    Box {
+                        var expanded by remember(profile.id, device, allowed) { mutableStateOf(false) }
+                        IconButton(onClick = { expanded = true }, enabled = allowed) {
+                            Icon(Icons.Default.MoreHoriz, contentDescription = "槽位 $slot 更多操作")
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            Text(item.name, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.bodySmall)
+                            DropdownMenuItem(text = { Text("重命名") }, onClick = {
+                                expanded = false
+                                startEdit(EqSlotOp.RENAME, slot, base)
+                            })
+                            DropdownMenuItem(text = { Text("覆盖") }, onClick = {
+                                expanded = false
+                                confirmation = EqSlotConfirm("覆盖「${item.name}」的 EQ 曲线？") {
+                                    startEdit(EqSlotOp.SAVE, slot, base)
+                                }
+                            })
+                            DropdownMenuItem(text = { Text("删除") }, onClick = {
+                                expanded = false
+                                confirmation = EqSlotConfirm("删除「${item.name}」？") {
+                                    submit(EqSlotWrite(EqSlotOp.DELETE, slot, base))
+                                }
+                            })
+                        }
                     }
                 } else {
                     TextButton(onClick = { if (base != null) startEdit(EqSlotOp.SAVE, slot, base) },
-                        enabled = allowed && base != null) { Text("保存当前 EQ") }
+                        enabled = allowed && base != null) { Text("保存", maxLines = 1) }
                 }
             }
         }
