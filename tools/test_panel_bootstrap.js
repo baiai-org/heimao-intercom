@@ -20,7 +20,7 @@ function deferred() {
 function runtime() {
   const state = {now:1000,requests: [], logs: [], timers: new Map(), id: 0, renders: 0};
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m =>
-    [m[1], {value: '', style: {}, textContent: '', innerHTML: '', className: '',after(){},setAttribute(){}}]));
+    [m[1], {value: '', style: {}, dataset: {}, textContent: '', innerHTML: '', className: '',after(){},setAttribute(){}}]));
   state.status = {ptt: 'IDLE', wifi: {connected: true, rssi: -50, ssid: 'test', ip: '192.0.2.178', host: 'orl2'},
     mode: 'monitor', uptime: 10, heap: 100000, psram: 1000000, freq: {tx: 435, rx: 435, sq: 8, vol: 8, bw: 1},
     intercom: {mode: 0, state: 'idle', peers: 0, tx: 0, rx: 0}, bridge: {}, gain: 80,
@@ -37,14 +37,15 @@ function runtime() {
     escHtml: text => String(text ?? '').replace(/[&<>"']/g, '_'),
     log: (...args) => state.logs.push(args), wifiIcon: () => '', setSegMeter() {},
     renderChannels: () => {state.renders++;}, syncBridge() {}, applyMode() {},
-    renderRadio: r => {context.window._radio = r;}, renderNp2p() {},
+    renderRadio: r => {context.window._radio = r;}, renderNp2p() {}, useClockDevice() {},
     holdSyncUntil: Infinity, txOn: false, txEnd: 0, monOn: false, SDR: {on: false}, last: '',
     fetch: (url, options) => {state.requests.push({url, options}); return state.fetch(url, options);},
     setTimeout: (fn, ms) => {const id = ++state.id; state.timers.set(id, {fn, ms}); return id;},
     clearTimeout: id => state.timers.delete(id),
   });
   vm.runInContext(part('function radioDisplayFrequency(', 'function radioFrequency(') +
-    part('const PANEL_READ_PATHS', '/*\n * Factory reset:') +
+    part('const PANEL_READ_PATHS', 'const clockZone =') +
+    part('const diagButton =', '/*\n * Factory reset:') +
     part('let tonesReady', 'function showSub()') +
     part('async function loadBridgeChans()', 'const rxGuardViews') +
     part('const CH_MAX = 99;', '/* Filtered client-side:') +

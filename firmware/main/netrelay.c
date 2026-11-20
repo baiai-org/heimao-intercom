@@ -1227,9 +1227,9 @@ static esp_err_t relay_stop(void)
     return ESP_OK;
 }
 
-static esp_err_t relay_start_reported(void)
+static esp_err_t relay_start_reported(const netcom_cfg_t *cfg)
 {
-    const esp_err_t err = relay_start();
+    const esp_err_t err = relay_start(cfg);
     if (err != ESP_OK) { relay_link_set("error", "start_failed"); }
     return err;
 }
