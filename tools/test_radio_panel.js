@@ -22,17 +22,19 @@ const channels = [
   {i: 1, name: 'VHF', tx: 145.0125, rx: 145.6125, band: 'VHF', compatible: true, txt: '0000', rxt: '0000'},
 ];
 const context = vm.createContext({
+  txLive: false, panelDirty: new Map(),
   window: {}, document: {activeElement: null, querySelectorAll: selector => {
     assert.equal(selector, '[data-fstep]'); return steps;
   }},
   $: id => {assert(elements.has(id), 'unknown element ' + id); return elements.get(id);},
-  cmd: async (k, v) => { calls.push({k, v}); return {ok: true}; },
+  cmd: async (k, v) => { calls.push({k, v}); return {ok: true, tx_timeout_s:v}; },
   log: (...args) => logs.push(args), touchInput: () => {}, last: '',
   loadChannels: async () => {}, syncBridge: () => {}, refresh: async () => {},
   readChannels: async () => channels,
   escHtml: v => String(v).replace(/[&<>"']/g, '_'),
 });
-vm.runInContext(part('function radioGridHz(', "document.querySelectorAll('[data-sec]')"), context);
+vm.runInContext(part('function radioGridHz(', "let txTimeoutSaving"), context);
+vm.runInContext(part('let txTimeoutSaving', '/* Atomic dual-frequency step'), context);
 vm.runInContext(part('/* Atomic dual-frequency step', 'let tonesReady'), context);
 vm.runInContext(part("$('fset').onclick", "$('fSync').onclick"), context);
 vm.runInContext(part('async function loadBridgeChans()', 'const rxGuardViews'), context);
@@ -94,6 +96,25 @@ context.renderRadio({band:'UNSET', min:0, max:0, ready:false, compatible:false})
 assert.equal(elements.get('fset').disabled, true);
 assert.equal(context.radioFrequency('145'), null);
 (async () => {
+  const timeout = elements.get('txTimeout'), saveTimeout = elements.get('txTimeoutSet');
+  assert.equal(saveTimeout.disabled,true);
+  context.renderRadio({...vhf, tx_timeout_s:180});
+  assert.equal(timeout.value,180);
+  assert.equal(saveTimeout.disabled,false);
+  for (const bad of ['4','601','180.5','5e1','']) {
+    timeout.value=bad;
+    await saveTimeout.onclick();
+    assert.equal(calls.length,0);
+  }
+  timeout.value='600';
+  await saveTimeout.onclick();
+  assert.deepEqual(calls.pop(),{k:'tx_timeout_s',v:600});
+  assert.match(elements.get('txTimeoutStatus').textContent,/已保存 600 秒/);
+  context.panelDirty.set('txTimeout','5');
+  timeout.value='5';
+  context.renderRadio({...vhf, tx_timeout_s:600});
+  assert.equal(timeout.value,'5');
+  console.log('PASS: shared TX timeout readback, integral bounds and unsaved draft');
   await context.loadBridgeChans();
   assert.match(elements.get('brChan1').innerHTML, /value="1" disabled/);
   assert.match(elements.get('brChan1').innerHTML, /value="2">/);

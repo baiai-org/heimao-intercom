@@ -31,6 +31,9 @@ internal object RadioUiRules {
     fun channelKey(c:JSONObject):String= listOf("name","band","rx","tx","bw","sq","vol","pwr","txt","rxt")
         .joinToString("|"){key->"${c.value(key).length}:${c.value(key)}"}
     fun parameterError(key:String,value:String):String? {
+        if (key == "tx_timeout_s" && (value.length !in 1..3 || value.any { it !in '0'..'9' } || value.toIntOrNull() !in 5..600)) {
+            return "请输入 5–600 的整数秒"
+        }
         val range=when(key){"sq"->0..8;"vol"->1..8;"spk_vol"->0..7;"gain","txgain","ntxgain"->1..255;"bgtx"->0..64;"micgain"->0..7;"adcvol"->0..255;"ix_room"->1000..9999;else->if(key.startsWith("eq_"))-12..6 else null}
         return if(range!=null && value.toIntOrNull()?.let{it in range}!=true)"请输入 ${range.first}–${range.last} 的整数" else null
     }

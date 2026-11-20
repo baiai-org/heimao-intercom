@@ -95,6 +95,10 @@ import java.util.Date
         Parameter(manager,p,s,"sq","模块静噪",s.status.value("freq.sq"),hint="0–8；0 为开放静噪")
         Parameter(manager,p,s,"vol","电台模块音量",s.status.value("freq.vol"),hint="1–8")
         Parameter(manager,p,s,"power","发射功率",s.status.value("freq.power"),listOf("0" to "低功率","1" to "高功率"))
+        if (s.radio.optInt("tx_timeout_s") in 5..600) {
+            Parameter(manager,p,s,"tx_timeout_s","发射超时",s.radio.value("tx_timeout_s"),
+                hint="5–600 整数秒，默认 180 秒。全手台发射和桥接共用，到点后进入尾音收尾。")
+        }
         if(s.radio.optBoolean("power_pending"))Text("功率将在发话结束后生效",color=amber)
     }
     Section("亚音设置") {

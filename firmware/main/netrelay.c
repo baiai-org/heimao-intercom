@@ -53,6 +53,7 @@
 #include "bridge.h"
 #include "net_audio_denoise.h"
 #include "ptt.h"
+#include "tx_timeout.h"
 #include "sdr.h"
 #include "voice_tail.h"
 #include "netcom.h"
@@ -62,8 +63,6 @@
 static const char *TAG = "netrelay";
 
 /* Exactly one courtesy tone per over, and never hold the carrier forever. */
-static bool s_tail_played;
-static int64_t s_tail_start_ms;
 
 #define REL_MAGIC         0x4F52
 #define REL_PKT_SAMPLES   OPUS_LINK_SAMPLES   /* one Opus frame */
@@ -353,6 +352,9 @@ static bool relay_store_packet(const rel_header_t *h, const uint8_t *audio,
     if (s_play_head_valid && (int16_t)(seq - s_play_head) < 0) { ++s_late; return false; }
     const uint16_t slot = seq % REL_JBUF_SLOTS;
     if (s_jbuf_valid[slot] && s_jbuf_seq[slot] == seq) { ++s_late; return false; }
+    if ((h->flags & (NET_RX_FLAG_TAIL | 1)) == (NET_RX_FLAG_TAIL | 1)) {
+        next.tail_seen = true;
+    }
     source->order = next;
     s_stream_source = source;
     if (!s_have_latest) { s_stream_first = seq; s_have_first = true; }
@@ -548,10 +550,14 @@ static volatile bool s_tx_stop;
 static SemaphoreHandle_t s_pub_mux;
 static uint32_t      s_tx_qdrop;
 static int16_t       s_tx_acc[REL_PKT_SAMPLES];
+static bool s_tx_acc_tail;
+static int64_t s_tx_acc_expiry;
 
 typedef struct {
     int16_t pcm[REL_PKT_SAMPLES];
     uint8_t ptt;
+    bool tail;
+    int64_t expires_us;
     int64_t end_ms;             /* diagnostic only; 0 for ordinary audio */
 } rel_tx_item_t;
 
@@ -570,6 +576,8 @@ static void rel_enqueue_pcm(const int16_t *pcm, bool ptt)
     rel_tx_item_t item;
     memcpy(item.pcm, pcm, sizeof(item.pcm));
     item.ptt = ptt ? 1 : 0;
+    item.tail = ptt && s_tx_acc_tail;
+    item.expires_us = ptt ? s_tx_acc_expiry : 0;
     item.end_ms = ptt ? 0 : now_ms();
 
     if (xQueueSend(s_txq, &item, 0) == pdTRUE) {
@@ -635,14 +643,16 @@ static void relay_tx_task(void *arg)
         int64_t end_ms = 0;
         bool has_end = false;
         bool has_audio = false;
+        int64_t expirations[REL_TXBATCH];
         const int64_t t_batch = esp_timer_get_time();
         for (;;) {
+            if (item.expires_us && esp_timer_get_time() >= item.expires_us) { break; }
             rel_header_t *h = (rel_header_t *)(pkt + bytes);
             h->magic = REL_MAGIC;
             h->reserved = net_tx_epoch(&s_tx_epoch, &s_tx_epoch_open, item.ptt != 0);
             h->seq = s_tx_seq++;
             memcpy(h->mac, s_mac, 6);
-            h->flags = item.ptt | NET_RX_FLAG_EPOCH;
+            h->flags = item.ptt | NET_RX_FLAG_EPOCH | (item.tail ? NET_RX_FLAG_TAIL : 0);
             h->reserved2 = 0;
             const int n = s_opus_enc
                               ? opus_link_encode(s_opus_enc, item.pcm,
@@ -654,8 +664,8 @@ static void relay_tx_task(void *arg)
                 if (!item.ptt) { netcom_note_end_sent(item.end_ms, false); }
                 break; /* Never publish stale bytes as an Opus frame. */
             }
+            expirations[bytes / REL_PKT_LEN] = item.expires_us;
             bytes += REL_PKT_LEN;
-            if (item.ptt) { has_audio = true; }
             if (!item.ptt) {
                 has_end = true;
                 end_ms = item.end_ms;
@@ -680,7 +690,17 @@ static void relay_tx_task(void *arg)
         if (!bytes) { continue; }
         bool published = false;
         if (s_pub_mux) { xSemaphoreTake(s_pub_mux, portMAX_DELAY); }
-        if (s_client && s_connected) {
+        const int64_t publish_us = esp_timer_get_time();
+        size_t ready = 0;
+        for (size_t offset = 0; offset < bytes; offset += REL_PKT_LEN) {
+            const int64_t expiry = expirations[offset / REL_PKT_LEN];
+            if (expiry && publish_us >= expiry) { continue; }
+            if (((const rel_header_t *)(pkt + offset))->flags & 1) { has_audio = true; }
+            if (ready != offset) { memmove(pkt + ready, pkt + offset, REL_PKT_LEN); }
+            ready += REL_PKT_LEN;
+        }
+        bytes = ready;
+        if (bytes && s_client && s_connected) {
             snprintf(s_my_topic, sizeof(s_my_topic), "%s/tx/%s",
                      s_topic_root, device_id());
             const int id = esp_mqtt_client_publish(s_client, s_my_topic,
@@ -705,19 +725,26 @@ static void relay_tx_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-static void relay_tx_sample(const int16_t *pcm, size_t n, bool ptt)
+static void relay_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     tx_lock();
-    if (!s_started || !ptt) {
+    if (!s_started) {
         s_tx_acc_n = 0;
         tx_unlock();
         return;
     }
+    if (s_tx_acc_n && (tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry)) {
+        while (s_tx_acc_n < REL_PKT_SAMPLES) { s_tx_acc[s_tx_acc_n++] = 0; }
+        rel_enqueue_pcm(s_tx_acc, true);
+        s_tx_acc_n = 0;
+    }
+    s_tx_acc_tail = tail;
+    s_tx_acc_expiry = expires_us;
     for (size_t i = 0; i < n; ++i) {
         s_tx_acc[s_tx_acc_n++] = pcm[i];
         if (s_tx_acc_n == REL_PKT_SAMPLES) {
             s_tx_acc_n = 0;
-            rel_enqueue_pcm(s_tx_acc, ptt);
+            rel_enqueue_pcm(s_tx_acc, true);
         }
     }
     tx_unlock();
@@ -737,9 +764,9 @@ static void relay_tx_end(void)
     }
     if (s_tx_acc_n > 0) {
         while (s_tx_acc_n < REL_PKT_SAMPLES) { s_tx_acc[s_tx_acc_n++] = 0; }
-    } else {
-        memset(s_tx_acc, 0, sizeof(s_tx_acc));
+        rel_enqueue_pcm(s_tx_acc, true);
     }
+    memset(s_tx_acc, 0, sizeof(s_tx_acc));
     s_tx_acc_n = 0;
     rel_enqueue_pcm(s_tx_acc, false);   /* explicit end-of-transmission */
     tx_unlock();
@@ -822,10 +849,17 @@ static bool rel_jbuf_next(int16_t *out, int *peak_out)
 
 /* PTT and buffered playback control the carrier; PCM amplitude never does. */
 static int64_t s_last_play_ms;
+static net_rf_close_t s_rf_close;
+static int64_t s_rf_speech_us;
 static void bridge_key_update(bool played, bool denoise_pending)
 {
+    const bool limit = s_rf_speech_us && esp_timer_get_time() >= s_rf_speech_us;
+    const bool lost = s_rf_speech_us && !ptt_owned(PTT_OWNER_NETWORK, 1);
+    if (limit && !s_rf_close.active) { (void)ptt_speech_expired(PTT_OWNER_NETWORK, 1); }
+    const bool bridging = bridge_active();
     rx_lock();
     const int64_t now = now_ms();
+    rel_rx_source_t *active = s_stream_source;
     const bool incoming = s_stream_source && net_rx_order_keyed(&s_stream_source->order, now, REL_RX_PTT_TIMEOUT_MS);
     static uint16_t traced_epoch, traced_latest;
     static int64_t traced_last_ms;
@@ -845,8 +879,17 @@ static void bridge_key_update(bool played, bool denoise_pending)
     if (incoming != s_rx_ptt) { netcom_note_rx_ptt(incoming, timed_out); }
     s_rx_ptt = incoming;
     s_rx_ptt_ms = incoming ? s_stream_source->order.last_ms : 0;
-    const bool feeding = incoming || (s_stream_source && s_stream_source->order.audio &&
+    bool feeding = incoming || (s_stream_source && s_stream_source->order.audio &&
         s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0));
+    net_audio_source_t stream = active ?
+        net_audio_source(active->mac, active->order.epoch, s_stream_first, feeding) : (net_audio_source_t){0};
+    const bool hub_end = active && active->order.hub_cutoff && !active->order.rf_blocked;
+    if (bridging && !s_rf_close.active && (limit || lost || hub_end)) {
+        net_rf_close_begin(&s_rf_close, stream, active ? &active->order : NULL,
+            active && (active->order.tail_seen || hub_end));
+    }
+    const bool blocked = bridging && active && net_rf_close_suppresses(&s_rf_close, stream, &active->order);
+    feeding = feeding && !blocked;
     rx_unlock();
     voice_bridge_network_state(feeding, bridge_active());
     const bool pcm_pending = voice_bridge_network_pending();
@@ -854,19 +897,20 @@ static void bridge_key_update(bool played, bool denoise_pending)
     const bool keyed = feeding ||
         (s_last_play_ms != 0 && now - s_last_play_ms < REL_RX_HANG_MS);
     netcom_note_rx_carrier(keyed);
-    bool tailing = voice_net_tail_active();
-    if (played) {
-        s_tail_played = false;            /* a new over may have its own tone */
-        if (tailing) { voice_net_tail_stop(); tailing = false; }
-    }
-    if (!keyed && !tailing && !s_tail_played && bridge_active()) {
-        tailing = voice_net_tail_start();  /* request; never fails on timing */
-        if (tailing) { s_tail_played = true; }
-    }
-    if (bridge_active()) {
-        ptt_bridge_key(keyed || tailing);
+    const bool closing = s_rf_close.active;
+    const bool hold = closing ? net_rf_close_hold(&s_rf_close, bridging, feeding ||
+        pcm_pending || denoise_pending || played ||
+        (s_last_play_ms && now - s_last_play_ms < AUDIO_I2S_BUFFER_MS)) : keyed && !blocked;
+    if (bridging) {
+        ptt_bridge_key(hold);
     } else if (ptt_owned(PTT_OWNER_NETWORK, 1)) {
         ptt_bridge_key(false);
+    }
+    if (closing && !hold) { s_last_play_ms = 0; }
+    if (!hold || !bridging) {
+        s_rf_speech_us = 0;
+    } else if (!s_rf_speech_us) {
+        s_rf_speech_us = ptt_speech_deadline_us(PTT_OWNER_NETWORK, 1);
     }
     voice_bridge_network_keyed(ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed());
 }
@@ -899,6 +943,7 @@ static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *ou
         have = pull && !net_audio_denoise_defer(denoise, *out) && rel_jbuf_next(block, &peak);
         out->feeding = net_rx_order_keyed(&source->order, now_ms(), REL_RX_PTT_TIMEOUT_MS) ||
             (source->order.audio && s_have_latest && (!s_play_head_valid || (int16_t)(s_play_head - s_latest) <= 0));
+        out->rf_suppressed = bridge_active() && net_rf_close_suppresses(&s_rf_close, *out, &source->order);
     }
     rx_unlock();
     return have;
@@ -966,6 +1011,9 @@ static void relay_play_task(void *arg)
         }
     }
     net_audio_denoise_reset(&denoise);
+    s_rf_close = (net_rf_close_t){0};
+    s_rf_speech_us = 0;
+    voice_net_tail_stop();
     if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
     voice_bridge_network_cancel();
     s_play_task = NULL;
@@ -1010,6 +1058,8 @@ static void relay_tone_task(void *arg)
 static void relay_test_tone(int ms)
 {
     if (!s_started || ms <= 0 || s_test_tone_task) { return; }
+    const int ceiling = (int)tx_timeout_seconds() * 1000;
+    if (ms > ceiling) ms = ceiling;
     if (ms > 30000) { ms = 30000; }
     if (xTaskCreateWithCaps(relay_tone_task, "rel_tone", 16384,
             (void *)(intptr_t)ms, 5, &s_test_tone_task, MALLOC_CAP_SPIRAM) != pdPASS) {

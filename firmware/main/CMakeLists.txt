@@ -21,6 +21,7 @@ idf_component_register(
         "sa818_cfg.c"
         "sa818_freq.c"
         "ptt.c"
+        "tx_timeout.c"
         "rx_guard.c"
         "monitor_rx.c"
         "np_peer_store.c"

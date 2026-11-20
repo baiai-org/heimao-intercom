@@ -8,6 +8,8 @@
 #include <string.h>
 
 #define NET_RX_FLAG_EPOCH 0x20u
+#define NET_RX_FLAG_TAIL 0x40u
+#define NET_RX_FLAG_HUB_CUTOFF 0x80u
 #define NET_RX_RETIRED 16
 #define NET_RX_COMPLETED 4
 typedef struct {
@@ -16,6 +18,7 @@ typedef struct {
     uint16_t probe_seq;
     uint8_t retired_next, probe_count, completed_next, completed_count;
     bool seen, ptt, audio;
+    bool tail_seen, rf_blocked, hub_cutoff;
     int64_t last_ms, probe_ms;
 } net_rx_order_t;
 enum { NET_RX_DROP, NET_RX_AUDIO, NET_RX_FORWARD, NET_RX_NEW };
@@ -64,6 +67,11 @@ static inline int net_rx_order_accept(net_rx_order_t *s, uint16_t epoch,
         }
         s->epoch = epoch; s->seen = true;
     }
+    if (fresh || (!s->ptt && ptt) || (!epoch && now - s->last_ms > 2000)) {
+        s->tail_seen = false;
+        s->rf_blocked = false;
+        s->hub_cutoff = false;
+    }
     if (start) { s->audio = false; s->first_seq = seq; }
     if (!ptt && s->audio && s->ptt) {
         const unsigned i = s->completed_next++ % NET_RX_COMPLETED;
@@ -82,6 +90,26 @@ static inline bool net_rx_order_completed(const net_rx_order_t *s, uint16_t epoc
         if (s->completed_epoch[i] == epoch && s->completed_first[i] == first_seq) { return true; }
     }
     return false;
+}
+
+/* A trusted Hub can close the accepted original epoch without assigning a
+ * sequence number in the original transmitter's sequence space. */
+static inline bool net_rx_order_hub_cutoff(net_rx_order_t *s, uint16_t epoch,
+                                          uint16_t forwarded_through, int64_t now)
+{
+    if (!s->seen || s->epoch != epoch || s->hub_cutoff || !s->ptt ||
+        (int16_t)(forwarded_through - s->latest) < 0) {
+        return false;
+    }
+    const unsigned i = s->completed_next++ % NET_RX_COMPLETED;
+    s->completed_epoch[i] = s->epoch;
+    s->completed_first[i] = s->first_seq;
+    if (s->completed_count < NET_RX_COMPLETED) { ++s->completed_count; }
+    s->hub_cutoff = true;
+    s->ptt = false;
+    s->latest = forwarded_through;
+    s->last_ms = now;
+    return true;
 }
 
 static inline bool net_rx_order_keyed(const net_rx_order_t *s, int64_t now,

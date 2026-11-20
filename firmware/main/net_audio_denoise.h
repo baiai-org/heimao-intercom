@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rf_denoise.h"
+#include "net_rx_order.h"
 
 typedef struct {
     uint64_t sender_epoch;
@@ -8,7 +9,38 @@ typedef struct {
     bool present;
     bool feeding;
     bool previous_completed;
+    bool rf_suppressed;
+    bool local_tail;
 } net_audio_source_t;
+
+typedef struct {
+    net_audio_source_t source;
+    bool active;
+    bool drain_source;
+    bool local_tail;
+    bool tail_attempted;
+    bool armed;
+} net_rf_close_t;
+
+static inline void net_rf_close_begin(net_rf_close_t *close, net_audio_source_t source,
+                                      net_rx_order_t *order, bool drain_source)
+{
+    if (order) { order->rf_blocked = true; }
+    *close = (net_rf_close_t){
+        .source = source, .active = true, .drain_source = drain_source,
+        .local_tail = !order || !order->tail_seen,
+    };
+}
+
+static inline bool net_rf_close_suppresses(const net_rf_close_t *close, net_audio_source_t source,
+                                           const net_rx_order_t *order)
+{
+    if (!close->active) { return order->rf_blocked; }
+    return !close->drain_source || close->source.sender_epoch != source.sender_epoch ||
+        close->source.first_seq != source.first_seq;
+}
+
+bool net_rf_close_hold(net_rf_close_t *close, bool enabled, bool draining);
 
 typedef struct {
     net_audio_source_t source;

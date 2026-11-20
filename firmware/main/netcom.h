@@ -89,7 +89,7 @@ struct netcom_engine {
     esp_err_t (*start)(const netcom_cfg_t *cfg);
     esp_err_t (*stop)(void);
     /* Stage 2: audio hooks (PCM 8 kHz 16-bit, mono). */
-    void      (*tx_sample)(const int16_t *pcm, size_t n, bool ptt);
+    void      (*tx_sample)(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
     /*
      * Optional: the transmission is over -- flush whatever partial packet is
      * buffered and send one final frame with the PTT flag cleared, so the far
@@ -173,7 +173,7 @@ const char *netcom_mode_name(uint8_t mode);           /* "local" | "netp2p" | "r
  * network mode the TALK task calls this instead of feeding the SA818's MIC_IN.
  * No-op in local mode or while no TX hook is registered.
  */
-void netcom_tx_sample(const int16_t *pcm, size_t n, bool ptt);
+void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
 
 /*
  * Flush the active engine's partial TX packet and send a final frame with the

@@ -1696,16 +1696,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <button id="mOff" title="停止模拟守听">静音</button>
         </div>
         <div class="ptt-sub-row">
-          <div style="display:flex;align-items:center;gap:6px">
-            <span style="font-size:11.5px;color:var(--dim)">单次发射限时</span>
-            <input type="number" id="secs" value="30" min="5" max="60" style="width:62px;flex:none;padding:4px 7px">
-            <span style="font-size:11px;color:var(--dim)">秒</span>
-          </div>
-          <div class="secs-Quick">
-            <button type="button" data-sec="10">10s</button>
-            <button type="button" data-sec="30">30s</button>
-            <button type="button" data-sec="60">60s</button>
-          </div>
+          <span id="talkTime">正在读取发射超时设置…</span>
         </div>
       </div>
 
@@ -1878,6 +1869,13 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <h2><i></i>射频信道与亚音调谐</h2>
         <span class="tag-chip" id="rfRange">频段待读取</span>
       </div>
+
+      <div class="row">
+        <label for="txTimeout">发射超时（秒）</label>
+        <input type="number" id="txTimeout" min="5" max="600" step="1" inputmode="numeric" disabled>
+        <button id="txTimeoutSet" class="pri" disabled>保存</button>
+      </div>
+      <p id="txTimeoutStatus" role="status">5–600 整数秒，默认 180 秒。适用于本机发话和转发。</p>
 
       <div class="row">
         <label>物理模块频段</label>
@@ -3102,7 +3100,10 @@ function sdrApplyState(reply, sid = SDR.sid) {
   // transmission ID is authoritative for this press.
   if (SDR.keyed && reply.tx === SDR.activeTx && !reply.ptt) {
     sdrPttUp(false);
-    log('手台端已停止发射: ' + (reply.reason || 'released'), 'err');
+    if (reply.reason === 'hold_limit') log('已达发射超时', 'good');
+    else log('手台端已停止发射: ' + (reply.reason || 'released'), 'err');
+  } else if (SDR.keyed && reply.tx === SDR.activeTx && Number.isFinite(reply.remaining_ms)) {
+    setPttLabel($('sdrPtt'), '■ 发射中 · 剩余 ' + Math.ceil(reply.remaining_ms / 1000) + ' 秒');
   }
 }
 function sdrStateStart() {
@@ -3416,12 +3417,12 @@ for (let i = 0; i < 4; i++) {
 
 const panelDirty = new Map();
 function panelEditing(el) { return document.activeElement === el || panelDirty.has(el.id); }
-const panelFields={freq_pair:['ftx','frx'],np2p_stun:['npStun'],ix_room:['ixRoom1'],ix_broker:['ixBroker2'],ix_auth:['ixUser2','ixPass2']};
-document.addEventListener('input',e=>{if(['ftx','frx','npStun','ixRoom1','ixBroker2','ixUser2','ixPass2'].includes(e.target.id)){panelDirty.set(e.target.id,e.target.value);e.target.setAttribute('aria-description','未保存');}});
+const panelFields={freq_pair:['ftx','frx'],tx_timeout_s:['txTimeout'],np2p_stun:['npStun'],ix_room:['ixRoom1'],ix_broker:['ixBroker2'],ix_auth:['ixUser2','ixPass2']};
+document.addEventListener('input',e=>{if(['ftx','frx','txTimeout','npStun','ixRoom1','ixBroker2','ixUser2','ixPass2'].includes(e.target.id)){panelDirty.set(e.target.id,e.target.value);e.target.setAttribute('aria-description','未保存');}});
 
 let channelCommandPending = false;
 async function cmd(k, v) {
-  if (/^(freq_|ctcss_|bw$|sq$|vol$|power$|bridge_chan$|radio_band$|rf_)/.test(k)) panelRadioAt = 0;
+  if (/^(freq_|ctcss_|bw$|sq$|vol$|power$|bridge_chan$|radio_band$|rf_|tx_timeout_s$)/.test(k)) panelRadioAt = 0;
   const submitted=(panelFields[k]||[]).map(id=>[id,$(id).value]);
   const channelChange = k === 'bridge_chan' || k === 'ix_mode' || k === 'ix_room';
   if (channelChange && channelCommandPending) { log('正在切换，请等待结果', 'err'); return {ok:false}; }
@@ -3684,6 +3685,13 @@ $('rfBandSet').onclick = async () => {
 };
 
 function renderRadio(r) {
+  const seconds = r.tx_timeout_s;
+  const timeoutReady = Number.isInteger(seconds) && seconds >= 5 && seconds <= 600;
+  $('txTimeout').disabled = $('txTimeoutSet').disabled = !timeoutReady || txTimeoutSaving;
+  if (timeoutReady) {
+    if (!panelDirty.has('txTimeout') && !txTimeoutSaving) $('txTimeout').value = seconds;
+    if (!txLive) $('talkTime').textContent = '发射超时 ' + seconds + ' 秒';
+  }
   const old = window._radio;
   window._radio = r;
   const selected = !!r.min;
@@ -3724,9 +3732,29 @@ function renderRadio(r) {
     (r.power_pending ? ' · 待松开 PTT' : '');
 }
 
-document.querySelectorAll('[data-sec]').forEach(b => {
-  b.onclick = () => { $('secs').value = b.dataset.sec; };
-});
+let txTimeoutSaving = false;
+$('txTimeoutSet').onclick = async () => {
+  if (txTimeoutSaving) return;
+  const form = $('txTimeout'), status = $('txTimeoutStatus');
+  const value = Number(form.value);
+  if (!/^\d{1,3}$/.test(form.value) || value < 5 || value > 600) {
+    status.textContent = '请输入 5–600 的整数秒';
+    return;
+  }
+  txTimeoutSaving = true;
+  form.disabled = $('txTimeoutSet').disabled = true;
+  status.textContent = '正在保存…';
+  try {
+    const reply = await cmd('tx_timeout_s', value);
+    if (!reply?.ok || reply.tx_timeout_s !== value) throw Error(reply?.err || '手台未确认发射超时');
+    status.textContent = '已保存 ' + value + ' 秒，下一次发射生效';
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    txTimeoutSaving = false;
+    form.disabled = $('txTimeoutSet').disabled = false;
+  }
+};
 
 /* Atomic dual-frequency step using freq_pair */
 document.querySelectorAll('[data-fstep]').forEach(b => {
@@ -4271,7 +4299,7 @@ $('fSync').onclick = () => {
   }
 };
 
-let txOn = false, txEnd = 0, talkToken = 0, talkBusy = false, txLive = false;
+let txOn = false, talkToken = 0, talkBusy = false, txLive = false, talkLimitAnnounced = 0;
 async function toggleTalk() {
   if (talkBusy) return;
   talkBusy = true;
@@ -4284,14 +4312,12 @@ async function toggleTalk() {
     refresh();
     return;
   }
-  const s = Math.min(60, Math.max(5, parseInt($('secs').value, 10) || 30));
-  const r = await fetch('/api/talk?on=1&secs=' + s + '&confirm=1');
+  const r = await fetch('/api/talk?on=1&confirm=1');
   const j = await r.json();
   if (j.ok) {
     txOn = true; txLive = true;
     talkToken = j.tx;
-    txEnd = Date.now() + s * 1000;
-    log('PTT 发射已启动（限时 ' + s + ' 秒）', 'err');
+    log('PTT 发射已启动（限时 ' + j.seconds + ' 秒）', 'good');
     refresh();
   } else {
     log('发射被拒绝: ' + j.err, 'err');
@@ -4386,6 +4412,16 @@ async function refreshMeter() {
      * to 3 s after the key was pressed.
      */
     applyMode(s.ic_mode, isTx);
+    if (txOn && s.talk_limit_tx === talkToken && talkLimitAnnounced !== talkToken) {
+      talkLimitAnnounced = talkToken;
+      log('已达发射超时', 'good');
+    }
+    if (isTx && Number.isFinite(s.talk_left_ms)) {
+      $('talkTime').textContent = s.talk_left_ms > 0
+        ? '剩余 ' + Math.ceil(s.talk_left_ms / 1000) + ' 秒' : '正在收尾';
+    } else if (window._radio?.tx_timeout_s) {
+      $('talkTime').textContent = '发射超时 ' + window._radio.tx_timeout_s + ' 秒';
+    }
     $('txState').textContent = isTx ? '发射中' : 'PTT 待机';
     $('txState').className = 'tag-chip ' + (isTx ? 'tx' : '');
     $('txBtn').className = 'tx' + (isTx ? ' live' : '');
@@ -4543,10 +4579,7 @@ async function refresh() {
     $('mToggleMob').textContent = monOn ? '守听: 开' : '守听: 关';
     $('mToggleMob').className = (monOn ? 'ok-btn' : 'pri') + ' m-mon';
 
-    if (txOn && (Date.now() > txEnd || s.ptt === 'IDLE')) {
-      if (Date.now() > txEnd) log('单次发射计时结束', 'good');
-      txOn = false;
-    }
+    if (txOn && s.ptt === 'IDLE') txOn = false;
     /* txState and the button classes belong to refreshMeter (1 Hz, driven by the
      * real PTT state, so a physical key press shows up within a second). */
     applyMode(s.intercom.mode);

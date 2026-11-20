@@ -8,6 +8,26 @@
 
 enum { NET_AUDIO_DRAIN_MS = 2000 };
 
+bool net_rf_close_hold(net_rf_close_t *close, bool enabled, bool draining)
+{
+    if (!enabled || !ptt_owned(PTT_OWNER_NETWORK, 1) || !ptt_bridge_keyed()) {
+        voice_net_tail_stop();
+        *close = (net_rf_close_t){0};
+        return false;
+    }
+    if (!close->armed) {
+        ptt_begin_release(PTT_OWNER_NETWORK, 1);
+        close->armed = true;
+    }
+    if (draining || voice_net_tail_active()) { return true; }
+    if (close->local_tail && !close->tail_attempted) {
+        close->tail_attempted = true;
+        if (voice_net_tail_start()) { return true; }
+    }
+    *close = (net_rf_close_t){0};
+    return false;
+}
+
 net_audio_source_t net_audio_source(const uint8_t mac[6], uint16_t epoch,
                                     uint16_t first_seq, bool feeding)
 {
@@ -39,6 +59,11 @@ bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
     const uint8_t current_mode = netcom_mode();
     const ptt_owner_t owner = ptt_owner();
     const bool rf = owner == PTT_OWNER_NETWORK && ptt_bridge_keyed();
+    if (source.rf_suppressed) {
+        have = false;
+        if (dn->latched) { source = dn->source; }
+        source.feeding = false;
+    }
     const bool owns_output = voice_mode() == VOICE_MONITOR ?
         !ptt_local_audio_active() && (owner == PTT_OWNER_NONE || owner == PTT_OWNER_NETWORK) :
         !voice_dac_held_by_talk();

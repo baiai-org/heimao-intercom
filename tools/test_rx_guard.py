@@ -45,6 +45,8 @@ static unsigned writes;
 static unsigned char saved[64];
 static size_t saved_size;
 static int64_t esp_timer_get_time(void) {return clock_us;}
+static unsigned test_timeout_s = 180;
+unsigned tx_timeout_seconds(void) {return test_timeout_s;}
 static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *p){return p;}
 static SemaphoreHandle_t xSemaphoreCreateRecursiveMutexStatic(StaticSemaphore_t *p){return p;}
 static int xSemaphoreTake(SemaphoreHandle_t p,int t){(void)p;(void)t;return 1;}
@@ -129,6 +131,38 @@ int main(void){
         if(i)assert(events[i].ms>=events[i-1].ms&&events[i].sequence==events[i-1].sequence+1);
     }
     assert(events[63].sequence==sequence);
+    const unsigned limits[] = {5, 180, 600};
+    for (unsigned i = 0; i < sizeof(limits) / sizeof(*limits); ++i) {
+        idle();
+        test_timeout_s = limits[i];
+        assert(ptt_claim(PTT_OWNER_TALK, 99));
+        assert(ptt_request_tx(2000) == ESP_OK);
+        advance_ms(30); ptt_tick();
+        const int64_t start = clock_us;
+        assert(ptt_speech_deadline_us(PTT_OWNER_TALK, 99) == start + (int64_t)limits[i] * 1000000);
+        const int64_t hard = ptt_release_deadline_us(PTT_OWNER_TALK, 99);
+        while (clock_us < hard) {
+            assert(rf_pin);
+            assert(ptt_speech_expired(PTT_OWNER_TALK, 99) ==
+                (clock_us >= start + (int64_t)limits[i] * 1000000));
+            assert(ptt_extend(1000) == ESP_OK);
+            advance_ms(100);
+            ptt_tick();
+        }
+        assert(!rf_pin && ptt_get_state() == PTT_TAIL);
+        ptt_release(PTT_OWNER_TALK, 99);
+        idle();
+        assert(ptt_source_key(PTT_OWNER_NETWORK, 1, true));
+        const int64_t bridge_hard = ptt_release_deadline_us(PTT_OWNER_NETWORK, 1);
+        while (clock_us < bridge_hard) {
+            assert(rf_pin && ptt_source_key(PTT_OWNER_NETWORK, 1, true));
+            advance_ms(100);
+            ptt_tick();
+        }
+        assert(!rf_pin && ptt_owner() == PTT_OWNER_NONE);
+    }
+    test_timeout_s = 180;
+    puts("PASS: 5/180/600 s TALK and network RF deadlines survive repeated refresh");
     puts("PASS: bounded event history retains latest 64 records in chronological order");
     puts("PASS: actual PTT edges; default/off; 1ms/exact expiry; modes; masks; repeated OFF/TX; frozen config; strict parser; persistence; failures; logical/cancelled TX; watchdogs");
     ptt_request_rx();ptt_bridge_key(false);ptt_local_audio_end();
@@ -148,7 +182,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="rx-guard-", dir=scratch) as temp:
         directory = Path(temp)
         (directory / "freertos").mkdir()
-        for name in ("rx_guard.c", "rx_guard.h", "ptt.c", "ptt.h"):
+        for name in ("rx_guard.c", "rx_guard.h", "ptt.c", "ptt.h", "tx_timeout.h"):
             shutil.copy2(ROOT / "firmware/main" / name, directory / name)
         (directory / "stubs.h").write_text(STUBS, encoding="utf-8")
         for name in ("esp_err.h", "esp_timer.h", "esp_log.h", "board_hw.h", "sa818_cfg.h", "nvs.h",

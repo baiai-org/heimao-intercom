@@ -67,6 +67,7 @@
 #include "panel_address.h"
 #include "nvs_flash.h"
 #include "ptt.h"
+#include "tx_timeout.h"
 #include "sa818.h"
 #include "sa818_cfg.h"
 #include "sdr.h"
@@ -224,8 +225,6 @@ static int logtail_vprintf(const char *fmt, va_list ap)
 
 /* Hard cap for one web-triggered transmission.  The firmware's absolute limit
  * is longer on purpose; this is the panel's own, tighter bound. */
-#define WEB_TALK_MAX_S 60
-#define WEB_TALK_DEF_S 30
 
 /* ------------------------------------------------------------------- panel */
 
@@ -769,7 +768,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1,\"eq_presets\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1,\"eq_presets\":1,\"tx_timeout\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -1298,12 +1297,15 @@ static esp_err_t h_live(httpd_req_t *req)
     voice_stats_t vs;
     voice_get_stats(&vs);
     const sa818_state_t *st = sa818_state();
-    char buf[384];
+    const uint32_t token = ptt_owner_token();
+    const int64_t talk_left = ptt_speech_deadline_us(PTT_OWNER_TALK, token) - esp_timer_get_time();
+    char buf[480];
     snprintf(buf, sizeof(buf),
              "{\"peak\":%d,\"rssi\":%d,\"sql\":%s,\"mod_sq\":%s,"
              "\"ptt\":\"%s\",\"mode\":\"%s\",\"ic_mode\":%d,\"net_ready\":%s,"
              "\"rf_tx\":%s,\"rf_key\":%s,\"vsmp\":%u,\"ipk\":%d,\"opk\":%d,\"bgtx\":%d,"
-             "\"bias\":%d,\"base\":%d,\"bpk\":%d,\"sqgpio\":%d}",
+             "\"bias\":%d,\"base\":%d,\"bpk\":%d,\"sqgpio\":%d,"
+             "\"talk_left_ms\":%ld,\"talk_limit_tx\":%lu}",
              voice_get_squelch_peak(),
              st ? st->rssi : -1,
              voice_squelch_open() ? "true" : "false",
@@ -1318,7 +1320,8 @@ static esp_err_t h_live(httpd_req_t *req)
              vs.samples,
              voice_take_meter_in(), voice_take_meter_out(), voice_get_bgtx(),
              voice_get_bias(), voice_get_bias_base(), voice_take_block_peak(),
-             voice_get_sq_gpio());
+             voice_get_sq_gpio(), talk_left > 0 ? (long)((talk_left + 999) / 1000) : 0L,
+             (unsigned long)ptt_last_talk_limit());
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
 }
@@ -1517,7 +1520,7 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
         "\"alloc_failures\":%u,\"last_alloc_bytes\":%u,\"last_alloc_caps\":%u},"
         "\"connections\":{\"http_clients\":%d,\"https_clients\":%d,\"https_errors\":%u,"
         "\"https_open_events\":%u,\"https_close_events\":%u,\"last_error\":%d,\"last_tls_error\":%d},"
-        "\"rf_config\":%s,\"event_sequence\":%" PRIu32 ",\"events\":[",
+        "\"rf_config\":%s,\"tx_timeout_s\":%u,\"event_sequence\":%" PRIu32 ",\"events\":[",
         device_identity_id(), esp_app_get_description()->version, (uint32_t)(esp_timer_get_time()/1000),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
@@ -1525,7 +1528,7 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), atomic_load(&s_alloc_failures),
         atomic_load(&s_alloc_size), atomic_load(&s_alloc_caps), http_clients(s_plain_handle), http_clients(s_tls_handle),
         atomic_load(&s_https_errors), atomic_load(&s_https_opens), atomic_load(&s_https_closes),
-        atomic_load(&s_https_error), atomic_load(&s_https_tls_error), config, sequence);
+        atomic_load(&s_https_error), atomic_load(&s_https_tls_error), config, tx_timeout_seconds(), sequence);
     for (size_t i = 0; i < n && used < JSON_CAPACITY; ++i) {
         const ptt_trace_event_t *event = &events[i];
         const int written = snprintf(buf + used, JSON_CAPACITY - used,
@@ -1560,15 +1563,15 @@ static esp_err_t h_radio(httpd_req_t *req)
     board_sa818_power_io_t io;
     board_sa818_power_io(&io);
     snprintf(buf, sizeof(buf),
-             "{\"band\":\"%s\",\"model\":\"%s\",\"min\":%.1f,\"max\":%.1f,"
-             "\"freq_grid_hz\":%d,\"freq_decimals\":4,"
+             "{\"ok\":true,\"band\":\"%s\",\"model\":\"%s\",\"min\":%.1f,\"max\":%.1f,"
+             "\"freq_grid_hz\":%d,\"freq_decimals\":4,\"tx_timeout_s\":%u,"
              "\"ready\":%s,\"compatible\":%s,\"reason\":\"%s\","
              "\"power_applied\":%d,\"power_pending\":%s,\"power_control\":\"open_drain\","
              "\"hl_open_drain\":%s,\"hl_pull_up\":%s,\"hl_pull_down\":%s,\"hl_output\":%s,\"rf_config\":%s}",
              sa818_band_name(band), band == SA818_BAND_UHF ? "SA818S-U" :
              band == SA818_BAND_VHF ? "SA818S-V" : "UNSET",
              (double)sa818_band_min(band), (double)sa818_band_max(band),
-             SA818_FREQ_GRID_HZ,
+             SA818_FREQ_GRID_HZ, tx_timeout_seconds(),
              ready ? "true" : "false", compatible ? "true" : "false", why,
              board_sa818_high_power_get() ? 1 : 0,
              board_sa818_power_pending() ? "true" : "false",
@@ -2040,6 +2043,21 @@ static esp_err_t h_set(httpd_req_t *req)
 
     if (!key[0]) {
         return send_result(req, false, "missing k");
+    }
+    if (!strcmp(key, "tx_timeout_s")) {
+        const size_t digits = strlen(val);
+        if (!digits || digits > 3 || strspn(val, "0123456789") != digits ||
+            !tx_timeout_valid((unsigned)atoi(val))) {
+            return send_result(req, false, "请输入 5–600 的整数秒");
+        }
+        bridge_rx_stats_t stream;
+        bridge_rx_stats(&stream);
+        if (stream.open || ptt_owner() != PTT_OWNER_NONE || netp2pnet_hub_forwarding()) {
+            return send_result(req, false, "请结束发射或转发后保存");
+        }
+        const esp_err_t err = tx_timeout_save((unsigned)atoi(val), tx_timeout_seconds());
+        if (err != ESP_OK) { return send_result(req, false, "发射超时保存失败"); }
+        return h_radio(req);
     }
     const int n = atoi(val);
     bool ok = true;
@@ -2558,45 +2576,20 @@ static esp_err_t h_set(httpd_req_t *req)
 
 /* -------------------------------------------------------------- transmitter */
 
-static esp_timer_handle_t s_talk_timer;
 static uint32_t s_web_talk_token;
 static uint32_t sdr_query_id(httpd_req_t *req, const char *key);
 
 /* ------------------------------------------------------------------ h_talk */
-
-static void talk_timeout_cb(void *arg)
-{
-    /*
-     * Request the talk end without releasing the PTT here.  voice_stop() waits
-     * for the audio task and touches the I2S -- not something to do from the
-     * esp_timer task; and a plain ptt_request_rx() would unkey the radio
-     * before the end-of-transmission tail tone, so the tone would never reach
-     * the air.  voice_request_talk_end() only sets a flag: the talk task
-     * finishes the transmission (tail included, transmitter keyed), releases
-     * the PTT itself, and comes back to MONITOR on its own (see talk_task in
-     * voice.c).
-     */
-    ESP_LOGW(TAG, "web talk timer expired -- ending talk (tail included)");
-    (void)voice_request_talk_end_for((uint32_t)(uintptr_t)arg);
-}
 
 static esp_err_t h_talk(httpd_req_t *req)
 {
     const bool on = query_int(req, "on", 0, NULL) != 0;
 
     if (!on) {
-        /*
-         * Flag, not unkey: the tail tone must still be transmitted, and the
-         * talk task is the one allowed to release the PTT after it (see
-         * talk_timeout_cb above).  A stray release with no talk running only
-         * sets the flag, which the next voice_start() clears.
-         */
+        /* The audio task finishes the current generation before unkeying. */
         const uint32_t token = sdr_query_id(req, "tx");
         if (!voice_request_talk_end_for(token)) {
             return send_result(req, false, "transmission token no longer owns TALK");
-        }
-        if (s_talk_timer && s_web_talk_token == token) {
-            (void)esp_timer_stop(s_talk_timer);
         }
         ESP_LOGW(TAG, "web: PTT release requested (tail pending)");
         return send_result(req, true, NULL);
@@ -2622,38 +2615,16 @@ static esp_err_t h_talk(httpd_req_t *req)
         return send_result(req, false, "radio not ready; configure module band and frequencies");
     }
     /* voice_start atomically reserves TX before stopping MONITOR. */
-    int secs = query_int(req, "secs", WEB_TALK_DEF_S, NULL);
-    if (secs < 5) { secs = 5; }
-    if (secs > WEB_TALK_MAX_S) { secs = WEB_TALK_MAX_S; }
-
     const esp_err_t err = voice_start(VOICE_TALK);
     if (err != ESP_OK) {
         return send_result(req, false, esp_err_to_name(err));
     }
 
     const uint32_t token = voice_talk_token();
-    if (s_talk_timer) {
-        (void)esp_timer_stop(s_talk_timer);
-        (void)esp_timer_delete(s_talk_timer);
-        s_talk_timer = NULL;
-    }
-    {
-        const esp_timer_create_args_t args = {
-            .callback = talk_timeout_cb,
-            .arg      = (void *)(uintptr_t)token,
-            .name     = "web_talk",
-        };
-        if (esp_timer_create(&args, &s_talk_timer) != ESP_OK) {
-            (void)voice_request_talk_end_for(token);
-            return send_result(req, false, "timer");
-        }
-    }
     s_web_talk_token = token;
-    (void)esp_timer_stop(s_talk_timer);
-    (void)esp_timer_start_once(s_talk_timer, (uint64_t)secs * 1000000ULL);
-    ESP_LOGW(TAG, "web: PTT keyed for %d s", secs);
     char reply[80];
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"tx\":%lu}", (unsigned long)token);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"tx\":%lu,\"seconds\":%u}",
+             (unsigned long)token, tx_timeout_seconds());
     return send_json(req, reply);
 }
 

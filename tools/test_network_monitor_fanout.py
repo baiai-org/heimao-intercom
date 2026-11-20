@@ -12,6 +12,10 @@ PRE=r'''
 #include <string.h>
 #include "monitor_rx.h"
 #include "net_audio_denoise.h"
+static net_rf_close_t s_rf_close;
+static int64_t s_rf_speech_us;
+static void voice_net_tail_stop(void){}
+static bool ptt_local_audio_active(void){return false;}
 #define NP_PKT_SAMPLES 320
 #define REL_PKT_SAMPLES 320
 #define NP_PKT_MS 20
@@ -20,6 +24,7 @@ PRE=r'''
 #define NETCOM_MODE_NETP2P 1
 #define NETCOM_MODE_RELAY 2
 #define PTT_OWNER_NETWORK 2
+#define PTT_OWNER_NONE 0
 #define pdMS_TO_TICKS(n) (n)
 static bool s_play_stop,s_amp_on;
 static void *s_play_task;
@@ -59,6 +64,7 @@ static size_t voice_bridge_room(void){return available_room;}
 static bool voice_bridge_network_ready(void){return ready_for_direct;}
 static void voice_bridge_network_cancel(void){}
 static bool ptt_owned(int owner,int token){(void)owner;(void)token;return false;}
+static int ptt_owner(void){return PTT_OWNER_NONE;}
 static void ptt_bridge_key(bool on){(void)on;}
 static bool ptt_bridge_keyed(void){return false;}
 static void voice_speaker_apply(int16_t *pcm,size_t n){for(size_t i=0;i<n;i++)pcm[i]/=2;}

@@ -318,6 +318,11 @@ class BoardSession(
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
         val response = api.json("api/set", JSONObject().put("k", key).put("v", value))
         when (key) {
+            "tx_timeout_s" -> {
+                val radio = api.json("api/radio")
+                check(radio.optInt("tx_timeout_s") == value.toInt()) { "手台发射超时回读不一致" }
+                publish { it.copy(radio=radio) }
+            }
             "spk_vol" -> {
                 refresh()
                 check(view.value.status.optInt("spk",-1)==value.toInt()) { "手台喇叭档位未确认" }
@@ -550,6 +555,7 @@ class BoardSession(
                 } else if (t!=0L) {
                     publish { it.copy(ptt=true,pttPending=false,pttReason="正在发话",audioSid=sid,audioTx=t) }
                 }
+                if (t != 0L && capabilities.optInt("tx_timeout") >= 1) watchTransmitLimit(sid, t)
             } catch (e: Exception) {
                 audio?.stopMicrophone();microphoneType(false)
                 if (e is PttRejected) {
@@ -578,6 +584,39 @@ class BoardSession(
                 }
                 if (e !is CancellationException) throw e
             }
+        }
+    }
+    private fun watchTransmitLimit(session: Long, transmission: Long) = scope.launch {
+        while (!closed && sid == session && heldTx == transmission) {
+            delay(500)
+            val state = try {
+                api.json("api/sdr_state?sid=$session")
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                continue
+            }
+            if (state.optLong("sid") != session || state.optLong("tx") != transmission) continue
+            if (state.optBoolean("ptt")) {
+                val remaining = (state.optLong("remaining_ms") + 999) / 1000
+                if (sid == session && heldTx == transmission) {
+                    publish { it.copy(pttReason="发话剩余 ${remaining} 秒") }
+                }
+                continue
+            }
+            pttLock.withLock {
+                if (sid == session && heldTx == transmission) {
+                    press.incrementAndGet()
+                    audio?.finishMicrophone()
+                    microphoneType(false)
+                    heldTx = 0L
+                    pttMayBeActive = false
+                    val reason = if (state.optString("reason") == "hold_limit") "已达发射超时" else "手台已结束本次发话"
+                    publish { it.copy(ptt=false,pttPending=false,pttReason=reason,pttNotice=reason,
+                        pttNoticeId=SystemClock.elapsedRealtimeNanos()) }
+                }
+            }
+            break
         }
     }
     fun cancelPress() {

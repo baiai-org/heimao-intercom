@@ -25,7 +25,7 @@ from test_rx_guard import STUBS
 COMMON = r'''
 #include "rx_guard.c"
 #include "ptt.c"
-#include "net_rx_order.h"
+#include "net_audio_denoise.h"
 #define NP_PKT_SAMPLES 320
 #define REL_PKT_SAMPLES 320
 #define NP_AUDIO_OPUS 80
@@ -37,6 +37,7 @@ COMMON = r'''
 #define PLAY_LAG 6
 #define REL_PLAY_LAG 6
 #define NP_RX_HANG_MS 250
+#define AUDIO_I2S_BUFFER_MS 48
 #define REL_RX_HANG_MS 250
 #define NP_RX_PTT_TIMEOUT_MS 2000
 #define REL_RX_PTT_TIMEOUT_MS 2000
@@ -54,7 +55,8 @@ static volatile bool s_rx_ptt;
 static volatile int64_t s_rx_ptt_ms,s_rx_hang_ms;
 static int64_t s_last_play_ms;
 static uint16_t wire_epoch = 10;
-static bool s_tail_played;
+static net_rf_close_t s_rf_close;
+static int64_t s_rf_speech_us;
 static void peer_lock(void){} static void peer_unlock(void){}
 static void rx_lock(void){} static void rx_unlock(void){}
 static void netcom_note_rx_ptt(bool ptt,bool timeout){(void)ptt;(void)timeout;}
@@ -63,6 +65,8 @@ static bool voice_net_tail_active(void){return false;}
 static void voice_net_tail_stop(void){}
 static bool voice_net_tail_start(void){return false;}
 static bool bridge_active(void){return true;}
+static int tail_id_for_mode(int mode){(void)mode;return 0;}
+static size_t tail_fetch(int id,size_t pos,int16_t *out,size_t count){(void)id;(void)pos;(void)out;(void)count;return 0;}
 /* This suite isolates receive order/PTT; real PCM drain is exercised by
  * test_bridge_speech_prefix.py with the actual voice buffer functions. */
 static void voice_bridge_network_state(bool feeding,bool rf){(void)feeding;(void)rf;}
@@ -86,6 +90,7 @@ NP_ENV = r'''
 #define NP_AUDIO_LEN 104
 #define NP_CTR_KNOCK_LEN 30
 #define NP_CTR_PING_LEN 24
+#define NP_FLAG_FORWARDED 8u
 #define F_AUDIO 0
 #define F_KNOCK 1
 #define F_KNOCK_ACK 2
@@ -97,7 +102,7 @@ typedef struct {uint8_t fam;uint32_t ip;uint8_t ip6[16];uint16_t port;} np_addr_
 typedef struct {uint16_t magic,room,seq;uint8_t mac[6],flags,type;} np_header_t;
 #pragma pack(pop)
 typedef struct {
- bool in_use,via_hub,selftest;uint8_t fam;uint32_t ip;uint8_t ip6[16];uint16_t port;
+ bool in_use,via_hub,selftest,linked,hub;uint8_t mac[6],hub_mac[6],fam;size_t hub_rx_tail_pos;uint32_t ip;uint8_t ip6[16];uint16_t port;
  char name[8];np_addr_t rx_src;int64_t rx_src_ms,last_rx_ms,last_frame_ms;
  bool have_latest,head_valid,have_first;uint16_t latest,head,stream_first;
  uint8_t (*jbuf)[NP_AUDIO_OPUS];uint16_t *jbuf_seq;bool *jbuf_valid;
@@ -119,12 +124,16 @@ static bool peer_jbuf_alloc(rt_peer_t *p){return p->jbuf!=NULL;}
 static void link_peer(rt_peer_t *p,const np_addr_t *src){(void)p;(void)src;}
 static bool frame_send_to(rt_peer_t *p,uint8_t type,uint16_t seq,bool keyed,const uint8_t *data){(void)p;(void)type;(void)seq;(void)keyed;(void)data;return true;}
 static void handle_control(rt_peer_t *p,const uint8_t *pkt,int n,const np_addr_t *src){(void)p;(void)pkt;(void)n;(void)src;}
-static void hub_forward_audio(const uint8_t *mac,const uint8_t *pkt,size_t n,bool keyed){(void)mac;(void)pkt;(void)n;(void)keyed;}
+static rt_peer_t *peer_by_mac(const uint8_t mac[6]);
+static rt_peer_t *peer_by_source(const np_addr_t *src){(void)src;return NULL;}
+static void hub_forward_audio(rt_peer_t *p,const uint8_t *pkt,const np_header_t *header,uint16_t epoch,bool start){
+ (void)p;(void)pkt;(void)header;(void)epoch;(void)start;
+}
 '''
 NP_POST = r'''
 static void reset_engine(void){
  memset(s_peer,0,sizeof(s_peer));memset(audio,0,sizeof(audio));memset(audio_valid,0,sizeof(audio_valid));memset(seqs,0,sizeof(seqs));
- for(int i=0;i<2;i++){s_peer[i].in_use=true;s_peer[i].jbuf=audio[i];s_peer[i].jbuf_seq=seqs[i];s_peer[i].jbuf_valid=audio_valid[i];}
+ for(int i=0;i<2;i++){s_peer[i].in_use=true;s_peer[i].mac[5]=(uint8_t)(i+1);s_peer[i].jbuf=audio[i];s_peer[i].jbuf_seq=seqs[i];s_peer[i].jbuf_valid=audio_valid[i];}
 }
 static void seed_stream(unsigned peer,uint16_t head,uint16_t latest){
  rt_peer_t *p=&s_peer[peer];p->head_valid=p->have_latest=p->have_first=true;p->head=head;p->latest=latest;p->stream_first=latest-10;p->last_rx_ms=now_ms();
@@ -181,7 +190,8 @@ TEST = r'''
 static void begin(int protection){
  ptt_request_rx();ptt_bridge_key(false);clock_us=1000000;
  rx_guard_context(MODE,false);assert(rx_guard_configure(MODE,protection==700?"1,700,7,1":protection==5000?"1,5000,7,1":"1,10000,7,1")==ESP_OK);
- rx_guard_context(MODE,true);reset_engine();s_rx_ptt=false;s_last_play_ms=0;s_tail_played=false;s_rx_hang_ms=0;
+ rx_guard_context(MODE,true);reset_engine();s_rx_ptt=false;s_last_play_ms=0;s_rx_hang_ms=0;
+ s_rf_close=(net_rf_close_t){0};s_rf_speech_us=0;
 }
 static void active(void){s_rx_ptt=true;s_rx_ptt_ms=now_ms();bridge_key_update(false,false);assert(rf_pin);}
 static void finish_valid(void){
@@ -263,7 +273,20 @@ int main(void){
   advance(251);bridge_key_update(false,false);assert(!rf_pin);
   wire_epoch=old;receive(0,104,true);bridge_key_update(false,false);assert(!rf_pin);
  }
- printf("PASS %s 1000 over transitions and retired-over replays\n",ENGINE);
+ test_timeout_s=5;wire_epoch=6000;begin(700);
+ receive(0,100,true);bridge_key_update(false,false);assert(rf_pin);
+ const int64_t started=clock_us;
+ for(uint16_t seq=101;clock_us-started<5000000;seq++){
+  advance(20);
+  receive(0,seq,true);
+  (void)pull_audio();
+  bridge_key_update(false,false);
+  if(clock_us-started<5000000)assert(rf_pin);
+ }
+ advance(AUDIO_I2S_BUFFER_MS);bridge_key_update(false,false);assert(!rf_pin);
+ receive(0,400,true);bridge_key_update(false,false);assert(!rf_pin);
+ wire_epoch++;receive(0,401,true);bridge_key_update(false,false);assert(rf_pin);
+ printf("PASS %s 1000 transitions, timed RF cutoff, same-epoch refusal and fresh epoch\n",ENGINE);
  return 0;
 }
 '''
@@ -275,10 +298,15 @@ def mqtt_data_case(source):
     extracted = function(wrapped, 'case_body')
     return 'case 1: ' + extracted[extracted.index('{'):]
 
+def rf_close_support():
+    source = (ROOT / 'firmware/main/net_audio_denoise.c').read_text(encoding='utf-8')
+    return function(source, 'net_audio_source') + function(source, 'net_rf_close_hold')
+
+
 def run():
     sources = {name:(ROOT / 'firmware/main' / name).read_text(encoding='utf-8') for name in ('netp2pnet.c','netrelay.c')}
     hashes = {name:hashlib.sha256((ROOT/'firmware/main'/name).read_bytes()).hexdigest() for name in sources}
-    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h'):
+    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h','tx_timeout.h','net_audio_denoise.h','rf_denoise.h'):
         shutil.copy2(ROOT/'firmware/main'/name, OUT/name)
         hashes[name]=hashlib.sha256((OUT/name).read_bytes()).hexdigest()
     (OUT/'freertos').mkdir(exist_ok=True)
@@ -290,10 +318,10 @@ def run():
     gcc=shutil.which('gcc')
     for engine,source in sources.items():
         if engine=='netp2pnet.c':
-            code=COMMON+NP_ENV+''.join(function(source,f) for f in ('peer_reset_stream','jbuf_audio','handle_frame','peer_jbuf_next','select_active_peer','bridge_key_update'))+NP_POST
+            code=COMMON+rf_close_support()+NP_ENV+''.join(function(source,f) for f in ('peer_reset_stream','jbuf_audio','handle_frame','peer_jbuf_next','select_active_peer','bridge_key_update','peer_by_mac'))+NP_POST
             mode=1
         else:
-            code=COMMON+REL_ENV+''.join(function(source,f) for f in ('relay_source','relay_reset_stream','relay_store_packet','rel_jbuf_next','bridge_key_update'))+REL_POST+mqtt_data_case(source)+'\n}\n}\n'
+            code=COMMON+rf_close_support()+REL_ENV+''.join(function(source,f) for f in ('relay_source','relay_reset_stream','relay_store_packet','rel_jbuf_next','bridge_key_update'))+REL_POST+mqtt_data_case(source)+'\n}\n}\n'
             code+='static bool pull_audio(void){int16_t out[320];int peak;return rel_jbuf_next(out,&peak);}\n'
             mode=2
         code=f'#define MODE {mode}\n#define ENGINE "{engine}"\n'+code+TEST

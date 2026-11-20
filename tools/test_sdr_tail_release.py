@@ -38,6 +38,9 @@ static int64_t s_tail_drain_us;
 static uint32_t s_tx_id, s_cancelled_tx, owner, tail_done, s_last_tx_ms, s_last_rel_ms;
 static uint32_t s_session = 7, s_tail_upload_sid;
 static bool s_on = true;
+static bool s_limit_release;
+static int64_t speech_deadline;
+static unsigned timeout_ms = 5000;
 static uint32_t s_rel_total, s_rel_tail, s_rel_notail, s_rel_pcm_timeout, s_rel_force;
 static uint32_t s_rel_tail_timeout, s_rel_released_notail, s_owner_mismatch;
 static uint32_t s_begin_busy, s_off_stale, s_off_reject, s_on_reject;
@@ -58,6 +61,12 @@ static void xSemaphoreTake(int sem, int wait) { (void)sem; (void)wait; }
 static void xSemaphoreGive(int sem) { (void)sem; }
 static bool session_locked(uint32_t sid) { return s_on && sid == s_session; }
 static bool ptt_owned(int source, uint32_t token) { return source == PTT_OWNER_SDR && owner && owner == token; }
+static bool ptt_session_start(int source,uint32_t token) {
+    speech_deadline = clock_us + (int64_t)timeout_ms * 1000;
+    return ptt_owned(source,token);
+}
+static bool ptt_speech_expired(int source,uint32_t token){return ptt_owned(source,token) && clock_us >= speech_deadline;}
+static void ptt_begin_release(int source,uint32_t token){assert(ptt_owned(source,token));}
 static int ptt_owner(void) { return owner ? PTT_OWNER_SDR : PTT_OWNER_NONE; }
 static uint32_t ptt_owner_token(void) { return owner; }
 static bool voice_sdr_begin(uint32_t tx) { if (owner) return false; owner = tx; return true; }
@@ -73,6 +82,7 @@ static int netcom_mode(void) { return mode; }
 static bool netcom_rf_tx(void) { return rf_on_network; }
 static bool netcom_tx_ready(void) { return true; }
 static void netcom_tx_end(void) { ++network_ends; }
+static void bridge_rx_inhibit(void) {}
 static size_t voice_bridge_level(void) { return 0; }
 static size_t tx_level_locked(void) { return s_tx_head - s_tx_tail; }
 static size_t ring_take(int16_t *ring, size_t capacity, size_t *head, size_t *tail,
@@ -155,6 +165,22 @@ int main(void)
     sdr_tx_step();
     assert(!owner && !s_releasing && network_ends == 2 && tone_starts == 2);
     assert(s_rel_notail == 1 && s_rel_released_notail == 1);
+    tone_configured = true;
+    assert(sdr_ptt_request(sid, 6, true));
+    clock_us = speech_deadline - 1000;
+    s_client_us = s_pcm_us = clock_us;
+    s_pcm_ever = true;
+    sdr_tx_step();
+    assert(s_ptt_hold && !s_releasing && tone_starts == 2);
+    clock_us = speech_deadline;
+    sdr_tx_step();
+    assert(!s_ptt_hold && s_releasing && owner == 6);
+    sdr_tx_step();
+    assert(s_tail_started && tone_starts == 3 && network_ends == 2);
+    tail_done = 6;
+    sdr_tx_step();
+    assert(!owner && !s_releasing && network_ends == 3 && !strcmp(s_last_reason, "hold_limit"));
+    puts("PASS: SDR configured cutoff stops capture, sends a single tail and then closes the network over");
     puts("PASS: SDR short/long release, last DAC buffer, network end, duplicate/late OFF and blocked late ON");
     return 0;
 }

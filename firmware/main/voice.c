@@ -382,6 +382,8 @@ static int s_sdr_tail_config;
 static bool s_net_tail_active;
 static int s_net_tail_id;
 static size_t s_net_tail_pos;
+static int64_t s_net_tail_drain_us;
+static void net_tail_render(int16_t *out, size_t frames);
 /* Latched when the browser transmission starts.  The tail is fetched by the
  * monitor task, so this flag tells that task whether its samples also belong
  * to the network TX stream. */
@@ -1461,6 +1463,7 @@ static void monitor_task(void *arg)
             /* The SDR release state owns the DAC once queued browser PCM is
              * empty; capture it before choosing this block's source. */
             const bool sdr_tailing = voice_sdr_tail_active();
+            const bool net_tailing = voice_net_tail_active();
             s_blk_injected = false;
             s_blk_tx_processed = false;
             if (previewing) {
@@ -1468,13 +1471,12 @@ static void monitor_task(void *arg)
                     s_preview_amp = true;
                     board_amp_enable(true);
                 }
-            } else if (voice_net_tail_active()) {
-                /* The over has ended: this task owns the DAC, so play the
-                 * courtesy tone here and release the carrier when it is out. */
-                voice_net_tail_run((size_t)m);
-                memset(out, 0, (size_t)m * sizeof(int16_t));
-                s_blk_injected = false;
-                s_blk_tx_processed = false;
+            } else if (net_tailing) {
+                net_tail_render(out, (size_t)m);
+                s_blk_injected = true;
+                s_blk_tx_processed = true;
+                s_bridge_inj_amp = true;
+                board_amp_enable(false);
             } else if (sdr_tailing) {
                 /* Drain a possible interpolation residue, then append the
                  * browser release tail on the monitor sample clock.  This
@@ -1696,8 +1698,10 @@ static void monitor_task(void *arg)
                 (uint32_t)(esp_timer_get_time() - block_start));
 
             const int64_t write_start = esp_timer_get_time();
-            const esp_err_t write_err = denoise.close_us ?
-                audio_i2s_write_until(out, (size_t)m, denoise.close_us) : audio_i2s_write(out, (size_t)m);
+            const int64_t write_deadline = net_tailing ? write_start + 80000 : denoise.close_us;
+            const esp_err_t write_err = write_deadline ?
+                audio_i2s_write_until(out, (size_t)m, write_deadline) : audio_i2s_write(out, (size_t)m);
+            if (net_tailing && write_err != ESP_OK) { voice_net_tail_stop(); }
             if ((denoise.close_us && denoise.finished && !denoise.dma_left &&
                  !rf_denoise_play_pending(RF_DENOISE_SPEAKER)) ||
                 (write_err != ESP_OK && denoise.active)) {
@@ -1829,27 +1833,36 @@ static int gain_mul(int16_t *buf, size_t n, int gain)
 /* A courtesy tone is played by whichever task owns the DAC.  Both the local
  * TALK path and the network bridge path use this one loop, so a tail behaves
  * identically no matter where the over came from. */
-typedef void (*tail_sink_fn)(int16_t *buf, size_t n, void *ctx);
+typedef bool (*tail_sink_fn)(int16_t *buf, size_t n, void *ctx);
 
 static int tx_gain_apply(int16_t *buf, size_t n);
 
-struct talk_tail_ctx { bool network; bool rf_also; };
+struct talk_tail_ctx {
+    bool network, rf_also;
+    uint32_t token;
+    uint8_t mode;
+    uint16_t room;
+    int64_t next_us;
+};
 
-static void talk_tail_sink(int16_t *b, size_t n, void *ctx)
+static bool talk_tail_sink(int16_t *b, size_t n, void *ctx)
 {
     struct talk_tail_ctx *c = (struct talk_tail_ctx *)ctx;
+    if (!ptt_owned(PTT_OWNER_TALK, c->token) || ptt_extend(1000) != ESP_OK) { return false; }
+    if (netcom_mode() != c->mode || (c->network && netcom_room() != c->room)) { return false; }
     (void)tx_gain_apply(b, n);
-    if (!c->network) {
-        (void)audio_i2s_write(b, n);          /* blocking = sample-locked */
-        return;
+    if (c->network) {
+        netcom_tx_sample_until(b, n, true, ptt_release_deadline_us(PTT_OWNER_TALK, c->token));
     }
-    netcom_tx_sample(b, n, true);
-    if (c->rf_also) {
-        (void)audio_i2s_write(b, n);
-    } else {
-        /* No sample clock here: pace against the wall clock. */
-        vTaskDelay(pdMS_TO_TICKS(1000 * (int)n / AUDIO_SAMPLE_RATE_HZ));
+    if (!c->network || c->rf_also) {
+        return audio_i2s_write_until(b, n, esp_timer_get_time() + 80000) == ESP_OK;
     }
+    /* No sample clock here: pace against the wall clock. */
+    if (!c->next_us) { c->next_us = esp_timer_get_time(); }
+    c->next_us += (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
+    const int64_t remaining = c->next_us - esp_timer_get_time();
+    if (remaining > 0) { vTaskDelay(pdMS_TO_TICKS((remaining + 999) / 1000)); }
+    return true;
 }
 
 static bool tail_play(int id, int16_t *buf, size_t frames,
@@ -1859,11 +1872,10 @@ static bool tail_play(int id, int16_t *buf, size_t frames,
     if (id <= TAIL_OFF || id >= TAIL_COUNT || total == 0) { return false; }
     size_t pos = 0;
     while (pos < total) {
-        ptt_extend(1000);
         const size_t n = tail_fetch(id, pos, buf, frames);
         if (!n) { return false; }
         pos += n;
-        sink(buf, n, ctx);
+        if (!sink(buf, n, ctx)) { return false; }
     }
     return true;
 }
@@ -2009,7 +2021,7 @@ static bool talk_network_emit(const int16_t *pcm, size_t n, void *context)
     memcpy(shaped, pcm, n * sizeof(*pcm));
     const int peak = voice_apply_tx_processing(shaped, n);
     if (peak > tx->peak) { tx->peak = peak; }
-    netcom_tx_sample(shaped, n, true);
+    netcom_tx_sample_until(shaped, n, false, ptt_release_deadline_us(PTT_OWNER_TALK, tx->generation));
     return true;
 }
 
@@ -2070,13 +2082,19 @@ static void talk_task(void *arg)
     bool captured_for_denoise = false;
 
     while (!s_stop) {
+        if (ptt_speech_expired(PTT_OWNER_TALK, generation) || s_release_requested) {
+            ptt_released = true;
+            break;
+        }
         size_t got = 0;
         if (audio_i2s_read(buf, BLOCK_FRAMES, &got) != ESP_OK || got == 0) {
+            if (ptt_get_state() != PTT_TX) { ptt_released = true; break; }
             ++s_stats.underruns;
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
-        if (tx.mode != netcom_mode() || (network && tx.room != netcom_room())) {
+        if (ptt_speech_expired(PTT_OWNER_TALK, generation) || ptt_get_state() != PTT_TX ||
+            tx.mode != netcom_mode() || (network && tx.room != netcom_room())) {
             ptt_released = true;
             break;
         }
@@ -2095,8 +2113,8 @@ static void talk_task(void *arg)
             out_peak = tx.peak;
         } else if (network || !denoising) {
             out_peak = voice_apply_tx_processing(buf, got);
-            if (network && netcom_mode() == tx.mode) {
-                netcom_tx_sample(buf, got, ptt_get_state() == PTT_TX);
+            if (network && netcom_mode() == tx.mode && ptt_get_state() == PTT_TX) {
+                netcom_tx_sample_until(buf, got, false, ptt_release_deadline_us(PTT_OWNER_TALK, generation));
             }
         }
         if (denoising) {
@@ -2158,6 +2176,7 @@ static void talk_task(void *arg)
      * Runs before s_task_running is cleared: voice_stop() only releases the
      * PTT once this task has exited, and in local mode the DAC is still ours.
      */
+    ptt_begin_release(PTT_OWNER_TALK, generation);
     if (net_denoising) { (void)rf_denoise_finish(net_route, talk_network_emit, &tx); }
     if (net_level) { rf_denoise_stop(net_route); }
     const bool drained = captured_for_denoise &&
@@ -2207,7 +2226,10 @@ static void talk_task(void *arg)
              * release) IS a normal end of transmission, and it releases the
              * PTT only after this task exits -- so the key holds either way.
              */
-            struct talk_tail_ctx tctx = { .network = network, .rf_also = s_rf_also };
+            struct talk_tail_ctx tctx = {
+                .network = network, .rf_also = s_rf_also, .token = generation,
+                .mode = tx.mode, .room = tx.room,
+            };
             played_tail = tail_play(tid, tbuf, BLOCK_FRAMES, talk_tail_sink, &tctx);
             /*
              * The tone is NOT played back on the local speaker (user
@@ -2965,7 +2987,7 @@ size_t voice_sdr_tail_fetch(int16_t *out, size_t n)
              * just fetched; sdr.c sends browser PCM, so this cannot duplicate
              * audio.  Keep the call under the PTT lock so a timeout cannot
              * place the end marker ahead of this final tail block. */
-            netcom_tx_sample(out, got, true);
+            netcom_tx_sample_until(out, got, true, ptt_release_deadline_us(PTT_OWNER_SDR, s_sdr_tail_token));
         }
         if (!got || s_sdr_tail_pos >= total) {
             s_sdr_tail_block_pending = got != 0;
@@ -3995,57 +4017,57 @@ esp_err_t voice_start(voice_mode_t mode)
 
 /* ---------------------------------------------------- network courtesy tone */
 
-/*
- * The network paths (bridge, P2P, relay) end an over without playing the tone,
- * because they release the carrier as soon as the last packet is out.  They now
- * request it here; the monitor task -- which owns the DAC while the bridge is
- * keyed -- plays it through the same tail_play() loop the local TALK path uses
- * and releases the carrier afterwards.  Requesting is cheap and cannot fail, so
- * there is no start/refuse race left.
- */
-static volatile bool s_bridge_tail_req;
-static volatile bool s_bridge_tail_run;   /* kept true while the tone plays */
-static int s_bridge_tail_id;
-
 bool voice_net_tail_start(void)
 {
-    /*
-     * Plan A (2026-11-06): the courtesy tone is generated once, at the end that
-     * is doing the talking (handset mic, browser, app).  A relay must not add
-     * a second one on top of the tone already inside the stream.
-     */
-    return false;
-    const int id = tail_get();
-    if (!tail_should_play(netcom_mode()) || id <= TAIL_OFF ||
-        id >= TAIL_COUNT || tail_samples(id) == 0) {
-        return false;
+    /* Used only when this RF hop ends the upstream stream early. */
+    const int id = tail_id_for_mode(netcom_mode());
+    ptt_control_lock();
+    const bool allowed = ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() &&
+        id > TAIL_OFF && id < TAIL_COUNT && tail_samples(id) != 0;
+    if (allowed) {
+        s_net_tail_id = id;
+        s_net_tail_pos = 0;
+        s_net_tail_drain_us = 0;
+        s_net_tail_active = true;
     }
-    s_bridge_tail_id = id;
-    s_bridge_tail_req = true;
-    return true;
+    ptt_control_unlock();
+    return allowed;
 }
 
-bool voice_net_tail_active(void) { return s_bridge_tail_req || s_bridge_tail_run; }
-
-void voice_net_tail_stop(void) { s_bridge_tail_req = false; s_bridge_tail_run = false; }
-
-static void bridge_tail_sink(int16_t *b, size_t n, void *ctx)
+bool voice_net_tail_active(void)
 {
-    (void)ctx;
-    (void)gain_mul(b, n, s_bgtx);
-    (void)audio_i2s_write(b, n);
+    ptt_control_lock();
+    const bool active = s_net_tail_active;
+    ptt_control_unlock();
+    return active;
 }
 
-/* Runs in the monitor task: writes the tone straight to the DAC while the
- * bridge keeps the radio keyed, then releases the carrier. */
-void voice_net_tail_run(size_t frames)
+void voice_net_tail_stop(void)
 {
-    if (!s_bridge_tail_req) { return; }
-    s_bridge_tail_req = false;
-    s_bridge_tail_run = true;      /* the network task must keep the carrier up */
-    int16_t buf[BLOCK_FRAMES];
-    const size_t block = frames < BLOCK_FRAMES ? frames : BLOCK_FRAMES;
-    (void)tail_play(s_bridge_tail_id, buf, block, bridge_tail_sink, NULL);
-    ptt_bridge_key(false);         /* only now may the carrier drop */
-    s_bridge_tail_run = false;
+    ptt_control_lock();
+    s_net_tail_active = false;
+    ptt_control_unlock();
+}
+
+/* One block on the monitor sample clock, with time for the last audible
+ * samples already waiting in I2S. Never wait under the PTT lock. */
+static void net_tail_render(int16_t *out, size_t frames)
+{
+    size_t count = 0;
+    ptt_control_lock();
+    if (s_net_tail_active && (!ptt_owned(PTT_OWNER_NETWORK, 1) || !ptt_bridge_keyed())) {
+        s_net_tail_active = false;
+    }
+    if (s_net_tail_active) {
+        count = tail_fetch(s_net_tail_id, s_net_tail_pos, out, frames);
+        s_net_tail_pos += count;
+        if (!count) {
+            const int64_t now = esp_timer_get_time();
+            if (!s_net_tail_drain_us) { s_net_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000; }
+            if (now >= s_net_tail_drain_us) { s_net_tail_active = false; }
+        }
+    }
+    ptt_control_unlock();
+    (void)gain_mul(out, count, s_bgtx);
+    memset(out + count, 0, (frames - count) * sizeof(*out));
 }

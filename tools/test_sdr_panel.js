@@ -20,7 +20,6 @@ function runtime() {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m =>
     [m[1], {value: '', style: {}, textContent: '', className: '', disabled: false,
       addEventListener() {}, appendChild() {}}]));
-  elements.get('secs').value = '30';
   const node = () => ({connect() {}, disconnect() {}, gain: {value: 1}});
   class AudioContext {
     constructor() {

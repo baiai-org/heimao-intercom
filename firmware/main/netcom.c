@@ -586,11 +586,11 @@ void netcom_psk(uint8_t *out, bool *set)
  * task calls this in P2P mode instead of writing the SA818's MIC_IN.  In
  * local mode, or while an engine has no TX hook, this is a no-op.
  */
-void netcom_tx_sample(const int16_t *pcm, size_t n, bool ptt)
+void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     const netcom_engine_t *e = active_engine();
-    if (e && e->tx_sample) {
-        e->tx_sample(pcm, n, ptt);
+    if (e && e->tx_sample && expires_us > esp_timer_get_time()) {
+        e->tx_sample(pcm, n, tail, expires_us);
     }
 }
 

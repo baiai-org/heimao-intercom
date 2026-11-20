@@ -33,7 +33,8 @@ static uint16_t tx_seq;
 static void fixture(void){
  ptt_bridge_key(false);voice_bridge_network_cancel();voice_inject_reset();reset_engine();
  advance(100);rx_guard_context(MODE,false);assert(rx_guard_configure(MODE,"1,700,7,1")==ESP_OK);
- rx_guard_context(MODE,true);s_rx_ptt=false;s_last_play_ms=0;wire_epoch=10;tx_seq=100;
+ rx_guard_context(MODE,true);s_rx_ptt=false;s_last_play_ms=0;s_rf_close=(net_rf_close_t){0};
+ s_rf_speech_us=0;wire_epoch=10;tx_seq=100;
 }
 static void clip(int frames,int gap){
  advance(gap);wire_epoch++;int first=-1,last=-1;size_t count=0;int first_key=-1,first_play=-1;
@@ -219,7 +220,7 @@ def body(source,needle):
 
 def run(out):
     voice=(ROOT/'firmware/main/voice.c').read_text(encoding='utf-8')
-    common=order.COMMON
+    common=order.COMMON+order.rf_close_support()
     for stub in (
         'static void voice_bridge_network_state(bool feeding,bool rf){(void)feeding;(void)rf;}\n',
         'static bool voice_bridge_network_pending(void){return false;}\n',
@@ -231,23 +232,19 @@ def run(out):
         'voice_bridge_network_pending','voice_bridge_network_ready','voice_bridge_network_written','voice_bridge_network_cancel',
         'voice_bridge_room','voice_bridge_inject','voice_bridge_level','voice_bridge_take_resampled','voice_bridge_play','voice_bridge_take')
     voice_code=VOICE+''.join(function(voice,n) for n in funcs)
-    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h','net_audio_denoise.h','rf_denoise.h'):
+    for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h','net_audio_denoise.h','rf_denoise.h','tx_timeout.h'):
         shutil.copy2(ROOT/'firmware/main'/name,out/name)
     (out/'freertos').mkdir(exist_ok=True);(out/'stubs.h').write_text(STUBS,encoding='utf-8')
     for name in ('esp_err.h','esp_timer.h','esp_log.h','board_hw.h','sa818_cfg.h','nvs.h','freertos/FreeRTOS.h','freertos/semphr.h','freertos/task.h'):
         (out/name).write_text('#include "stubs.h"\n',encoding='utf-8')
     codes={}
-    adapter=(ROOT/'firmware/main/net_audio_denoise.c').read_text(encoding='utf-8')
-    transition='#include "net_audio_denoise.h"\n'+function(adapter,'net_audio_source')
     for engine in ('netp2pnet.c','netrelay.c'):
         src=(ROOT/'firmware/main'/engine).read_text(encoding='utf-8')
         if engine=='netp2pnet.c':
             production=''.join(function(src,n) for n in ('peer_reset_stream','jbuf_audio','handle_frame','peer_jbuf_next','select_active_peer','bridge_key_update','peer_by_mac'))
             post=order.NP_POST.replace('np_addr_t src={.fam=4', 'pkt[24]=(uint8_t)wire_pcm;pkt[25]=(uint8_t)(wire_pcm>>8);np_addr_t src={.fam=4')
-            post=post.replace('s_peer[i].in_use=true;', 's_peer[i].in_use=true;s_peer[i].mac[5]=(uint8_t)(i+1);')
-            np_env=order.NP_ENV.replace('bool in_use,via_hub,selftest;uint8_t fam;', 'bool in_use,via_hub,selftest;uint8_t mac[6],fam;')
             adapter='static bool engine_take(int16_t *out){int peak;rt_peer_t *p=select_active_peer();return p&&peer_jbuf_next(p,out,&peak);}\n'
-            code=common+voice_code+np_env+production+post+adapter
+            code=common+voice_code+order.NP_ENV+production+post+adapter
             mode=1
         else:
             production=''.join(function(src,n) for n in ('relay_source','relay_reset_stream','relay_store_packet','rel_jbuf_next','bridge_key_update'))
@@ -256,7 +253,7 @@ def run(out):
             code=common+voice_code+order.REL_ENV+production+post+order.mqtt_data_case(src)+'\n}\n}\n'+adapter
             mode=2
         codes[engine]=(f'#define MODE {mode}\n#define ENGINE "{engine}"\n'+code+
-                       transition+function(src,'network_audio_read')+TEST)
+                       function(src,'network_audio_read')+TEST)
     mute='if (rf_audio && (speaker_settling || (rx_blocked & RX_GUARD_OUT_SPK))) '+body(voice,'if (rf_audio && (speaker_settling')
     codes['rf-prefix']=RF_ENV+function(voice,'clamp16')+function(voice,'gain_mul')+function(voice,'rf_forward_one')+function(voice,'rf_forward_block')+RF_TEST.replace('SPEAKER_MUTE',mute)
     results=[]

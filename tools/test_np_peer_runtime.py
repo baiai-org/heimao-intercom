@@ -43,6 +43,7 @@ static int inet_aton(const char *s,struct in_addr *a){return inet_pton(AF_INET,s
 #include "np_peer_store.h"
 #include "np_access.h"
 #include "net_rx_order.h"
+#include "tx_timeout.h"
 static const char *inet_ntoa_r(struct in_addr a,char *out,size_t n){return inet_ntop(AF_INET,&a,out,n);}
 typedef int esp_err_t;typedef void opus_link_dec_t;typedef int nvs_handle_t;
 #define ESP_OK 0
@@ -64,6 +65,8 @@ typedef int esp_err_t;typedef void opus_link_dec_t;typedef int nvs_handle_t;
 #define NP_FLAG_HUB 4u
 #define NP_FLAG_FORWARDED 8u
 #define NP_FLAG_ROLE 16u
+#define NP_MAGIC 0x4F52
+#define NP_CTR_BASE 22
 #define NP_HDR_LEN 14
 #define NP_AUDIO_LEN 104
 #define F_PING 3
@@ -89,6 +92,12 @@ static void test_log(const char *tag,const char *fmt,...){(void)tag;(void)fmt;}
 static const char *TAG="test";
 static int64_t clock_ms=100000;
 static int64_t now_ms(void){return clock_ms;}
+static int64_t esp_timer_get_time(void){return clock_ms * 1000;}
+static uint16_t netcom_room(void){return 1;}
+static unsigned timeout_s=180;
+unsigned tx_timeout_seconds(void){return timeout_s;}
+static void psk_compute(uint16_t room,const uint8_t *mac,uint8_t *key){(void)room;(void)mac;memset(key,0,8);}
+
 static void peer_lock(void){}
 static void peer_unlock(void){}
 static unsigned allocations,frees;static bool oom;
@@ -132,9 +141,9 @@ static void json_escape_str_n(const char *s,char *out,size_t cap){
 POST=r'''
 static void tomb_clear_addr(const np_addr_t *a){(void)a;}
 static void tomb_add(const rt_peer_t *p){(void)p;}
-static unsigned pings,knocks,forwards;
+static unsigned pings,knocks,forwards,cutoffs;
 static bool frame_send_to(rt_peer_t *p,uint8_t type,uint16_t seq,bool keyed,const uint8_t *pcm){(void)p;(void)seq;(void)keyed;(void)pcm;if(type==F_PING)pings++;if(type==F_KNOCK)knocks++;return true;}
-static int peer_send_raw(rt_peer_t *p,const uint8_t *data,int len){(void)p;assert(data[0]==0x42&&len==104);assert(data[12]&NP_FLAG_FORWARDED);forwards++;return len;}
+static int peer_send_raw(rt_peer_t *p,const uint8_t *data,int len){(void)p;assert(len==104);assert(data[12]&NP_FLAG_FORWARDED);if(data[12]&NET_RX_FLAG_HUB_CUTOFF)cutoffs++;else{assert(data[0]==0x42);forwards++;}return len;}
 static void peers_save(void);
 static np_access_record_t s_denied[NP_DENY_LIMIT];
 static size_t s_denied_count;static bool s_access_error;
@@ -170,9 +179,20 @@ int main(void){
  assert(pings==16*601);
  clock_ms+=90001;engine_tick_timers();assert(knocks==16);
  clock_ms+=55;for(int i=0;i<16;i++){assert(!s_peer[i].linked);link_peer(&s_peer[i],NULL);assert(s_peer[i].linked&&s_peer[i].rtt_ms==55);}
- uint8_t packet[104]={0x42};s_hub_on=true;hub_forward_audio(s_peer[0].mac,packet,sizeof(packet),true);assert(forwards==15);
- s_hub_on=false;hub_forward_audio(s_peer[0].mac,packet,sizeof(packet),true);assert(forwards==15);
- s_hub_on=true;packet[12]=NP_FLAG_FORWARDED;hub_forward_audio(s_peer[0].mac,packet,sizeof(packet),true);assert(forwards==15);packet[12]=0;
+ uint8_t packet[104]={0x42};
+ np_header_t talk={.seq=100,.flags=1};
+ timeout_s=5;
+ s_hub_on=true;hub_forward_audio(&s_peer[0],packet,&talk,8,true);assert(forwards==15);
+ const int64_t started=clock_ms;
+ s_hub_on=false;hub_forward_audio(&s_peer[0],packet,&talk,8,false);assert(forwards==15);
+ s_hub_on=true;talk.flags=NP_FLAG_FORWARDED|1;hub_forward_audio(&s_peer[0],packet,&talk,8,false);assert(forwards==15);
+ talk.flags=1;talk.seq++;
+ clock_ms=started+4999;hub_forward_audio(&s_peer[0],packet,&talk,8,false);assert(forwards==30);
+ clock_ms=started+5000;talk.seq++;hub_forward_audio(&s_peer[0],packet,&talk,8,false);
+ assert(forwards==30 && cutoffs==15 && s_peer[0].hub_tx_closed);
+ talk.seq++;hub_forward_audio(&s_peer[0],packet,&talk,8,false);assert(forwards==30 && cutoffs==15);
+ hub_forward_audio(&s_peer[0],packet,&talk,9,true);assert(forwards==45);
+ s_peer[0].hub_tx_closed=true;timeout_s=180;clock_ms=started;
  // Maximal printable names/IPv6/counters exercise the actual JSON serializer.
  for(int i=0;i<16;i++){rt_peer_t *p=&s_peer[i];p->fam=6;memset(p->ip6,0xee,16);p->ip6[15]=i;p->linked=true;strcpy(p->name,"\"\"\"\"\"\"\"");p->rx_msgs=p->tx_msgs=p->rx_drop=UINT32_MAX;p->rtt_ms=2147483647;}
  struct {char json[5120];uint8_t guard[16];} b;memset(&b,0xa5,sizeof(b));netp2pnet_status_json(b.json,sizeof(b.json));
@@ -330,16 +350,16 @@ static void peer_labels_bind(const np_access_record_t*a,const np_access_record_t
 def main():
  source=(ROOT/'firmware/main/netp2pnet.c').read_text(encoding='utf-8')
  types=''
- for name in ('np_addr_t','rt_peer_t'):
+ for name in ('np_addr_t','np_header_t','rt_peer_t'):
   end=source.index('} '+name+';')+len('} '+name+';');start=source.rfind('typedef struct {',0,end);types+=source[start:end]+'\n'
- names=['be32','put_be32','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_bind_identity','peer_ensure','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','engine_tick_timers','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','peer_add_confirmed_inner','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json','netp2pnet_cleanup_idle']
+ names=['be32','put_be32','put_be16','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_bind_identity','peer_ensure','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','hub_send_audio','hub_send_cutoff','engine_tick_timers','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','peer_add_confirmed_inner','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json','netp2pnet_cleanup_idle']
  reserve=next(x for x in (ROOT/'firmware/main/netp2pnet.h').read_text().splitlines() if x.startswith('#define NETP2PNET_STATUS_RESERVE'))
  harness=HARNESS.replace('char json[5120]','char json[NETP2PNET_STATUS_RESERVE]').replace('struct {char json[NETP2PNET_STATUS_RESERVE]', 'max_labels=true;struct {char json[NETP2PNET_STATUS_RESERVE]')
  code=PRE+LABEL_STUBS+reserve+'\n'+types+'\nstatic rt_peer_t s_peer[SLOT_MAX];\n'+POST+''.join(function(source,n) for n in names)+harness
  (ROOT/'.tmp').mkdir(exist_ok=True)
  with tempfile.TemporaryDirectory(prefix='np-runtime-',dir=ROOT/'.tmp') as temp:
-  d=Path(temp);(d/'test.c').write_text(code,encoding='utf-8');exe=d/'test.exe';env=dict(os.environ,TEMP=temp,TMP=temp,TMPDIR=temp)
-  command=[shutil.which('gcc'),'-D_DEFAULT_SOURCE','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-variable','-Wno-unused-function','-Wno-misleading-indentation','-I',str(ROOT/'firmware/main'),str(d/'test.c'),str(ROOT/'firmware/main/np_peer_store.c'),str(ROOT/'firmware/main/np_access.c'),'-o',str(exe)]
+  d=Path(temp);(d/'esp_err.h').write_text('typedef int esp_err_t;\n');(d/'test.c').write_text(code,encoding='utf-8');exe=d/'test.exe';env=dict(os.environ,TEMP=temp,TMP=temp,TMPDIR=temp)
+  command=[shutil.which('gcc'),'-D_DEFAULT_SOURCE','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-variable','-Wno-unused-function','-Wno-misleading-indentation','-I',str(d),'-I',str(ROOT/'firmware/main'),str(d/'test.c'),str(ROOT/'firmware/main/np_peer_store.c'),str(ROOT/'firmware/main/np_access.c'),'-o',str(exe)]
   if os.name=='nt':command+=['-lws2_32']
   subprocess.run(command,check=True,env=env)
   lines=subprocess.check_output([str(exe)],text=True,timeout=20).splitlines()

@@ -28,9 +28,11 @@
 #include "freertos/semphr.h"
 
 #include "channels.h"
+#include "audio_i2s.h"
 #include "channel_control.h"
 #include "netcom.h"
 #include "ptt.h"
+#include "tx_timeout.h"
 #include "sa818_cfg.h"
 #include "voice.h"
 #include "voice_tail.h"
@@ -70,6 +72,11 @@ static uint8_t s_rx_denoise_mode;
 static uint16_t s_rx_room;
 static int s_rx_chan;
 static bool s_rx_room_changing;
+static tx_timeout_window_t s_rx_window;
+static bool s_rx_limited;
+static int s_rx_tail_id;
+static size_t s_rx_tail_pos;
+static int64_t s_rx_tail_next_us;
 
 static void rx_tx_lock(void)
 {
@@ -104,7 +111,7 @@ static void bridge_rx_end_locked(bool with_tail)
                 const size_t n = tail_fetch(id, pos, buf, 240);
                 if (!n) { break; }
                 pos += n;
-                netcom_tx_sample(buf, n, true);
+                netcom_tx_sample_until(buf, n, true, s_rx_window.release_us);
             }
         }
     }
@@ -114,6 +121,10 @@ static void bridge_rx_end_locked(bool with_tail)
     }
     if (s_rx_denoise_mode) { rf_denoise_invalidate(bridge_denoise_route(s_rx_denoise_mode)); }
     s_rx.open = false;
+    s_rx_window = (tx_timeout_window_t){0};
+    s_rx_tail_id = TAIL_OFF;
+    s_rx_tail_pos = 0;
+    s_rx_tail_next_us = 0;
     s_rx_denoise_mode = 0;
     ++s_rx_generation;
     ++s_rx.ends;
@@ -532,7 +543,7 @@ static bool denoised_route_ready(void)
 {
     return s_active && !s_rx_room_changing && s_rx_denoise_mode == netcom_mode() &&
            s_rx_room == netcom_room() && s_rx_chan == s_chan && netcom_engine_running() &&
-           sa818_cfg_tx_ready() && !ptt_bridge_keyed() &&
+           sa818_cfg_tx_ready() && ptt_owner() == PTT_OWNER_NONE &&
            !(rx_guard_blocked() & RX_GUARD_OUT_NET);
 }
 
@@ -542,10 +553,30 @@ static bool denoised_emit(const int16_t *pcm, size_t n, void *context)
     rx_tx_lock();
     const bool same_stream = s_rx.open && s_rx_generation == generation;
     const bool allowed = same_stream && denoised_route_ready();
-    if (allowed) { netcom_tx_sample(pcm, n, true); }
+    if (allowed) { netcom_tx_sample_until(pcm, n, false, s_rx_window.release_us); }
     else if (same_stream) { bridge_rx_end_locked(false); }
     rx_tx_unlock();
     return allowed;
+}
+
+/* Called from the monitor sample clock. Wait one block after the last chunk
+ * so the end marker does not overtake the queued tone. */
+static void bridge_rx_limit_tail_locked(int64_t now)
+{
+    if (!s_rx_tail_id || now >= s_rx_window.release_us) {
+        bridge_rx_end_locked(false);
+        return;
+    }
+    if (now < s_rx_tail_next_us) { return; }
+    int16_t tail[240];
+    const size_t n = tail_fetch(s_rx_tail_id, s_rx_tail_pos, tail, 240);
+    if (!n) {
+        bridge_rx_end_locked(false);
+        return;
+    }
+    s_rx_tail_pos += n;
+    s_rx_tail_next_us = now + (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
+    netcom_tx_sample_until(tail, n, true, s_rx_window.release_us);
 }
 
 void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled)
@@ -553,17 +584,37 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
     rx_tx_lock();
     const bool inhibited = (rx_guard_blocked() & RX_GUARD_OUT_NET) != 0;
     const bool allowed = s_active && sa818_cfg_tx_ready() && enabled &&
-                         !ptt_bridge_keyed() && !inhibited;
+                         ptt_owner() == PTT_OWNER_NONE && !inhibited;
     uint32_t generation = s_rx_generation;
+    const int64_t now = esp_timer_get_time();
+    if (s_rx_limited) {
+        if (s_rx.open) {
+            if (allowed) { bridge_rx_limit_tail_locked(now); }
+            else { bridge_rx_end_locked(false); }
+        }
+        if (enabled && !squelch_open && !s_rx.open) { s_rx_limited = false; }
+        rx_tx_unlock();
+        return;
+    }
     if (s_rx_denoise_mode && (!allowed || !denoised_route_ready())) {
         bridge_rx_end_locked(false);
         rx_tx_unlock();
         return;
     }
-    if (!allowed || !squelch_open) {
+    const bool limit = s_rx.open && tx_timeout_due(s_rx_window, now);
+    if (limit) {
+        s_rx_limited = true;
+        ESP_LOGW(TAG, "RF->NET speech limit");
+    }
+    if (!allowed || !squelch_open || limit) {
         const bool drain = allowed && s_rx_denoise_mode;
         if (!drain) {
-            bridge_rx_end_locked(!inhibited);
+            if (limit && allowed) {
+                s_rx_tail_id = tail_id_for_mode(netcom_mode());
+                bridge_rx_limit_tail_locked(now);
+            } else {
+                bridge_rx_end_locked(!inhibited);
+            }
             rx_tx_unlock();
             return;
         }
@@ -573,7 +624,13 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         rf_denoise_stop(route);
         rx_tx_lock();
         if (s_rx.open && s_rx_generation == generation) {
-            bridge_rx_end_locked(drained && denoised_route_ready());
+            const bool with_tail = drained && denoised_route_ready();
+            if (limit && with_tail) {
+                s_rx_tail_id = tail_id_for_mode(netcom_mode());
+                bridge_rx_limit_tail_locked(esp_timer_get_time());
+            } else {
+                bridge_rx_end_locked(with_tail);
+            }
         }
         rx_tx_unlock();
         return;
@@ -598,13 +655,14 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
             s_rx_chan = s_chan;
         }
         s_rx.open = true;
-        s_rx.start_ms = esp_timer_get_time() / 1000;
+        s_rx_window = tx_timeout_window(now, tx_timeout_seconds());
+        s_rx.start_ms = now / 1000;
         ++s_rx.starts;
         ptt_trace_note(PTT_TRACE_RFNET_ON, netcom_mode(), s_rx.starts, 0);
         ESP_LOGI(TAG, "RF->NET PTT start");
     }
     if (!s_rx_denoise_mode) {
-        netcom_tx_sample(pcm, n, true);
+        netcom_tx_sample_until(pcm, n, false, s_rx_window.release_us);
         rx_tx_unlock();
         return;
     }

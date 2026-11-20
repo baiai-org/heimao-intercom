@@ -50,4 +50,12 @@ class RadioUiRulesTest {
         assertNotNull(RadioUiRules.parameterError("sq","9"))
         assertNotNull(RadioUiRules.parameterError("eq_mic_air","6.1"))
     }
+    @Test fun transmitLimitUsesIntegralSeconds() {
+        listOf("5", "180", "600").forEach {
+            assertNull(RadioUiRules.parameterError("tx_timeout_s", it))
+        }
+        listOf("", "4", "601", "5.0", "5e1", "+5", " 5").forEach {
+            assertNotNull(RadioUiRules.parameterError("tx_timeout_s", it))
+        }
+    }
 }

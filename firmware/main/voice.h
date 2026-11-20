@@ -101,7 +101,6 @@ void voice_sdr_tail_stop(uint32_t token);
 bool   voice_net_tail_start(void);
 bool   voice_net_tail_active(void);
 void   voice_net_tail_stop(void);
-void   voice_net_tail_run(size_t frames);   /* monitor task only */
 size_t voice_sdr_tail_fetch(int16_t *out, size_t n);
 bool voice_sdr_tail_active(void);
 /* Called by the monitor after the I2S write containing the final tail block. */

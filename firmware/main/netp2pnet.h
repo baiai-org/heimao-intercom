@@ -27,6 +27,7 @@ uint32_t netp2pnet_tx_qdrop(void);
  * public address while any mode is active.
  */
 void netp2pnet_status_json(char *buf, size_t n);
+bool netp2pnet_hub_forwarding(void);
 
 /* Peer table (panel / CLI).  ip is a dotted string; name up to 7 chars. */
 esp_err_t netp2pnet_peer_add(const char *name, const char *ip, uint16_t port);

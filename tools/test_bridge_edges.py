@@ -32,7 +32,9 @@ typedef int esp_err_t;
 #define RX_GUARD_OUT_NET 1
 #define PTT_TRACE_RFNET_ON 5
 #define PTT_TRACE_RFNET_OFF 6
+#define PTT_OWNER_NONE 0
 static void ptt_trace_note(unsigned k,unsigned s,unsigned a,unsigned b) {(void)k;(void)s;(void)a;(void)b;}
+#define AUDIO_SAMPLE_RATE_HZ 16000
 #define TAIL_OFF 0
 #define TAIL_COUNT 9
 #define NVS_READONLY 0
@@ -67,8 +69,10 @@ int netcom_mode(void);
 uint16_t netcom_room(void);
 bool netcom_engine_running(void);
 void netcom_tx_sample(const int16_t *, size_t, bool);
+void netcom_tx_sample_until(const int16_t *, size_t, bool, int64_t);
 void netcom_tx_end(void);
 bool ptt_bridge_keyed(void);
+int ptt_owner(void);
 void ptt_bridge_key(bool);
 void voice_monitor_borrow(const char *);
 void voice_monitor_release(const char *);
@@ -77,6 +81,7 @@ void rx_guard_context(uint8_t, bool);
 uint8_t rx_guard_blocked(void);
 bool tail_should_play(uint8_t);
 int tail_get(void);
+int tail_id_for_mode(uint8_t mode);
 size_t tail_samples(int);
 size_t tail_fetch(int, size_t, int16_t *, size_t);
 #endif
@@ -116,7 +121,13 @@ uint8_t rx_guard_blocked(void) { return inhibited; }
 bool tail_should_play(uint8_t m) { (void)m; return tail_enabled; }
 int tail_get(void) { return 1; }
 size_t tail_samples(int id) { (void)id; return 1; }
-size_t tail_fetch(int id, size_t pos, int16_t *out, size_t n) { (void)id;(void)pos;(void)n;out[0]=123;++tail_reads;return 1; }
+size_t tail_fetch(int id, size_t pos, int16_t *out, size_t n) {
+    (void)id;
+    if (pos || !n) { return 0; }
+    out[0] = 123;
+    ++tail_reads;
+    return 1;
+}
 
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return calloc(1, sizeof(int)); }
 int xSemaphoreTake(SemaphoreHandle_t h, int timeout) {
@@ -218,8 +229,16 @@ void netcom_tx_sample(const int16_t *p, size_t n, bool ptt) {
                    (tail_enabled && n == 1 && p[0] == 123)));
     ++samples; events[event_n++] = 'S';
 }
+unsigned tx_timeout_seconds(void) { return 5; }
+int tail_id_for_mode(uint8_t mode) { return tail_should_play(mode) ? tail_get() : TAIL_OFF; }
+void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t deadline) {
+    (void)tail;
+    assert(deadline > esp_timer_get_time());
+    netcom_tx_sample(pcm, n, true);
+}
 void netcom_tx_end(void) { ++ends; events[event_n++] = 'E'; }
 bool ptt_bridge_keyed(void) { return keyed; }
+int ptt_owner(void) { return keyed ? 1 : PTT_OWNER_NONE; }
 void ptt_bridge_key(bool on) { keyed = on; }
 void voice_monitor_borrow(const char *who) { (void)who; }
 void voice_monitor_release(const char *who) {
@@ -427,6 +446,23 @@ int main(void) {
     bridge_init();
     assert(bridge_denoise_levels() == (persisted & ~LEVEL(10, 7)));
     assert(legacy_config == ((1u << 4) | (1u << 6) | (1u << 10)));
+    mode = 1;
+    const bool enabled = (bridge_denoise_flags(bridge_denoise_levels()) & (1u << 1)) != 0;
+    assert(bridge_denoise_set(1, false, enabled) == ESP_OK);
+    assert(bridge_set_chan(1) == ESP_OK && bridge_set_en(true) == ESP_OK && bridge_active());
+    tail_enabled = true;
+    const unsigned start_count = samples, end_count = ends;
+    tap(true, true);
+    clock_ms += 5000;
+    tap(true, true);
+    tap(true, true);
+    tap(true, true);
+    assert(samples == start_count + 2 && ends == end_count + 1);
+    tap(false, true);
+    tap(true, true);
+    assert(samples == start_count + 3);
+    bridge_rx_end();
+    puts("PASS: RF to network cutoff sends one tail, holds out until true COS closes");
     puts("PASS: RX inhibit drops PCM without a synthetic tail; normal tail preserved; squelch edge, repeated close, empty block, capture stop, preview, "
          "half-duplex, disable race, mode switch, RF profile preservation; common channel application, "
          "same-channel retune, profile matching, bridge follow/preselection, busy and storage failure; "
@@ -449,11 +485,11 @@ def main():
         directory = Path(temp)
         environment = dict(os.environ, TEMP=temp, TMP=temp, TMPDIR=temp)
         (directory / 'freertos').mkdir()
-        for name in ('bridge.c', 'bridge.h', 'rf_denoise.h', 'channel_control.c', 'channel_control.h', 'sa818_cfg.h', 'sa818_freq.h'):
+        for name in ('bridge.c', 'bridge.h', 'rf_denoise.h', 'channel_control.c', 'channel_control.h', 'sa818_cfg.h', 'sa818_freq.h', 'tx_timeout.h'):
             shutil.copy2(ROOT / 'firmware/main' / name, directory / name)
         (directory / 'stubs.h').write_text(STUBS, encoding='utf-8')
         for name in ('esp_err.h', 'esp_log.h', 'esp_timer.h', 'nvs.h',
-                     'channels.h', 'netcom.h', 'ptt.h', 'voice.h', 'voice_tail.h', 'rx_guard.h',
+                     'channels.h', 'audio_i2s.h', 'netcom.h', 'ptt.h', 'voice.h', 'voice_tail.h', 'rx_guard.h',
                      'freertos/FreeRTOS.h', 'freertos/semphr.h'):
             (directory / name).write_text('#include "stubs.h"\n', encoding='utf-8')
         (directory / 'test.c').write_text(HARNESS, encoding='utf-8')

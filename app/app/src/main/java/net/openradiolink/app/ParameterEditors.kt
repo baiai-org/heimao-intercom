@@ -44,7 +44,7 @@ import kotlinx.coroutines.withContext
                         options.forEach{(id,title)->Row(Modifier.fillMaxWidth().heightIn(min=52.dp).clickable(enabled=!saving){text=id;error=""},verticalAlignment=Alignment.CenterVertically){RadioButton(selected=text==id,onClick={text=id;error=""},enabled=!saving);Text(title,modifier=Modifier.padding(start=6.dp))}}
                     } else OutlinedTextField(text,{text=it;error="";if(!secret)manager.saveDraft(profile.id,key,it)},label={Text(label)},modifier=Modifier.fillMaxWidth(),singleLine=key!="tail_custom_s",
                         isError=error.isNotBlank(),visualTransformation=if(secret)PasswordVisualTransformation() else VisualTransformation.None,
-                        keyboardOptions=KeyboardOptions(keyboardType=if(secret)KeyboardType.Password else if(key in listOf("sq","vol","gain","txgain","micgain","adcvol","ix_room"))KeyboardType.Number else KeyboardType.Text))
+                        keyboardOptions=KeyboardOptions(keyboardType=if(secret)KeyboardType.Password else if(key in listOf("sq","vol","gain","txgain","micgain","adcvol","ix_room","tx_timeout_s"))KeyboardType.Number else KeyboardType.Text))
                     if(hint.isNotBlank())Text(hint,color=secondary,style=MaterialTheme.typography.bodyMedium)
                     if(secret)Text("留空保持原密码；清除密码需使用页面上的独立操作。",color=secondary,style=MaterialTheme.typography.bodySmall)
                     if(error.isNotBlank())Text(error,color=red)

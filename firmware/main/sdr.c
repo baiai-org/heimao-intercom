@@ -20,6 +20,7 @@
 #include "freertos/idf_additions.h"   /* xTaskCreateWithCaps */
 
 #include "ptt.h"
+#include "bridge.h"
 #include "voice.h"
 #include "netcom.h"
 #include "monitor_rx.h"
@@ -32,7 +33,6 @@ static const char *TAG = "sdr";
 #define SDR_TX_RING_SAMPLES 8192
 #define SDR_TX_STALL_MS     2000    /* silence after the first PCM block */
 #define SDR_NO_PCM_GRACE_MS 3000    /* PTT keyed but no PCM yet (mic/ACK slow) */
-#define SDR_PTT_HOLD_MAX_MS 30000
 #define SDR_WS_STALE_MS     6000
 /* A release must not hold the carrier longer than this.  A custom tail can be
  * up to 5 s, so the old 1.2 s cap cut .198's 1.35 s clip mid-tone and left
@@ -49,6 +49,7 @@ static volatile bool s_on;
 static bool s_ptt_hold;
 static bool s_releasing;
 static bool s_tail_started;
+static bool s_limit_release;
 static bool s_ws_dead;
 /* Latched for one browser transmission.  A mode/config change made while the
  * button is held must not move an already-running stream between RF and net. */
@@ -308,6 +309,7 @@ static void release_locked(const char *reason)
     s_ptt_hold = false;
     s_releasing = false;
     s_tail_started = false;
+    s_limit_release = false;
     s_tail_drain_us = 0;
     s_net_tx = false;
     s_rf_tx = false;
@@ -324,9 +326,11 @@ static void request_release_locked(const char *reason)
         return;
     }
     /* Drain the last microphone samples before sending the board's tail. */
+    ptt_begin_release(PTT_OWNER_SDR, s_tx_id);
     s_ptt_hold = false;
     s_releasing = true;
     s_tail_started = false;
+    s_limit_release = !strcmp(reason, "hold_limit");
     s_tail_drain_us = 0;
     s_release_started_us = esp_timer_get_time();
     s_end_reason = reason;
@@ -334,7 +338,7 @@ static void request_release_locked(const char *reason)
 
 static void finish_release_locked(const char *reason)
 {
-    release_locked(reason);
+    release_locked(s_limit_release && !strcmp(reason, "released") ? "hold_limit" : reason);
 }
 
 bool sdr_session_valid(uint32_t sid)
@@ -376,11 +380,12 @@ static bool start_tx_locked(uint32_t tx)
         ptt_set_rf_keying(rf);
         route_ok = !rf || ptt_source_key(PTT_OWNER_SDR, tx, true);
     }
-    if (!route_ok) {
+    if (!route_ok || !ptt_session_start(PTT_OWNER_SDR, tx)) {
         voice_sdr_end(tx);
         s_end_reason = network ? "network_not_ready" : "radio_not_ready";
         return false;
     }
+    if (network) { bridge_rx_inhibit(); }
     s_net_tx = network;
     s_rf_tx = rf;
     portENTER_CRITICAL(&s_mux);
@@ -433,6 +438,18 @@ bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t l
 {
     if (!s_key || !bytes || len < 2 || (len & 1)) { return false; }
     xSemaphoreTake(s_key, portMAX_DELAY);
+    if (session_locked(sid) && tx == s_tx_id) {
+        if (s_ptt_hold && ptt_speech_expired(PTT_OWNER_SDR, tx)) {
+            request_release_locked("hold_limit");
+        }
+        /* TCP/WS audio may already be in flight when the board times out.
+         * Discard the matching old samples without terminating the listener. */
+        if (!s_ptt_hold && (s_limit_release || !strcmp(s_end_reason, "hold_limit"))) {
+            s_client_us = esp_timer_get_time();
+            xSemaphoreGive(s_key);
+            return true;
+        }
+    }
     if (!session_locked(sid) || !s_ptt_hold || tx != s_tx_id ||
         !ptt_owned(PTT_OWNER_SDR, tx)) {
         xSemaphoreGive(s_key); return false;
@@ -494,7 +511,7 @@ static void sdr_route_tx_pcm(int16_t *pcm, size_t n)
         }
     }
     if (s_net_tx) {
-        netcom_tx_sample(pcm, n, true);
+        netcom_tx_sample_until(pcm, n, false, ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id));
     }
     if (!s_net_tx || s_rf_tx) {
         voice_sdr_inject_processed(s_tx_id, pcm, n);
@@ -509,7 +526,7 @@ static void sdr_tx_step(void)
     if (s_ptt_hold) {
         const char *reason = NULL;
         if (!ptt_owned(PTT_OWNER_SDR, s_tx_id)) { reason = "owner_lost"; }
-        else if (now - s_ptt_started_us >= (int64_t)SDR_PTT_HOLD_MAX_MS * 1000) { reason = "hold_limit"; }
+        else if (ptt_speech_expired(PTT_OWNER_SDR, s_tx_id)) { reason = "hold_limit"; }
         else if (!s_pcm_ever) {
             /* The mic may take a moment to open (and the client waits for the
              * ON ACK before it starts capture).  Do not unkey a tap just
@@ -523,7 +540,7 @@ static void sdr_tx_step(void)
         if (reason) {
             /* A normal end of speech (mic silent / user stopped) must still
              * get the courtesy tone.  Only safety reasons unkey immediately. */
-            if (!strcmp(reason, "pcm_timeout")) {
+            if (!strcmp(reason, "pcm_timeout") || !strcmp(reason, "hold_limit")) {
                 request_release_locked(reason);
             } else {
                 release_locked(reason);
@@ -543,7 +560,7 @@ static void sdr_tx_step(void)
     } else if (s_releasing) {
         const int64_t release_cap_us = voice_sdr_tail_configured()
             ? ((int64_t)voice_sdr_tail_ms() + 600) * 1000 : SDR_RELEASE_NOTONE_US;
-        const int64_t cap = release_cap_us < SDR_RELEASE_MAX_US
+        const int64_t cap = !s_limit_release && release_cap_us < SDR_RELEASE_MAX_US
             ? release_cap_us : SDR_RELEASE_MAX_US;
         if (!ptt_owned(PTT_OWNER_SDR, s_tx_id)) {
             finish_release_locked("owner_lost");
@@ -565,7 +582,7 @@ static void sdr_tx_step(void)
             if (!s_tail_started && tx_level_locked() == 0) {
                 if (voice_sdr_tail_start(s_tx_id)) {
                     s_tail_started = true;
-                    s_end_reason = "tail";
+                    s_end_reason = s_limit_release ? "hold_limit" : "tail";
                 } else {
                     finish_release_locked("released");
                 }
@@ -709,7 +726,7 @@ void sdr_ws_detach(httpd_handle_t server, int fd, uint32_t sid)
     xSemaphoreTake(s_key, portMAX_DELAY);
     if (session_locked(sid) && s_server == server && s_ws_fd == fd) {
         s_ws_fd = -1;
-        if (s_ptt_hold) { release_locked("disconnected"); }
+        if (s_ptt_hold || s_releasing) { release_locked("disconnected"); }
     }
     xSemaphoreGive(s_key);
 }
@@ -749,6 +766,7 @@ esp_err_t sdr_set_enabled(bool on)
         s_ptt_hold = false;
         s_releasing = false;
         s_tail_started = false;
+        s_limit_release = false;
         s_net_tx = false;
         s_rf_tx = false;
         s_end_reason = "idle";
@@ -866,13 +884,15 @@ uint32_t sdr_current_session(void)
 void sdr_state_json(char *buf, size_t n, bool accepted, uint32_t request)
 {
     xSemaphoreTake(s_key, portMAX_DELAY);
+    const int64_t left = ptt_speech_deadline_us(PTT_OWNER_SDR, s_tx_id) - esp_timer_get_time();
     snprintf(buf, n,
         "{\"ok\":%s,\"sid\":%lu,\"tx\":%lu,\"id\":%lu,\"ptt\":%s,\"owner\":\"%s\",\"reason\":\"%s\",\"on\":%s,"
-        "\"rel\":%s,\"tail\":%s}",
+        "\"rel\":%s,\"tail\":%s,\"remaining_ms\":%ld}",
         accepted ? "true" : "false", (unsigned long)s_session,
         (unsigned long)s_tx_id, (unsigned long)request, s_ptt_hold ? "true" : "false",
         ptt_owner_name(), s_end_reason, s_on ? "true" : "false",
-        s_releasing ? "true" : "false", s_tail_started ? "true" : "false");
+        s_releasing ? "true" : "false", s_tail_started ? "true" : "false",
+        s_ptt_hold && left > 0 ? (long)((left + 999) / 1000) : 0L);
     xSemaphoreGive(s_key);
 }
 

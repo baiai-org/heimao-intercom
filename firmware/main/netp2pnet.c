@@ -91,6 +91,7 @@
 #include "opus_link.h"
 #include "net_wifi.h"
 #include "ptt.h"
+#include "tx_timeout.h"
 #include "sdr.h"
 #include "voice.h"
 #include "voice_tail.h"
@@ -98,8 +99,6 @@
 static const char *TAG = "np2p";
 
 /* Exactly one courtesy tone per over, and never hold the carrier forever. */
-static bool s_tail_played;
-static int64_t s_tail_start_ms;
 
 /* ------------------------------------------------------------------ consts */
 
@@ -447,6 +446,10 @@ typedef struct {
     bool     hub;                /* advertised/inferred role of a direct peer */
     bool     via_hub;            /* audio origin, not a directly reachable peer */
     uint8_t  hub_mac[6];          /* upstream transport identity for via_hub */
+    tx_timeout_window_t hub_tx;
+    uint16_t hub_tx_epoch, hub_tx_latest;
+    bool hub_tx_tail, hub_tx_closed;
+    size_t hub_rx_tail_pos;
     np_addr_t rx_src;            /* address the last authenticated frame came from */
     int64_t  rx_src_ms;
     int64_t  last_rx_ms;         /* last valid AUDIO block (stream freshness) */
@@ -1050,6 +1053,8 @@ static void peer_reset_stream(rt_peer_t *p)
 
 /* ------------------------------------------------------------ frame builder */
 
+static bool s_tx_tail_frame; /* accessed under the peer lock */
+
 static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
                           bool ptt, const uint8_t *audio)
 {
@@ -1076,7 +1081,7 @@ static bool frame_send_to(rt_peer_t *p, uint8_t type, uint16_t seq,
     pl[1] = 1;                      /* ver */
     int len;
     if (type == F_AUDIO) {
-        h->flags |= NET_RX_FLAG_EPOCH;
+        h->flags |= NET_RX_FLAG_EPOCH | (s_tx_tail_frame ? NET_RX_FLAG_TAIL : 0);
         put_be16(pl, s_tx_epoch); /* audio does not consume NAT hints */
         memcpy(pl + 2, audio, NP_AUDIO_OPUS);
         len = NP_AUDIO_LEN;
@@ -1276,7 +1281,7 @@ static void handle_control(rt_peer_t *p, const uint8_t *pkt, int len,
     }
 }
 /* Caller holds the peer mutex; preserve the original sender and packet. */
-static void hub_forward_audio(const uint8_t sender[6], const uint8_t *pkt, size_t len, bool keyed)
+static void hub_send_audio(const uint8_t sender[6], const uint8_t *pkt, size_t len, bool keyed)
 {
     if (s_access_error || denied_find(sender, NULL) >= 0 || !s_hub_on || len < NP_HDR_LEN || len > NP_AUDIO_LEN
         || (pkt[12] & NP_FLAG_FORWARDED)) { return; }
@@ -1292,6 +1297,51 @@ static void hub_forward_audio(const uint8_t sender[6], const uint8_t *pkt, size_
         if (sent >= 0) { ++p->tx_msgs; }
         if (sent == (int)len && keyed) { radio_led_note_net_tx(NETCOM_MODE_NETP2P); }
     }
+}
+
+static void hub_send_cutoff(rt_peer_t *source)
+{
+    if (source->hub_tx_closed || !source->hub_tx.speech_us) { return; }
+    source->hub_tx_closed = true;
+    uint8_t pkt[NP_AUDIO_LEN] = {0};
+    np_header_t *header = (np_header_t *)pkt;
+    header->magic = NP_MAGIC;
+    header->room = netcom_room();
+    header->seq = source->hub_tx_latest;
+    header->type = F_AUDIO;
+    header->flags = NET_RX_FLAG_HUB_CUTOFF | (source->hub_tx_epoch ? NET_RX_FLAG_EPOCH : 0);
+    memcpy(header->mac, source->mac, sizeof(header->mac));
+    psk_compute(header->room, source->mac, pkt + NP_HDR_LEN);
+    put_be16(pkt + NP_CTR_BASE, source->hub_tx_epoch);
+    hub_send_audio(source->mac, pkt, sizeof(pkt), false);
+}
+
+static void hub_forward_audio(rt_peer_t *source, const uint8_t *pkt, const np_header_t *header,
+                              uint16_t epoch, bool new_over)
+{
+    if (!s_hub_on || (header->flags & NP_FLAG_FORWARDED)) { return; }
+    const bool keyed = (header->flags & 1) != 0;
+    const bool tail = (header->flags & NET_RX_FLAG_TAIL) != 0;
+    const int64_t now = esp_timer_get_time();
+    if (keyed && (new_over || !source->hub_tx.speech_us || epoch != source->hub_tx_epoch)) {
+        source->hub_tx = tx_timeout_window(now, tx_timeout_seconds());
+        source->hub_tx_epoch = epoch;
+        source->hub_tx_latest = header->seq;
+        source->hub_tx_tail = false;
+        source->hub_tx_closed = false;
+    }
+    if (source->hub_tx_closed || !source->hub_tx.speech_us) { return; }
+    if (keyed && (now >= source->hub_tx.release_us ||
+        (tx_timeout_due(source->hub_tx, now) && !(tail && source->hub_tx_tail)))) {
+        hub_send_cutoff(source);
+        return;
+    }
+    if ((int16_t)(header->seq - source->hub_tx_latest) > 0) {
+        source->hub_tx_latest = header->seq;
+    }
+    source->hub_tx_tail |= tail;
+    hub_send_audio(source->mac, pkt, NP_AUDIO_LEN, keyed);
+    if (!keyed) { source->hub_tx_closed = true; }
 }
 
 static bool frame_admitted(const uint8_t mac[6], const np_addr_t *src, uint8_t type, uint8_t flags)
@@ -1334,6 +1384,17 @@ static void handle_frame(const uint8_t *pkt, int len, const np_addr_t *src)
         }
         return;
     }
+    if (h.type == F_AUDIO && (h.flags & NET_RX_FLAG_HUB_CUTOFF)) {
+        rt_peer_t *upstream = peer_by_source(src);
+        rt_peer_t *origin = peer_by_mac(h.mac);
+        if ((h.flags & NP_FLAG_FORWARDED) && !(h.flags & 1) &&
+            upstream && upstream->linked && upstream->hub && origin && origin->via_hub &&
+            memcmp(origin->hub_mac, upstream->mac, 6) == 0) {
+            const uint16_t epoch = (h.flags & NET_RX_FLAG_EPOCH) ? be16(pkt + NP_CTR_BASE) : 0;
+            (void)net_rx_order_hub_cutoff(&origin->order, epoch, h.seq, now_ms());
+        }
+        return;
+    }
     rt_peer_t *p = peer_for_frame(h.mac, src, h.type, h.flags);
     if (!p) { return; }
     /* Allocation failure must not refresh RX PTT and key a silent transmitter. */
@@ -1357,8 +1418,15 @@ static void handle_frame(const uint8_t *pkt, int len, const np_addr_t *src)
                      (unsigned)h.seq, (unsigned)(h.flags & 1));
         }
         const uint16_t epoch = (h.flags & NET_RX_FLAG_EPOCH) ? be16(pkt + NP_CTR_BASE) : 0;
-        if (jbuf_audio(p, h.seq, pkt + NP_CTR_BASE + 2, NP_AUDIO_OPUS, (h.flags & 1) != 0, epoch)
-            && !p->via_hub) { hub_forward_audio(h.mac, pkt, NP_AUDIO_LEN, (h.flags & 1) != 0); }
+        const bool new_over = !p->order.ptt || p->order.epoch != epoch ||
+            (!epoch && now_ms() - p->order.last_ms > NP_RX_PTT_TIMEOUT_MS);
+        if (jbuf_audio(p, h.seq, pkt + NP_CTR_BASE + 2, NP_AUDIO_OPUS, (h.flags & 1) != 0, epoch)) {
+            if (new_over && (h.flags & 1)) { p->hub_rx_tail_pos = 0; }
+            if ((h.flags & (NET_RX_FLAG_TAIL | 1)) == (NET_RX_FLAG_TAIL | 1)) {
+                p->order.tail_seen = true;
+            }
+            if (!p->via_hub) { hub_forward_audio(p, pkt, &h, epoch, new_over); }
+        }
     } else {
         handle_control(p, pkt, len, src);
     }
@@ -1456,6 +1524,7 @@ static bool stun_response(uint8_t *pkt, int len)
 static void engine_tick_timers(void)
 {
     const int64_t now = now_ms();
+    const int64_t now_us = esp_timer_get_time();
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest) { continue; }
@@ -1468,6 +1537,11 @@ static void engine_tick_timers(void)
                 peer_reset_stream(p);
             }
             continue; /* No direct KNOCK/PING to an indirect audio origin. */
+        }
+        if (s_hub_on && p->hub_tx.speech_us && !p->hub_tx_closed &&
+            (now_us >= p->hub_tx.release_us ||
+             (tx_timeout_due(p->hub_tx, now_us) && !p->hub_tx_tail))) {
+            hub_send_cutoff(p);
         }
         const bool expired = p->linked && now - p->last_frame_ms > PEER_EXPIRE_MS;
         if (expired) {
@@ -1753,7 +1827,9 @@ static rt_peer_t *select_active_peer(void)
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || !p->jbuf || !p->order.audio) { continue; }
         const bool pending = p->have_latest && (!p->head_valid || (int16_t)(p->head - p->latest) <= 0);
-        if (!net_rx_order_keyed(&p->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) &&
+        const bool local_tail = p == playing && p->order.hub_cutoff && !p->order.tail_seen &&
+            p->hub_rx_tail_pos != SIZE_MAX && !bridge_active() && now_ms() - p->order.last_ms <= 6000;
+        if (!local_tail && !net_rx_order_keyed(&p->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) &&
             (!pending || (p != playing && now_ms() - p->last_rx_ms > STREAM_IDLE_MS))) { continue; }
         if (!best || p->last_rx_ms > best->last_rx_ms) { best = p; }
     }
@@ -1763,8 +1839,14 @@ static rt_peer_t *select_active_peer(void)
 
 /* PTT and buffered playback control the carrier; PCM amplitude never does. */
 static int64_t s_last_play_ms;
+static net_rf_close_t s_rf_close;
+static int64_t s_rf_speech_us;
 static void bridge_key_update(bool played, bool denoise_pending)
 {
+    const bool limit = s_rf_speech_us && esp_timer_get_time() >= s_rf_speech_us;
+    const bool lost = s_rf_speech_us && !ptt_owned(PTT_OWNER_NETWORK, 1);
+    if (limit && !s_rf_close.active) { (void)ptt_speech_expired(PTT_OWNER_NETWORK, 1); }
+    const bool bridging = bridge_active();
     peer_lock();
     const int64_t now = now_ms();
     rt_peer_t *active = select_active_peer();
@@ -1787,8 +1869,17 @@ static void bridge_key_update(bool played, bool denoise_pending)
     if (incoming != s_rx_ptt) { netcom_note_rx_ptt(incoming, timed_out); }
     s_rx_ptt = incoming;
     s_rx_ptt_ms = incoming ? active->order.last_ms : 0;
-    const bool feeding = incoming || (active && active->have_latest &&
+    bool feeding = incoming || (active && active->have_latest &&
         (!active->head_valid || (int16_t)(active->head - active->latest) <= 0));
+    net_audio_source_t stream = active ?
+        net_audio_source(active->mac, active->order.epoch, active->stream_first, feeding) : (net_audio_source_t){0};
+    const bool hub_end = active && active->order.hub_cutoff && !active->order.rf_blocked;
+    if (bridging && !s_rf_close.active && (limit || lost || hub_end)) {
+        net_rf_close_begin(&s_rf_close, stream, active ? &active->order : NULL,
+            active && (active->order.tail_seen || hub_end));
+    }
+    const bool blocked = bridging && active && net_rf_close_suppresses(&s_rf_close, stream, &active->order);
+    feeding = feeding && !blocked;
     peer_unlock();
     voice_bridge_network_state(feeding, bridge_active());
     const bool pcm_pending = voice_bridge_network_pending();
@@ -1796,19 +1887,20 @@ static void bridge_key_update(bool played, bool denoise_pending)
     const bool keyed = feeding ||
         (s_last_play_ms != 0 && now - s_last_play_ms < NP_RX_HANG_MS);
     netcom_note_rx_carrier(keyed);
-    bool tailing = voice_net_tail_active();
-    if (played) {
-        s_tail_played = false;            /* a new over may have its own tone */
-        if (tailing) { voice_net_tail_stop(); tailing = false; }
-    }
-    if (!keyed && !tailing && !s_tail_played && bridge_active()) {
-        tailing = voice_net_tail_start();  /* request; never fails on timing */
-        if (tailing) { s_tail_played = true; }
-    }
-    if (bridge_active()) {
-        ptt_bridge_key(keyed || tailing);
+    const bool closing = s_rf_close.active;
+    const bool hold = closing ? net_rf_close_hold(&s_rf_close, bridging, feeding ||
+        pcm_pending || denoise_pending || played ||
+        (s_last_play_ms && now - s_last_play_ms < AUDIO_I2S_BUFFER_MS)) : keyed && !blocked;
+    if (bridging) {
+        ptt_bridge_key(hold);
     } else if (ptt_owned(PTT_OWNER_NETWORK, 1)) {
         ptt_bridge_key(false);
+    }
+    if (closing && !hold) { s_last_play_ms = 0; }
+    if (!hold || !bridging) {
+        s_rf_speech_us = 0;
+    } else if (!s_rf_speech_us) {
+        s_rf_speech_us = ptt_speech_deadline_us(PTT_OWNER_NETWORK, 1);
     }
     voice_bridge_network_keyed(ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed());
 }
@@ -1836,6 +1928,20 @@ static bool network_audio_read(bool pull, int16_t *block, net_audio_source_t *ou
         have = pull && !net_audio_denoise_defer(denoise, *out) && peer_jbuf_next(source, block, &peak);
         out->feeding = net_rx_order_keyed(&source->order, now_ms(), NP_RX_PTT_TIMEOUT_MS) ||
             (source->have_latest && (!source->head_valid || (int16_t)(source->head - source->latest) <= 0));
+        out->rf_suppressed = bridge_active() && net_rf_close_suppresses(&s_rf_close, *out, &source->order);
+        if (pull && !have && !out->feeding && !denoise->pending && !bridge_active() &&
+            source->order.hub_cutoff && !source->order.tail_seen && source->hub_rx_tail_pos != SIZE_MAX) {
+            const size_t n = tail_fetch(tail_id_for_mode(NETCOM_MODE_NETP2P), source->hub_rx_tail_pos,
+                                        block, NP_PKT_SAMPLES);
+            if (n) {
+                source->hub_rx_tail_pos += n;
+                memset(block + n, 0, (NP_PKT_SAMPLES - n) * sizeof(*block));
+                out->local_tail = true;
+                have = true;
+            } else {
+                source->hub_rx_tail_pos = SIZE_MAX;
+            }
+        }
     }
     peer_unlock();
     return have;
@@ -1863,7 +1969,10 @@ static void netp2pnet_play_task(void *arg)
                 if (have) {
                     sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES);
                 }
-                if (net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P, source, have, room, block, now)) {
+                const bool tone = source.local_tail && room && ptt_owner() == PTT_OWNER_NONE &&
+                    !ptt_local_audio_active();
+                if (tone || net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P, source,
+                    have && !source.local_tail, room, block, now)) {
                     voice_bridge_inject(block, NP_PKT_SAMPLES);
                     played = true;
                 }
@@ -1890,8 +1999,9 @@ static void netp2pnet_play_task(void *arg)
         net_audio_source_t source;
         const bool have = network_audio_read(ready, block, &source, &denoise);
         if (have) { sdr_rx_network_push(NETCOM_MODE_NETP2P, block, NP_PKT_SAMPLES); }
-        const bool rendered = net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P,
-            source, have, ready && dac_owned, block, now_ms());
+        const bool rendered = (source.local_tail && dac_owned) ||
+            net_audio_denoise_render(&denoise, NETCOM_MODE_NETP2P, source,
+                have && !source.local_tail, ready && dac_owned, block, now_ms());
         bridge_key_update(rendered, denoise.pending);
         int16_t *pcm = rendered ? block : silence;
         if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, NP_PKT_SAMPLES); }
@@ -1903,6 +2013,9 @@ static void netp2pnet_play_task(void *arg)
         }
     }
     net_audio_denoise_reset(&denoise);
+    s_rf_close = (net_rf_close_t){0};
+    s_rf_speech_us = 0;
+    voice_net_tail_stop();
     if (ptt_owned(PTT_OWNER_NETWORK, 1)) { ptt_bridge_key(false); }
     voice_bridge_network_cancel();
     s_play_task = NULL;
@@ -1936,7 +2049,7 @@ static void tx_unlock(void) { if (s_tx_mux) { xSemaphoreGive(s_tx_mux); } }
 static opus_link_enc_t *s_opus_enc;
 static uint8_t          s_enc_buf[NP_AUDIO_OPUS];
 
-static bool send_audio_to_all(const int16_t *pcm, bool ptt)
+static bool send_audio_to_all(const int16_t *pcm, bool ptt, bool tail, int64_t expires_us)
 {
     (void)net_tx_epoch(&s_tx_epoch, &s_tx_epoch_open, ptt);
     /* Encode once for every peer: the bytes are identical, only the address
@@ -1951,9 +2064,11 @@ static bool send_audio_to_all(const int16_t *pcm, bool ptt)
     bool sent = false;
     bool failed = false;
     peer_lock();
+    s_tx_tail_frame = tail;
     const uint16_t seq = s_tx_seq++;
     s_last_tx_ms = now_ms();
     for (int i = 0; i < SLOT_MAX; ++i) {
+        if (expires_us && esp_timer_get_time() >= expires_us) { failed = true; break; }
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest || !peer_addr_set(p)) { continue; }
         if (!frame_send_to(p, F_AUDIO, seq, ptt, s_enc_buf)) {
@@ -1964,6 +2079,7 @@ static bool send_audio_to_all(const int16_t *pcm, bool ptt)
             sent = true;
         }
     }
+    s_tx_tail_frame = false;
     peer_unlock();
     return sent && !failed;
 }
@@ -1971,11 +2087,15 @@ static bool send_audio_to_all(const int16_t *pcm, bool ptt)
 typedef struct {
     int16_t pcm[NP_PKT_SAMPLES];
     uint8_t ptt;
+    bool tail;
+    int64_t expires_us;
     int64_t end_ms;             /* diagnostic only; 0 for ordinary audio */
 } np_tx_item_t;
 
 static QueueHandle_t s_txq_pcm;
 static TaskHandle_t  s_tx_task;
+static bool s_tx_acc_tail;
+static int64_t s_tx_acc_expiry;
 
 uint32_t netp2pnet_tx_qdrop(void)
 {
@@ -1989,6 +2109,8 @@ static void np_enqueue_pcm(const int16_t *pcm, bool ptt)
     np_tx_item_t item;
     memcpy(item.pcm, pcm, sizeof(item.pcm));
     item.ptt = ptt;
+    item.tail = ptt && s_tx_acc_tail;
+    item.expires_us = ptt ? s_tx_acc_expiry : 0;
     item.end_ms = ptt ? 0 : now_ms();
     if (xQueueSend(s_txq_pcm, &item, 0) == pdTRUE) { return; }
     np_tx_item_t dump;
@@ -2007,7 +2129,8 @@ static void np_tx_task(void *arg)
     while (!s_tx_stop) {
         np_tx_item_t item;
         if (!s_txq_pcm || xQueueReceive(s_txq_pcm, &item, pdMS_TO_TICKS(100)) != pdTRUE) continue;
-        const bool sent = send_audio_to_all(item.pcm, item.ptt != 0);
+        if (item.expires_us && esp_timer_get_time() >= item.expires_us) { continue; }
+        const bool sent = send_audio_to_all(item.pcm, item.ptt != 0, item.tail, item.expires_us);
         if (!item.ptt) { netcom_note_end_sent(item.end_ms, sent); }
     }
     opus_link_enc_free(s_opus_enc); s_opus_enc = NULL;
@@ -2015,14 +2138,21 @@ static void np_tx_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-static void netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool ptt)
+static void netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     tx_lock();
-    if (!s_started || !ptt) {
+    if (!s_started) {
         s_tx_acc_n = 0;
         tx_unlock();
         return;
     }
+    if (s_tx_acc_n && (tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry)) {
+        while (s_tx_acc_n < NP_PKT_SAMPLES) { s_tx_acc[s_tx_acc_n++] = 0; }
+        np_enqueue_pcm(s_tx_acc, true);
+        s_tx_acc_n = 0;
+    }
+    s_tx_acc_tail = tail;
+    s_tx_acc_expiry = expires_us;
     for (size_t i = 0; i < n; ++i) {
         s_tx_acc[s_tx_acc_n++] = pcm[i];
         if (s_tx_acc_n == NP_PKT_SAMPLES) {
@@ -2042,9 +2172,9 @@ static void netp2pnet_tx_end(void)
     }
     if (s_tx_acc_n > 0) {
         while (s_tx_acc_n < NP_PKT_SAMPLES) s_tx_acc[s_tx_acc_n++] = 0;
-    } else {
-        memset(s_tx_acc, 0, sizeof(s_tx_acc));
+        np_enqueue_pcm(s_tx_acc, true);
     }
+    memset(s_tx_acc, 0, sizeof(s_tx_acc));
     s_tx_acc_n = 0;
     np_enqueue_pcm(s_tx_acc, false);
     tx_unlock();
@@ -2095,6 +2225,8 @@ static void test_tone_task(void *arg)
 static void netp2pnet_test_tone(int ms)
 {
     if (!s_started || ms <= 0 || s_test_tone_task) return;
+    const int ceiling = (int)tx_timeout_seconds() * 1000;
+    if (ms > ceiling) ms = ceiling;
     if (ms > 30000) ms = 30000;
     if (xTaskCreateWithCaps(test_tone_task, "np_tone", 16384,
                             (void *)(intptr_t)ms, 5, &s_test_tone_task,
@@ -2766,6 +2898,22 @@ esp_err_t netp2pnet_hub_set(bool on)
 bool netp2pnet_hub_on(void)
 {
     return s_hub_on;
+}
+
+bool netp2pnet_hub_forwarding(void)
+{
+    bool active = false;
+    peer_lock();
+    for (int i = 0; s_started && s_hub_on && i < PEER_MAX; ++i) {
+        const rt_peer_t *p = &s_peer[i];
+        if (p->in_use && p->hub_tx.speech_us && !p->hub_tx_closed &&
+            net_rx_order_keyed(&p->order, now_ms(), NP_RX_PTT_TIMEOUT_MS)) {
+            active = true;
+            break;
+        }
+    }
+    peer_unlock();
+    return active;
 }
 
 /* Parse "host:port" into the override; "" restores the built-in list.  Returns

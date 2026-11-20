@@ -16,6 +16,7 @@
 #include "board_hw.h"
 #include "sa818_cfg.h"
 #include "rx_guard.h"
+#include "tx_timeout.h"
 
 static const char *TAG = "ptt";
 
@@ -37,6 +38,9 @@ static SemaphoreHandle_t s_lock;
 static portMUX_TYPE s_lock_init = portMUX_INITIALIZER_UNLOCKED;
 static ptt_owner_t s_owner;
 static uint32_t s_owner_token;
+static tx_timeout_window_t s_window;
+static bool s_window_limit_noted;
+static uint32_t s_last_talk_limit;
 static bool s_local_audio;
 static bool s_rebooting, s_maintenance_blocked;
 #define PTT_TRACE_CAPACITY 64
@@ -93,6 +97,77 @@ void ptt_control_unlock(void) { xSemaphoreGiveRecursive(s_lock); }
 
 static int64_t now_us(void) { return esp_timer_get_time(); }
 
+static void clear_owner(void)
+{
+    s_owner = PTT_OWNER_NONE;
+    s_owner_token = 0;
+    s_window = (tx_timeout_window_t){0};
+    s_window_limit_noted = false;
+}
+
+static void start_window(void)
+{
+    if (!s_window.speech_us) {
+        s_window = tx_timeout_window(now_us(), tx_timeout_seconds());
+    }
+}
+
+bool ptt_session_start(ptt_owner_t owner, uint32_t token)
+{
+    ptt_control_lock();
+    const bool owned = owner != PTT_OWNER_NONE && s_owner == owner && s_owner_token == token;
+    if (owned) { start_window(); }
+    ptt_control_unlock();
+    return owned;
+}
+
+int64_t ptt_speech_deadline_us(ptt_owner_t owner, uint32_t token)
+{
+    ptt_control_lock();
+    const int64_t result = s_owner == owner && s_owner_token == token ? s_window.speech_us : 0;
+    ptt_control_unlock();
+    return result;
+}
+
+int64_t ptt_release_deadline_us(ptt_owner_t owner, uint32_t token)
+{
+    ptt_control_lock();
+    const int64_t result = s_owner == owner && s_owner_token == token ? s_window.release_us : 0;
+    ptt_control_unlock();
+    return result;
+}
+
+void ptt_begin_release(ptt_owner_t owner, uint32_t token)
+{
+    ptt_control_lock();
+    if (s_owner == owner && s_owner_token == token && s_window.release_us) {
+        const int64_t bound = now_us() + (int64_t)TX_TIMEOUT_TAIL_MS * 1000;
+        if (s_window.release_us > bound) { s_window.release_us = bound; }
+    }
+    ptt_control_unlock();
+}
+
+bool ptt_speech_expired(ptt_owner_t owner, uint32_t token)
+{
+    ptt_control_lock();
+    const bool due = s_owner == owner && s_owner_token == token && tx_timeout_due(s_window, now_us());
+    if (due && !s_window_limit_noted) {
+        s_window_limit_noted = true;
+        if (owner == PTT_OWNER_TALK) { s_last_talk_limit = token; }
+        ptt_trace_note(PTT_TRACE_TX_LIMIT, owner, token, 0);
+    }
+    ptt_control_unlock();
+    return due;
+}
+
+uint32_t ptt_last_talk_limit(void)
+{
+    ptt_control_lock();
+    const uint32_t result = s_last_talk_limit;
+    ptt_control_unlock();
+    return result;
+}
+
 static int elapsed_ms_since(int64_t us)
 {
     return (int)((now_us() - us) / 1000);
@@ -111,6 +186,7 @@ static void enter(ptt_state_t st, const char *why)
          * keyed, so it is the only place the clock should start. */
         s_tx_started_us = now_us();
         s_tx_deadline_us = s_tx_started_us + (int64_t)s_tx_limit_ms * 1000;
+        if (s_owner_token) { start_window(); }
         ESP_LOGW(TAG, "TX KEYED (limit %d ms)", s_tx_limit_ms);
         break;
     case PTT_TAIL:    ESP_LOGI(TAG, "TAIL%s%s", why ? " -- " : "", why ? why : "");    break;
@@ -252,8 +328,7 @@ void ptt_release(ptt_owner_t owner, uint32_t token)
         } else {
             s_bridge_keyed = false;
         }
-        s_owner = PTT_OWNER_NONE;
-        s_owner_token = 0;
+        clear_owner();
         pad_apply();
     }
     ptt_control_unlock();
@@ -265,6 +340,10 @@ bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on)
     bool ok = owner == PTT_OWNER_NETWORK || owner == PTT_OWNER_SDR;
     if (on) {
         ok = ok && sa818_cfg_tx_ready() && s_state == PTT_IDLE && ptt_claim(owner, token);
+        if (ok) {
+            start_window();
+            ok = now_us() < s_window.release_us;
+        }
         if (ok) {
             if (!s_bridge_keyed) { ESP_LOGW(TAG, "TX owner=%s token=%lu", ptt_owner_name(), (unsigned long)token); }
             s_bridge_keyed = true;
@@ -315,6 +394,7 @@ static esp_err_t ptt_init_locked(void)
     s_tx_limit_ms = PTT_TX_LIMIT_DEFAULT;
     s_tx_count = 0;
     s_fault_reason = NULL;
+    clear_owner();
     unkey_radio();
     ESP_LOGI(TAG, "initialised: PTT released (GPIO%d = %d), radio in RX",
              PIN_SA818_PTT, gpio_get_level(PIN_SA818_PTT));
@@ -339,6 +419,10 @@ static esp_err_t ptt_request_tx_locked(int max_ms)
     if (max_ms < 100) {
         max_ms = 100;
     }
+    if (!s_dry && !s_owner_token) {
+        const int ceiling = (int)tx_timeout_seconds() * 1000;
+        if (max_ms > ceiling) { max_ms = ceiling; }
+    }
     if (s_owner == PTT_OWNER_NONE) { s_owner = PTT_OWNER_TALK; s_owner_token = 0; }
     s_tx_limit_ms = max_ms;
     s_fault_reason = NULL;
@@ -348,7 +432,7 @@ static esp_err_t ptt_request_tx_locked(int max_ms)
 
 static void ptt_request_rx_locked(void)
 {
-    if (s_owner == PTT_OWNER_TALK) { s_owner = PTT_OWNER_NONE; s_owner_token = 0; }
+    if (s_owner == PTT_OWNER_TALK) { clear_owner(); }
     s_fault_reason = NULL;
     switch (s_state) {
     case PTT_PREPARE:
@@ -392,10 +476,15 @@ static void ptt_tick_locked(void)
      * engine stopped mid-tone, blocked driver) this releases the pad, so a
      * stuck bridge can never hold the transmitter on.
      */
-    if (s_bridge_keyed && t >= s_bridge_until_us) {
+    if (s_owner != PTT_OWNER_TALK && s_window.release_us && t >= s_window.release_us) {
         s_bridge_keyed = false;
-        s_owner = PTT_OWNER_NONE; s_owner_token = 0;
         pad_apply();
+        clear_owner();
+        ESP_LOGW(TAG, "TX release deadline");
+    } else if (s_bridge_keyed && t >= s_bridge_until_us) {
+        s_bridge_keyed = false;
+        pad_apply();
+        clear_owner();
         ESP_LOGE(TAG, "bridge key watchdog -- RF released after %d ms",
                  PTT_BRIDGE_MAX_MS);
     }
@@ -412,7 +501,7 @@ static void ptt_tick_locked(void)
         break;
 
     case PTT_TX:
-        if (t >= s_tx_deadline_us) {
+        if (t >= s_tx_deadline_us || (s_window.release_us && t >= s_window.release_us)) {
             s_fault_reason = "TX deadline reached";
             enter(PTT_TAIL, "TX deadline reached");
             unkey_radio();
@@ -424,7 +513,7 @@ static void ptt_tick_locked(void)
             enter(PTT_IDLE, NULL);
             /* Token zero is the legacy/manual carrier-test caller. Voice
              * tokens remain reserved until their audio task acknowledges. */
-            if (s_owner == PTT_OWNER_TALK && s_owner_token == 0) { s_owner = PTT_OWNER_NONE; }
+            if (s_owner == PTT_OWNER_TALK && s_owner_token == 0) { clear_owner(); }
         }
         break;
 
@@ -468,7 +557,9 @@ static esp_err_t ptt_extend_locked(int ms)
         ms = 1000;
     }
     const int64_t want = now_us() + (int64_t)ms * 1000;
-    const int64_t hard = s_tx_started_us + (int64_t)PTT_TX_ABSOLUTE_MAX_MS * 1000;
+    const int64_t hard = s_window.release_us ? s_window.release_us :
+        s_tx_started_us + (int64_t)s_tx_limit_ms * 1000;
+    if (now_us() >= hard) { return ESP_ERR_INVALID_STATE; }
     s_tx_deadline_us = (want < hard) ? want : hard;
     return ESP_OK;
 }
@@ -589,8 +680,8 @@ bool ptt_maintenance_blocked(void)
 void ptt_prepare_reboot(void)
 {
     ptt_control_lock();
-    s_rebooting = true; s_bridge_keyed = false; s_owner = PTT_OWNER_NONE; s_owner_token = 0;
-    s_state = PTT_IDLE; pad_apply();
+    s_rebooting = true; s_bridge_keyed = false;
+    s_state = PTT_IDLE; pad_apply(); clear_owner();
     ptt_control_unlock();
 }
 void ptt_request_rx(void) { ptt_control_lock(); ptt_request_rx_locked(); ptt_control_unlock(); }

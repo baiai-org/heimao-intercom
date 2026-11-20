@@ -46,6 +46,7 @@
 #include "board_hw.h"
 #include "bringup.h"
 #include "ptt.h"
+#include "tx_timeout.h"
 #include "sa818.h"
 #include "sa818_cfg.h"
 #include "voice.h"
@@ -1264,7 +1265,7 @@ static void console_task(void *arg)
             printf("\n  *** LOCAL TALK ARMING ***\n");
             printf("  Next: key the transmitter and feed the microphone straight into\n");
             printf("  SA818 MIC_IN.  The radio stays keyed until you press z, up to a\n");
-            printf("  hard ceiling of %d s.\n", PTT_TX_ABSOLUTE_MAX_MS / 1000);
+            printf("  speech limit of %u s.\n", tx_timeout_seconds());
             printf("  TX gain is %d/16 = %.2fx -- adjust with `x txgain N` if the\n",
                    voice_get_tx_gain(), voice_get_tx_gain() / 16.0);
             printf("  receiving handset sounds too loud/distorted or too quiet.\n");
@@ -1291,8 +1292,7 @@ static void console_task(void *arg)
                     printf("  talk mode failed to start (PTT state %s)\n\n",
                            ptt_state_name());
                 } else {
-                    printf("  transmitting -- PTT held, ceiling %d s\n\n",
-                           PTT_TX_ABSOLUTE_MAX_MS / 1000);
+                    printf("  transmitting -- speech limit %u s\n\n", tx_timeout_seconds());
                 }
             }
             break;
@@ -1862,7 +1862,7 @@ static void tx_test(int duration_ms, bool ladder)
 
     if (ladder) {
         static const int amps[3] = { 3000, 8000, 16000 };
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 3 && ptt_get_state() == PTT_TX; ++i) {
             printf("  beep %d/3  (amplitude %d)   PTT pad = %d\n",
                    i + 1, amps[i], gpio_get_level(PIN_SA818_PTT));
             audio_i2s_play_tone(1000, 400, amps[i]);
@@ -1870,7 +1870,7 @@ static void tx_test(int duration_ms, bool ladder)
         }
     } else {
         int elapsed = 0;
-        while (elapsed < duration_ms) {
+        while (elapsed < duration_ms && ptt_get_state() == PTT_TX) {
             audio_i2s_play_tone(1000, 300, 12000);
             audio_i2s_play_silence(700);
             elapsed += 1000;
@@ -2047,6 +2047,8 @@ void app_main(void)
                      esp_err_to_name(nvs));
         }
     }
+
+    tx_timeout_load();
 
     /* Add band metadata for legacy UHF installs, keeping every RF value. */
     (void)sa818_cfg_init();

@@ -44,12 +44,18 @@ static rf_denoise_route_t bridge_denoise_route(uint8_t setting) {
         default: assert(!"unexpected setting"); return RF_DENOISE_NET_TX;
     }
 }
+static void ptt_begin_release(ptt_owner_t source,uint32_t token){(void)source;(void)token;}
+static int64_t ptt_release_deadline_us(ptt_owner_t source,uint32_t token){(void)source;(void)token;return 1000000;}
+static void voice_net_tail_stop(void){}
+static bool voice_net_tail_active(void){return false;}
+static bool voice_net_tail_start(void){return false;}
 static void voice_bridge_network_discard(void) { ++discarded; }
 static int voice_apply_tx_processing(int16_t *pcm, size_t n) {
     for (size_t i = 0; i < n; ++i) pcm[i] += 13;
     return 10;
 }
-static void netcom_tx_sample(const int16_t *pcm, size_t n, bool active) {
+static void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us) {
+    const bool active = !tail && expires_us > 0;
     assert(active && collect(pcm, n, NULL));
 }
 '''

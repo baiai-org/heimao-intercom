@@ -63,6 +63,13 @@ ptt_owner_t ptt_owner(void);
 uint32_t ptt_owner_token(void);
 const char *ptt_owner_name(void);
 bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on);
+/* Starts the logical transmission window when the source has no RF output. */
+bool ptt_session_start(ptt_owner_t owner, uint32_t token);
+int64_t ptt_speech_deadline_us(ptt_owner_t owner, uint32_t token);
+int64_t ptt_release_deadline_us(ptt_owner_t owner, uint32_t token);
+void ptt_begin_release(ptt_owner_t owner, uint32_t token);
+bool ptt_speech_expired(ptt_owner_t owner, uint32_t token);
+uint32_t ptt_last_talk_limit(void);
 void ptt_release(ptt_owner_t owner, uint32_t token);
 /* Reboot-only latch: release both domains and refuse future TX until boot. */
 void ptt_prepare_reboot(void);
@@ -76,12 +83,6 @@ int64_t ptt_last_activity_us(void);
 #define PTT_TICK_TIMEOUT_MS    250    /* ptt_tick() must run at least this often */
 #define PTT_TX_LIMIT_DEFAULT  30000   /* hard ceiling for a normal transmission  */
 #define PTT_TX_LIMIT_TEST      2000   /* ceiling for the manual carrier test     */
-/*
- * Absolute ceiling on one transmission.  A voice session extends its deadline
- * repeatedly (see ptt_extend), but never past this, so a stuck talk task cannot
- * hold the transmitter on indefinitely.
- */
-#define PTT_TX_ABSOLUTE_MAX_MS 180000
 /*
  * Absolute ceiling on bridge keying: the playback task refreshes the bridge
  * key with every active packet, and if it stops refreshing (crash, hang, the
@@ -127,8 +128,7 @@ esp_err_t ptt_request_tx(int max_ms);
 
 /*
  * Push the transmission deadline out by `ms` from now.  Only meaningful while
- * actually transmitting, and only up to PTT_TX_ABSOLUTE_MAX_MS from the moment
- * the radio was keyed.
+ * actually transmitting, up to the absolute release deadline captured at keying.
  *
  * This is how a voice session stays keyed: it re-extends every audio block.  If
  * it stops doing so -- crash, hang, blocked driver -- the deadline fires within
@@ -186,7 +186,8 @@ esp_err_t ptt_dry_run(int tx_ms, ptt_dry_result_t *out);
 /* Bounded task-context event history; no PCM, credentials or addresses. */
 enum { PTT_TRACE_RF_ON=1, PTT_TRACE_RF_OFF, PTT_TRACE_COS_ON, PTT_TRACE_COS_OFF,
        PTT_TRACE_RFNET_ON, PTT_TRACE_RFNET_OFF, PTT_TRACE_NET_ON,
-       PTT_TRACE_NET_OFF, PTT_TRACE_NET_TIMEOUT, PTT_TRACE_CFG_OK, PTT_TRACE_CFG_FAIL };
+       PTT_TRACE_NET_OFF, PTT_TRACE_NET_TIMEOUT, PTT_TRACE_CFG_OK, PTT_TRACE_CFG_FAIL,
+       PTT_TRACE_TX_LIMIT };
 typedef struct { uint32_t ms, sequence; uint16_t kind, source; uint32_t a, b; } ptt_trace_event_t;
 void ptt_trace_note(unsigned kind, unsigned source, uint32_t a, uint32_t b);
 size_t ptt_trace_snapshot(ptt_trace_event_t *out, size_t capacity, uint32_t *sequence);
