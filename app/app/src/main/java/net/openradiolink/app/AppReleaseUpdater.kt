@@ -403,7 +403,9 @@ internal class AppReleaseUpdater(private val app:OrlApp) {
                     (if(Build.VERSION.SDK_INT>=31)PendingIntent.FLAG_MUTABLE else 0)).intentSender
                 if(!withContext(Dispatchers.Main){app.manager.reserveAppInstall()})return false
                 try {
-                    check(prefs.edit().putString("attempt",asset.sha256).putInt("session",id).commit())
+                    if(!prefs.edit().putString("attempt",asset.sha256).putInt("session",id).commit()) {
+                        throw IOException("无法保存 Android 安装会话")
+                    }
                     installing=true
                     autoConfirm=!force
                     state.value=AppUpdateView("正在交给 Android 安装",asset,busy=true)
