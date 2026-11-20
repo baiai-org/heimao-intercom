@@ -120,10 +120,15 @@ void device_maintenance_write_end(void)
     if (!s_lock) { return; }
     xSemaphoreTake(s_lock, portMAX_DELAY); if (s_writers) { --s_writers; } xSemaphoreGive(s_lock);
 }
+bool device_maintenance_writing(void)
+{
+    if (!s_lock) { return false; }
+    xSemaphoreTake(s_lock, portMAX_DELAY); bool writing = s_writers != 0; xSemaphoreGive(s_lock);
+    return writing || tail_store_busy();
+}
 static const char *busy_reason(void)
 {
-    xSemaphoreTake(s_lock, portMAX_DELAY); bool writing = s_writers != 0; xSemaphoreGive(s_lock);
-    if (writing || tail_store_busy()) { return "writing"; }
+    if (device_maintenance_writing()) { return "writing"; }
     if (ptt_get_state() != PTT_IDLE || board_ptt_is_asserted() || ptt_owner() != PTT_OWNER_NONE ||
         ptt_local_audio_active() || voice_mode() == VOICE_TALK) { return "transmitting"; }
     if (voice_rf_carrier_present() || voice_network_busy()) { return "receiving"; }

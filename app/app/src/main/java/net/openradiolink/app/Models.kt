@@ -108,6 +108,10 @@ data class SessionView(
     val audioSid:Long=0,
     val audioTx:Long=0,
     val eqPresetsSupported:Boolean=false,
+    val txTimeoutSupported: Boolean? = null,
+    val txTimeoutReadFailed: Boolean = false,
+    val txTimeoutSaving: Boolean = false,
+    val txTimeoutResult: String = "",
 )
 
 fun SessionView.boardTxClipped():Boolean = status.optJSONObject("sdr")?.let {

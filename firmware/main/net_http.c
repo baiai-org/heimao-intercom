@@ -1548,6 +1548,11 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
     free(events); free(buf); return result;
 }
 
+static bool tx_timeout_in_use(bool bridge_open)
+{
+    return bridge_open || ptt_owner() != PTT_OWNER_NONE || netp2pnet_hub_forwarding();
+}
+
 static esp_err_t h_radio(httpd_req_t *req)
 {
     sa818_cfg_t cfg;
@@ -1563,12 +1568,12 @@ static esp_err_t h_radio(httpd_req_t *req)
     board_sa818_power_io_t io;
     board_sa818_power_io(&io);
     snprintf(buf, sizeof(buf),
-             "{\"ok\":true,\"band\":\"%s\",\"model\":\"%s\",\"min\":%.1f,\"max\":%.1f,"
+             "{\"ok\":true,\"device_id\":\"%s\",\"band\":\"%s\",\"model\":\"%s\",\"min\":%.1f,\"max\":%.1f,"
              "\"freq_grid_hz\":%d,\"freq_decimals\":4,\"tx_timeout_s\":%u,"
              "\"ready\":%s,\"compatible\":%s,\"reason\":\"%s\","
              "\"power_applied\":%d,\"power_pending\":%s,\"power_control\":\"open_drain\","
              "\"hl_open_drain\":%s,\"hl_pull_up\":%s,\"hl_pull_down\":%s,\"hl_output\":%s,\"rf_config\":%s}",
-             sa818_band_name(band), band == SA818_BAND_UHF ? "SA818S-U" :
+             device_identity_id(), sa818_band_name(band), band == SA818_BAND_UHF ? "SA818S-U" :
              band == SA818_BAND_VHF ? "SA818S-V" : "UNSET",
              (double)sa818_band_min(band), (double)sa818_band_max(band),
              SA818_FREQ_GRID_HZ, tx_timeout_seconds(),
@@ -1697,6 +1702,7 @@ static esp_err_t h_status(httpd_req_t *req)
         "{"
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,"
         "\"build\":{\"version\":\"%s\",\"date\":\"%s\",\"time\":\"%s\",\"sha256\":\"%s\"},"
+        "\"tx_timeout_s\":%u,\"tx_timeout_busy\":%s,\"tx_timeout_maintenance\":%s,"
         "\"rst\":\"%s\","
         "\"wifi\":{\"connected\":%s,\"ip\":\"%s\",\"ip6\":\"%s\",\"ip6all\":%s,\"ssid\":\"%s\","
         "\"state\":\"%s\",\"rssi\":%d,"
@@ -1732,6 +1738,8 @@ static esp_err_t h_status(httpd_req_t *req)
         "\"tail\":%s",
         device_identity_id(), esc_name, (unsigned long)name.revision,
         app->version, app->date, app->time, app_sha,
+        tx_timeout_seconds(), tx_timeout_in_use(br_rx.open) ? "true" : "false",
+        (device_maintenance_writing() || device_maintenance_reboot_pending()) ? "true" : "false",
         reset_reason_name(),
         net_wifi_connected() ? "true" : "false",
         panel.ip, net_wifi_ip6(), ip6all, esc_ssid, net_wifi_state_name(),
@@ -2045,6 +2053,14 @@ static esp_err_t h_set(httpd_req_t *req)
         return send_result(req, false, "missing k");
     }
     if (!strcmp(key, "tx_timeout_s")) {
+        if (httpd_req_get_hdr_value_len(req, "X-ORL-Device")) {
+            char id[24];
+            if (httpd_req_get_hdr_value_str(req, "X-ORL-Device", id, sizeof(id)) != ESP_OK ||
+                strcmp(id, device_identity_id())) {
+                httpd_resp_set_status(req, "409 Conflict");
+                return send_result(req, false, "设备身份已变化，请重新连接");
+            }
+        }
         const size_t digits = strlen(val);
         if (!digits || digits > 3 || strspn(val, "0123456789") != digits ||
             !tx_timeout_valid((unsigned)atoi(val))) {
@@ -2052,10 +2068,14 @@ static esp_err_t h_set(httpd_req_t *req)
         }
         bridge_rx_stats_t stream;
         bridge_rx_stats(&stream);
-        if (stream.open || ptt_owner() != PTT_OWNER_NONE || netp2pnet_hub_forwarding()) {
+        if (tx_timeout_in_use(stream.open)) {
             return send_result(req, false, "请结束发射或转发后保存");
         }
+        if (device_maintenance_writing() || !device_maintenance_write_begin()) {
+            return send_result(req, false, "请结束维护后保存");
+        }
         const esp_err_t err = tx_timeout_save((unsigned)atoi(val), tx_timeout_seconds());
+        device_maintenance_write_end();
         if (err != ESP_OK) { return send_result(req, false, "发射超时保存失败"); }
         return h_radio(req);
     }

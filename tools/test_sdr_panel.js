@@ -19,7 +19,7 @@ function runtime() {
   const state = {now: 0, timers: new Map(), id: 0, requests: [], logs: [], nodes: [], sockets: [], micOptions: []};
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m =>
     [m[1], {value: '', style: {}, textContent: '', className: '', disabled: false,
-      addEventListener() {}, appendChild() {}}]));
+      listeners: {}, addEventListener(type, action) { this.listeners[type] = action; }, appendChild() {}}]));
   const node = () => ({connect() {}, disconnect() {}, gain: {value: 1}});
   class AudioContext {
     constructor() {
@@ -90,6 +90,27 @@ function runtime() {
     }
   };
   return state;
+}
+async function clickTests() {
+  const r = runtime(); await r.ready();
+  const button = r.elements.get('sdrPtt');
+  const click = () => button.listeners.click({preventDefault() {}});
+  const starts = () => r.requests.filter(q => q.url.startsWith('/api/sdr_ptt?on=1'));
+  const stops = () => r.requests.filter(q => q.url.startsWith('/api/sdr_ptt?on=0'));
+  await click();
+  assert.equal(starts().length, 1);
+  assert.equal(r.SDR.keyed, true);
+  r.sdrApplyState({sid:r.SDR.sid, on:true, tx:r.SDR.activeTx, ptt:true, remaining_ms:119500});
+  assert.match(button.textContent, /剩余 120 秒/);
+  assert(![...r.timers.values()].some(t => t.ms >= 5000 && !t.interval));
+  await click(); await r.SDR.releasePending;
+  assert.equal(stops().length, 1);
+  await click();
+  const track = r.SDR.micStream.track;
+  r.sdrApplyState({sid:r.SDR.sid, on:true, tx:r.SDR.activeTx, ptt:false, reason:'hold_limit'});
+  assert.equal(track.stopped, 1);
+  assert.equal(r.SDR.ptt, false);
+  assert.equal(starts().length, 2); assert.equal(stops().length, 1);
 }
 async function audioTests() {
   const r = runtime();
@@ -267,6 +288,6 @@ async function transportTests() {
   [...r.timers.values()].find(t=>t.ms===3000).fn();await assert.rejects(read,/aborted/);
 }
 (async()=>{
-  await audioTests();await lifecycleTests();await transportTests();
-  console.log('PASS: production worklets at 48/44.1/16 kHz; sid/TX ACK and PCM framing; cancellation, old state, watchdog UI, HTTP queues/throughput and session replacement');
+  await audioTests();await lifecycleTests();await clickTests();await transportTests();
+  console.log('PASS: production worklets, sid/TX ACK, PCM framing, PTT button click/manual stop/board timeout, cancellation and HTTP queues');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -5,6 +5,11 @@ import java.math.RoundingMode
 import org.json.JSONObject
 
 internal object RadioUiRules {
+    fun txTimeoutSeconds(radio: JSONObject): Int? {
+        val seconds = radio.opt("tx_timeout_s") as? Number ?: return null
+        return seconds.toInt().takeIf { it in 5..600 && it.toDouble() == seconds.toDouble() }
+    }
+
     fun frequencyGridHz(radio:JSONObject):Int = if(radio.optInt("freq_grid_hz")==500)500 else 12500
     fun frequency(text:String,min:String,max:String,gridHz:Int=12500):String {
         require(Regex("\\d+(?:\\.\\d*)?").matches(text.trim())){"请输入有效的 MHz 频率"}

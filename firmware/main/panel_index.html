@@ -633,6 +633,21 @@ body::before {
   align-items: stretch;
   gap: 8px;
 }
+.ptt-timeout {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.ptt-timeout-controls, .ptt-timeout-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ptt-timeout-value { flex-wrap: nowrap; }
+.ptt-timeout-value input { width: 5em; min-height: 40px; }
+.ptt-timeout p { margin: 5px 0 0; font-size: 12px; color: var(--fg-2); }
 button.tx {
   flex: 1;
   background: linear-gradient(135deg, #881337 0%, #be123c 100%);
@@ -1688,6 +1703,20 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         </div>
       </div>
 
+      <form id="txTimeoutForm" class="ptt-timeout">
+        <div class="ptt-timeout-controls">
+          <label for="txTimeout">发射超时</label>
+          <div class="ptt-timeout-value">
+            <input type="text" id="txTimeout" inputmode="numeric" autocomplete="off"
+              aria-describedby="txTimeoutStatus txTimeoutHint" disabled><span>秒</span>
+          </div>
+          <button id="txTimeoutSet" type="submit" class="pri" disabled>保存</button>
+          <button id="txTimeoutRetry" type="button" hidden>重试读取</button>
+        </div>
+        <p id="txTimeoutStatus" role="status">正在读取发射超时设置…</p>
+        <p id="txTimeoutHint">可输入 5–600 的整数，默认 180 秒</p>
+      </form>
+
       <!-- Master PTT Trigger & Monitor Controls -->
       <div class="ptt-console">
         <div class="ptt-main-row">
@@ -1695,9 +1724,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <button id="mOn" class="pri" title="开启 SA818 模拟接收守听">开启守听</button>
           <button id="mOff" title="停止模拟守听">静音</button>
         </div>
-        <div class="ptt-sub-row">
-          <span id="talkTime">正在读取发射超时设置…</span>
-        </div>
+        <span id="talkTime" hidden></span>
       </div>
 
       <!-- MODE 01/02: should a network talk also key the local radio? -->
@@ -1869,13 +1896,6 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <h2><i></i>射频信道与亚音调谐</h2>
         <span class="tag-chip" id="rfRange">频段待读取</span>
       </div>
-
-      <div class="row">
-        <label for="txTimeout">发射超时（秒）</label>
-        <input type="number" id="txTimeout" min="5" max="600" step="1" inputmode="numeric" disabled>
-        <button id="txTimeoutSet" class="pri" disabled>保存</button>
-      </div>
-      <p id="txTimeoutStatus" role="status">5–600 整数秒，默认 180 秒。适用于本机发话和转发。</p>
 
       <div class="row">
         <label>物理模块频段</label>
@@ -2380,7 +2400,7 @@ function log(m, cls) {
 $('logClr').onclick = () => { $('log').innerHTML = ''; };
 
 /* Read-only requests only: never retry PTT, setters, uploads or SDR audio. */
-const PANEL_READ_PATHS = new Set(['/api/status', '/api/radio', '/api/live',
+const PANEL_READ_PATHS = new Set(['/api/status', '/api/radio', '/api/live', '/api/device',
   '/api/ctcss', '/api/dcs', '/api/channels', '/api/eq_presets']);
 const PANEL_TABLE_PATHS = new Set(['/api/ctcss', '/api/dcs', '/api/channels']);
 const panelReadPending = new Map(), panelReadWaiters = [];
@@ -3195,7 +3215,6 @@ async function sdrPttDown(ev) {
   }
 }
 function sdrPttUp(notify = true) {
-  stopSdrPttClock();
   const release = notify && (SDR.keyed || SDR.keyPending);
   const tx = SDR.activeTx, sid = SDR.sid;
   SDR.ptt = SDR.keyed = SDR.keyPending = false; SDR.txEpoch++;
@@ -3239,18 +3258,9 @@ async function sdrBeepTest() {
 }
 $('sdrBtn').onclick = sdrToggle; $('sdrBeep').onclick = sdrBeepTest;
 $('sdrMicScan').onclick = sdrMicList;
-async function sdrPttToggle(ev) {
+function sdrPttToggle(ev) {
   if (ev) ev.preventDefault();
-  if (SDR.ptt) { sdrPttUp(); return; }
-  const seconds = Math.min(30, Math.max(5, parseInt($('secs').value, 10) || 30));
-  const down = sdrPttDown(ev), epoch = SDR.txEpoch;
-  await down;
-  if (SDR.ptt && SDR.keyed && SDR.txEpoch === epoch) {
-    SDR.pttTimer = setTimeout(() => {sdrPttUp(); log('单次发射限时已到，停止发射', 'err');}, seconds*1000);
-  }
-}
-function stopSdrPttClock() {
-  if (SDR.pttTimer) { clearTimeout(SDR.pttTimer); SDR.pttTimer = null; }
+  return SDR.ptt ? sdrPttUp() : sdrPttDown();
 }
 $('sdrPtt').addEventListener('click', sdrPttToggle);
 window.addEventListener('blur', () => sdrPttUp());
@@ -3417,12 +3427,12 @@ for (let i = 0; i < 4; i++) {
 
 const panelDirty = new Map();
 function panelEditing(el) { return document.activeElement === el || panelDirty.has(el.id); }
-const panelFields={freq_pair:['ftx','frx'],tx_timeout_s:['txTimeout'],np2p_stun:['npStun'],ix_room:['ixRoom1'],ix_broker:['ixBroker2'],ix_auth:['ixUser2','ixPass2']};
+const panelFields={freq_pair:['ftx','frx'],np2p_stun:['npStun'],ix_room:['ixRoom1'],ix_broker:['ixBroker2'],ix_auth:['ixUser2','ixPass2']};
 document.addEventListener('input',e=>{if(['ftx','frx','txTimeout','npStun','ixRoom1','ixBroker2','ixUser2','ixPass2'].includes(e.target.id)){panelDirty.set(e.target.id,e.target.value);e.target.setAttribute('aria-description','未保存');}});
 
 let channelCommandPending = false;
 async function cmd(k, v) {
-  if (/^(freq_|ctcss_|bw$|sq$|vol$|power$|bridge_chan$|radio_band$|rf_|tx_timeout_s$)/.test(k)) panelRadioAt = 0;
+  if (/^(freq_|ctcss_|bw$|sq$|vol$|power$|bridge_chan$|radio_band$|rf_)/.test(k)) panelRadioAt = 0;
   const submitted=(panelFields[k]||[]).map(id=>[id,$(id).value]);
   const channelChange = k === 'bridge_chan' || k === 'ix_mode' || k === 'ix_room';
   if (channelChange && channelCommandPending) { log('正在切换，请等待结果', 'err'); return {ok:false}; }
@@ -3685,13 +3695,6 @@ $('rfBandSet').onclick = async () => {
 };
 
 function renderRadio(r) {
-  const seconds = r.tx_timeout_s;
-  const timeoutReady = Number.isInteger(seconds) && seconds >= 5 && seconds <= 600;
-  $('txTimeout').disabled = $('txTimeoutSet').disabled = !timeoutReady || txTimeoutSaving;
-  if (timeoutReady) {
-    if (!panelDirty.has('txTimeout') && !txTimeoutSaving) $('txTimeout').value = seconds;
-    if (!txLive) $('talkTime').textContent = '发射超时 ' + seconds + ' 秒';
-  }
   const old = window._radio;
   window._radio = r;
   const selected = !!r.min;
@@ -3732,27 +3735,112 @@ function renderRadio(r) {
     (r.power_pending ? ' · 待松开 PTT' : '');
 }
 
-let txTimeoutSaving = false;
-$('txTimeoutSet').onclick = async () => {
-  if (txTimeoutSaving) return;
-  const form = $('txTimeout'), status = $('txTimeoutStatus');
-  const value = Number(form.value);
-  if (!/^\d{1,3}$/.test(form.value) || value < 5 || value > 600) {
-    status.textContent = '请输入 5–600 的整数秒';
+const txTimeoutInput = $('txTimeout');
+let txTimeoutDevice, txTimeoutSeconds, txTimeoutEpoch = 0;
+let txTimeoutReadState = 'loading', txTimeoutFeedback = '';
+let txTimeoutSaving = false, txTimeoutBusy = false, txTimeoutMaintenance = false;
+
+window.ORLControl?.identity.then(device => { txTimeoutDevice ??= device; }).catch(() => {});
+
+function validTxTimeout(seconds) { return Number.isInteger(seconds) && seconds >= 5 && seconds <= 600; }
+
+function renderTxTimeout() {
+  const dirty = panelDirty.has(txTimeoutInput.id);
+  const ready = txTimeoutReadState === 'ready';
+  const busy = txTimeoutBusy || txLive || talkBusy || SDR.ptt;
+  txTimeoutInput.disabled = !ready || txTimeoutSaving;
+  $('txTimeoutSet').disabled = !ready || !dirty || txTimeoutSaving || busy || txTimeoutMaintenance;
+  $('txTimeoutRetry').hidden = txTimeoutReadState !== 'failed';
+  if (!panelEditing(txTimeoutInput) && !txTimeoutSaving) {
+    txTimeoutInput.value = ready ? String(txTimeoutSeconds) : '';
+  }
+  const status = {
+    loading: '正在读取发射超时设置…',
+    failed: '发射超时读取失败，请重试',
+    unsupported: '当前手台固件不支持修改',
+    changed: '设备身份已变化，请重新打开面板',
+  };
+  const current = ready ? '当前生效 ' + txTimeoutSeconds + ' 秒' : '';
+  const notice = txTimeoutSaving ? '正在保存…' : !ready ? status[txTimeoutReadState]
+    : txTimeoutMaintenance ? '请结束维护后保存' : busy ? '请结束发射或转发后保存' : txTimeoutFeedback;
+  const text = [notice, dirty ? '未保存' : '', current].filter(Boolean).join(' · ');
+  if ($('txTimeoutStatus').textContent !== text) $('txTimeoutStatus').textContent = text;
+}
+
+async function syncTxTimeout(status, radio, failed, epoch) {
+  const device = txTimeoutDevice || await panelReadJson('/api/device').catch(() => null);
+  if (epoch !== txTimeoutEpoch || txTimeoutSaving) return;
+  if ((device?.device_id && status.device_id !== device.device_id) ||
+      (radio?.device_id && status.device_id !== radio.device_id)) {
+    txTimeoutReadState = 'changed';
+  } else if (!device?.device_id || device.api_version !== 2) {
+    txTimeoutReadState = 'failed';
+  } else {
+    txTimeoutDevice = device;
+    txTimeoutBusy = !!(status.tx_timeout_busy || status.bridge?.rx_open);
+    txTimeoutMaintenance = status.tx_timeout_maintenance === true;
+    if (!(device.capabilities?.tx_timeout >= 1)) txTimeoutReadState = 'unsupported';
+    else if (failed || !validTxTimeout(radio?.tx_timeout_s)) txTimeoutReadState = 'failed';
+    else {
+      if (radio.tx_timeout_s !== txTimeoutSeconds) txTimeoutFeedback = '';
+      txTimeoutSeconds = radio.tx_timeout_s;
+      txTimeoutReadState = 'ready';
+    }
+  }
+}
+
+txTimeoutInput.addEventListener('input', () => {
+  txTimeoutFeedback = '';
+  // The common draft handler runs as the event bubbles to document.
+  queueMicrotask(renderTxTimeout);
+});
+$('txTimeoutRetry').onclick = () => { panelRadioAt = 0; refresh(); };
+$('txTimeoutForm').onsubmit = async event => {
+  event.preventDefault();
+  if ($('txTimeoutSet').disabled) return;
+  const value = Number(txTimeoutInput.value);
+  if (!/^[0-9]{1,3}$/.test(txTimeoutInput.value) || !validTxTimeout(value)) {
+    txTimeoutFeedback = '请输入 5–600 的整数秒';
+    renderTxTimeout();
     return;
   }
+  const device = txTimeoutDevice.device_id;
+  ++txTimeoutEpoch;
   txTimeoutSaving = true;
-  form.disabled = $('txTimeoutSet').disabled = true;
-  status.textContent = '正在保存…';
+  renderTxTimeout();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
   try {
-    const reply = await cmd('tx_timeout_s', value);
-    if (!reply?.ok || reply.tx_timeout_s !== value) throw Error(reply?.err || '手台未确认发射超时');
-    status.textContent = '已保存 ' + value + ' 秒，下一次发射生效';
+    const reply = await fetch('/api/set', {method:'POST', cache:'no-store', redirect:'error',
+      signal:controller.signal, headers:{'Content-Type':'application/json','X-ORL-Device':device},
+      body:JSON.stringify({k:'tx_timeout_s', v:String(value)})}).then(response => response.json()).catch(() => null);
+    if (reply?.ok === false) {
+      txTimeoutFeedback = reply.err || '手台拒绝保存';
+      return;
+    }
+    // A transport failure can follow a successful write. Read once before
+    // reporting the outcome, without reusing a poll started before the write.
+    const radio = await panelReadJsonImpl('/api/radio');
+    const readDevice = radio.device_id || (await panelReadJsonImpl('/api/device')).device_id;
+    if (readDevice !== device) {
+      txTimeoutReadState = 'changed';
+      return;
+    }
+    if (!validTxTimeout(radio.tx_timeout_s)) throw Error('手台回读无效');
+    txTimeoutSeconds = radio.tx_timeout_s;
+    if (txTimeoutSeconds !== value) throw Error('手台回读与输入不一致');
+    panelDirty.delete(txTimeoutInput.id);
+    txTimeoutInput.removeAttribute('aria-description');
+    txTimeoutFeedback = '已保存，下一次发射生效';
   } catch (error) {
-    status.textContent = error.message;
+    txTimeoutFeedback = '保存未确认，请核对后重试';
   } finally {
+    clearTimeout(timer);
+    ++txTimeoutEpoch;
     txTimeoutSaving = false;
-    form.disabled = $('txTimeoutSet').disabled = false;
+    panelRadioAt = 0;
+    renderTxTimeout();
+    refresh();
   }
 };
 
@@ -4416,12 +4504,12 @@ async function refreshMeter() {
       talkLimitAnnounced = talkToken;
       log('已达发射超时', 'good');
     }
-    if (isTx && Number.isFinite(s.talk_left_ms)) {
+    $('talkTime').hidden = !(isTx && Number.isFinite(s.talk_left_ms));
+    if (!$('talkTime').hidden) {
       $('talkTime').textContent = s.talk_left_ms > 0
         ? '剩余 ' + Math.ceil(s.talk_left_ms / 1000) + ' 秒' : '正在收尾';
-    } else if (window._radio?.tx_timeout_s) {
-      $('talkTime').textContent = '发射超时 ' + window._radio.tx_timeout_s + ' 秒';
     }
+    renderTxTimeout();
     $('txState').textContent = isTx ? '发射中' : 'PTT 待机';
     $('txState').className = 'tag-chip ' + (isTx ? 'tx' : '');
     $('txBtn').className = 'tx' + (isTx ? ' live' : '');
@@ -4467,11 +4555,16 @@ async function refresh() {
   if (panelRefreshBusy) return false;
   panelRefreshBusy = true;
   const tailReadEpoch = tailPending ? -1 : tailEpoch;
+  const timeoutReadEpoch = txTimeoutEpoch;
   let readSucceeded = false;
   try {
     const s = await panelReadJson('/api/status');
     if (!s || typeof s.ptt !== 'string' || !s.wifi || !s.intercom) throw Error('手台状态格式错误');
-    if (window.ORLControl && ORLControl.device && s.device_id && ORLControl.device !== s.device_id) throw Error('设备身份变化，请重新打开面板');
+    const device = txTimeoutDevice?.device_id || window.ORLControl?.device;
+    if (device && s.device_id && s.device_id !== device) {
+      txTimeoutReadState = 'changed'; renderTxTimeout();
+      throw Error('设备身份变化，请重新打开面板');
+    }
     if (s.tail && !tailPending && tailReadEpoch === tailEpoch && Number.isInteger(s.tail.mode)) {
       acceptTail(s, window.ORLControl?.device || s.device_id);
       renderTail();
@@ -4479,12 +4572,14 @@ async function refresh() {
     readSucceeded = true; panelSeen(); panelStatusAt = Date.now();
     panelReadState.textContent = '';
     let radio = window._radio;
+    let radioFailed = false;
     if (window._st?.rf_config?.ready !== s.rf_config?.ready) panelRadioAt = 0;
+    if (validTxTimeout(s.tx_timeout_s) && s.tx_timeout_s !== radio?.tx_timeout_s) panelRadioAt = 0;
     if (!radio || Date.now() - panelRadioAt >= 30000) {
       try { const candidate = await panelReadJson('/api/radio');
         if (!candidate || typeof candidate.compatible !== 'boolean' || typeof candidate.ready !== 'boolean') throw Error('射频信息格式错误');
         radio = candidate; panelRadioAt = Date.now(); }
-      catch (e) { panelReadState.textContent = '射频信息暂不可读，保留上次结果';
+      catch (e) { radioFailed = true; panelReadState.textContent = '射频信息暂不可读，保留上次结果';
         if (!radio) radio={band:'UNSET',model:'读取中',compatible:false,ready:false,min:0,max:0,reason:'等待射频信息'}; }
     }
     if (s.rf_config && !s.rf_config.ready) {
@@ -4493,6 +4588,8 @@ async function refresh() {
     }
     const bandChanged = window._radio && window._radio.band !== radio.band;
     renderRadio(radio);
+    await syncTxTimeout(s, radio, radioFailed, timeoutReadEpoch);
+    renderTxTimeout();
     if (bandChanged) { loadChannels(); loadBridgeChans(); }
     window._st = s;
     window.HMEqPresets?.observe(s);
@@ -4723,6 +4820,9 @@ async function refresh() {
     return true;
   } catch (e) {
     window._lastErr = String((e && (e.stack || e.message)) || e);
+    if (!readSucceeded && timeoutReadEpoch === txTimeoutEpoch && !txTimeoutSaving && txTimeoutReadState !== 'changed') {
+      txTimeoutReadState = 'failed'; renderTxTimeout();
+    }
     if (!readSucceeded && typeof rxGuardViews !== 'undefined') rxGuardViews.forEach(view => view.sync({}));
     panelReadProblem(readSucceeded ? '页面显示异常，请查看日志' : '手台状态更新延迟', readSucceeded);
     log((readSucceeded ? '页面显示异常：' : '状态读取失败：') + e.message, 'err');
@@ -4772,6 +4872,7 @@ refresh();
   const browser=document.getElementById('sdrBtn').closest('.card');browser.querySelector('h2').textContent='浏览器麦克风与收听';move(browser,'talk');
   const source=document.createElement('div');source.className='panel-subnav';source.innerHTML='<button data-source="handheld" class="on">手台麦克风</button><button data-source="browser">浏览器麦克风</button>';
   pages.talk.insertBefore(source,handheld);browser.hidden=true;
+  pages.talk.insertBefore(document.getElementById('txTimeoutForm'),handheld);
   for(const mode of [1,2]) {
     const stage=document.querySelector('.mode-stage[data-modes="'+mode+'"]');
     const bridge=card(mode===1?'公网直连桥接':'网络中继桥接');bridge.dataset.modes=String(mode);

@@ -10,6 +10,7 @@ esp_err_t device_maintenance_cleanup(void);
 esp_err_t device_maintenance_reboot(void);
 esp_err_t device_maintenance_factory_reset(void);
 bool device_maintenance_reboot_pending(void);
+bool device_maintenance_writing(void);
 /* Track non-HTTP file writers too; new writes cannot start after reboot arm. */
 bool device_maintenance_write_begin(void);
 bool device_maintenance_update_idle(void);

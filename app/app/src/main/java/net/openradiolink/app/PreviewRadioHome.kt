@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-@Composable internal fun RadioHome(manager:DeviceManager,p:DeviceProfile,s:SessionView,pttDown:(String)->Unit,open:(String)->Unit,channels:()->Unit,confirm:(String,()->Unit)->Unit,chooseDevice:()->Unit) {
+@Composable internal fun RadioHome(manager:DeviceManager,p:DeviceProfile,s:SessionView,pttDown:(String)->Unit,open:(String)->Unit,channels:()->Unit,confirm:(String,()->Unit)->Unit,chooseDevice:()->Unit,timeoutEditor:@Composable ()->Unit) {
     val activity=RadioStateRules.activity(s.connected,s.ptt,s.status,s.activity.sample)
     // Debug APK verification: log after the composition reaches a frame, not
     // merely when a network callback arrives. Contains no voice or credentials.
@@ -39,8 +39,8 @@ import kotlinx.coroutines.delay
     val cardInk=if(active)Color.White else MaterialTheme.colorScheme.onSurface
     val cardSecondary=if(active)Color.White.copy(alpha=.88f) else secondary
     val cardAccent=if(active)Color.White else blue
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val short=maxHeight<660.dp || LocalDensity.current.fontScale>1.15f
+    BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
+        val short=maxHeight<460.dp || LocalDensity.current.fontScale>1.35f
         Column(Modifier.fillMaxSize().then(if(short)Modifier.verticalScroll(rememberScrollState()) else Modifier)) {
             Column((if(short)Modifier else Modifier.weight(1f).verticalScroll(rememberScrollState())).padding(horizontal=20.dp).padding(top=8.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                 Surface(onClick=chooseDevice,color=panel,shape=RoundedCornerShape(20.dp)) {
@@ -99,7 +99,7 @@ import kotlinx.coroutines.delay
                     if(s.progress>=0)LinearProgressIndicator(progress={s.progress/100f},modifier=Modifier.fillMaxWidth())else LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
-            PreviewPttDock(manager,p,s,pttDown)
+            PreviewPttDock(manager,p,s,pttDown,timeoutEditor)
         }
     }
 }
@@ -129,7 +129,7 @@ import kotlinx.coroutines.delay
     }
 }
 
-@Composable private fun PreviewPttDock(manager:DeviceManager,p:DeviceProfile,s:SessionView,pttDown:(String)->Unit) {
+@Composable private fun PreviewPttDock(manager:DeviceManager,p:DeviceProfile,s:SessionView,pttDown:(String)->Unit,timeoutEditor:@Composable ()->Unit) {
     var pressed by remember(p.id){mutableStateOf(false)}
     var elapsed by remember(p.id){mutableLongStateOf(0)}
     val enabled=s.connected&&s.listening&&s.mine&&!s.maintenance
@@ -161,6 +161,7 @@ import kotlinx.coroutines.delay
                 Box(Modifier.size(47.dp,28.dp).background(if(s.listening)green else MaterialTheme.colorScheme.outlineVariant,RoundedCornerShape(20.dp)).padding(3.dp),contentAlignment=if(s.listening)Alignment.CenterEnd else Alignment.CenterStart){Box(Modifier.size(22.dp).background(panel,RoundedCornerShape(50)))}
             }
         }
+        timeoutEditor()
         Surface(color=fill,shape=RoundedCornerShape(24.dp),modifier=Modifier.fillMaxWidth().heightIn(min=96.dp)
             .semantics(mergeDescendants=true){role=Role.Button;contentDescription="按住发话，松开结束";stateDescription=if(s.ptt)"发话中" else reason;if(!enabled)disabled()}
             .pointerInput(p.id,enabled){detectTapGestures(onPress={

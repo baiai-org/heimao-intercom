@@ -14,27 +14,45 @@ function part(start, end) {
   return source.slice(a, b);
 }
 const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m =>
-  [m[1], {value: '', dataset: {}, style: {}, textContent: '', innerHTML: '', disabled: false}]));
+  [m[1], {id: m[1], value: '', dataset: {}, style: {}, textContent: '', innerHTML: '', disabled: false,
+    addEventListener() {}, removeAttribute() {}}]));
 const steps = [...html.matchAll(/data-fstep="([^"]+)"/g)].map(m => ({dataset: {fstep: m[1]}}));
 const calls = [], logs = [];
+const device = {device_id: 'orl-test', api_version: 2, capabilities: {tx_timeout: 1}};
+let storedTimeout = 180, write = 'ok', readDevice = device.device_id, readCount = 0;
 const channels = [
   {i: 0, name: 'UHF', tx: 438.5, rx: 438.5, band: 'UHF', compatible: false, txt: '0000', rxt: '0000'},
   {i: 1, name: 'VHF', tx: 145.0125, rx: 145.6125, band: 'VHF', compatible: true, txt: '0000', rxt: '0000'},
 ];
 const context = vm.createContext({
-  txLive: false, panelDirty: new Map(),
-  window: {}, document: {activeElement: null, querySelectorAll: selector => {
+  txLive: false, talkBusy: false, SDR: {ptt:false}, panelDirty: new Map(), panelRadioAt: 0,
+  AbortController, setTimeout, clearTimeout,
+  window: {ORLControl: {identity: Promise.resolve(device)}}, document: {activeElement: null, querySelectorAll: selector => {
     assert.equal(selector, '[data-fstep]'); return steps;
   }},
   $: id => {assert(elements.has(id), 'unknown element ' + id); return elements.get(id);},
-  cmd: async (k, v) => { calls.push({k, v}); return {ok: true, tx_timeout_s:v}; },
+  panelEditing: el => context.panelDirty.has(el.id),
+  cmd: async (k, v) => { calls.push({k, v}); return {ok: true}; },
+  fetch: async (url, request) => {
+    assert.equal(url, '/api/set'); assert.equal(request.method, 'POST');
+    assert.equal(request.headers['X-ORL-Device'], device.device_id);
+    const data = JSON.parse(request.body); calls.push(data);
+    if (write === 'busy') return {json: async () => ({ok:false, err:'请结束发射或转发后保存'})};
+    if (write !== 'unchanged') storedTimeout = Number(data.v);
+    if (write === 'unknown') throw Error('connection dropped after write');
+    return {json: async () => ({ok:true, tx_timeout_s:storedTimeout})};
+  },
+  panelReadJsonImpl: async url => {
+    assert.equal(url, '/api/radio'); readCount++;
+    return {device_id:readDevice, tx_timeout_s:storedTimeout};
+  },
+  panelReadJson: async url => { assert.equal(url, '/api/device'); return device; },
   log: (...args) => logs.push(args), touchInput: () => {}, last: '',
   loadChannels: async () => {}, syncBridge: () => {}, refresh: async () => {},
   readChannels: async () => channels,
   escHtml: v => String(v).replace(/[&<>"']/g, '_'),
 });
-vm.runInContext(part('function radioGridHz(', "let txTimeoutSaving"), context);
-vm.runInContext(part('let txTimeoutSaving', '/* Atomic dual-frequency step'), context);
+vm.runInContext(part('function radioGridHz(', '/* Atomic dual-frequency step'), context);
 vm.runInContext(part('/* Atomic dual-frequency step', 'let tonesReady'), context);
 vm.runInContext(part("$('fset').onclick", "$('fSync').onclick"), context);
 vm.runInContext(part('async function loadBridgeChans()', 'const rxGuardViews'), context);
@@ -97,24 +115,54 @@ assert.equal(elements.get('fset').disabled, true);
 assert.equal(context.radioFrequency('145'), null);
 (async () => {
   const timeout = elements.get('txTimeout'), saveTimeout = elements.get('txTimeoutSet');
+  const submit = () => elements.get('txTimeoutForm').onsubmit({preventDefault() {}});
+  const status = elements.get('txTimeoutStatus');
+  const sync = async (r = {tx_timeout_s: storedTimeout}, s = device, failed = false) => {
+    await context.syncTxTimeout(s, r, failed, vm.runInContext('txTimeoutEpoch', context));
+    context.renderTxTimeout();
+  };
+  const draft = value => {
+    timeout.value = value;
+    context.panelDirty.set('txTimeout', value);
+    context.renderTxTimeout();
+  };
+  context.renderTxTimeout();
   assert.equal(saveTimeout.disabled,true);
-  context.renderRadio({...vhf, tx_timeout_s:180});
-  assert.equal(timeout.value,180);
-  assert.equal(saveTimeout.disabled,false);
-  for (const bad of ['4','601','180.5','5e1','']) {
-    timeout.value=bad;
-    await saveTimeout.onclick();
+  await sync();
+  assert.equal(timeout.value,'180');
+  assert.equal(timeout.disabled,false);
+  for (const bad of ['4','601','180.5','5e1','-5','']) {
+    draft(bad);
+    await submit();
     assert.equal(calls.length,0);
+    assert.match(status.textContent,/请输入 5–600/);
   }
-  timeout.value='600';
-  await saveTimeout.onclick();
-  assert.deepEqual(calls.pop(),{k:'tx_timeout_s',v:600});
-  assert.match(elements.get('txTimeoutStatus').textContent,/已保存 600 秒/);
-  context.panelDirty.set('txTimeout','5');
-  timeout.value='5';
-  context.renderRadio({...vhf, tx_timeout_s:600});
+  draft('600');
+  await submit();
+  assert.deepEqual(calls.pop(),{k:'tx_timeout_s',v:'600'});
+  assert.match(status.textContent,/已保存.*当前生效 600 秒/);
+  draft('5');
+  await sync();
   assert.equal(timeout.value,'5');
-  console.log('PASS: shared TX timeout readback, integral bounds and unsaved draft');
+  await sync(undefined, {...device, tx_timeout_busy:true});
+  assert.equal(saveTimeout.disabled,true);
+  await submit(); assert.equal(calls.length,0);
+  await sync();
+  write = 'busy'; await submit(); calls.pop();
+  assert.match(status.textContent,/请结束发射或转发/); assert.equal(timeout.value,'5');
+  assert.equal(readCount,1);
+  write = 'unchanged'; await submit(); calls.pop();
+  assert.match(status.textContent,/保存未确认.*未保存.*当前生效 600 秒/);
+  write = 'unknown'; await submit(); calls.pop();
+  assert.equal(readCount,3); assert.match(status.textContent,/已保存.*当前生效 5 秒/);
+  draft('120'); readDevice = 'orl-other'; await submit(); calls.pop();
+  assert.match(status.textContent,/设备身份已变化/); assert.equal(saveTimeout.disabled,true);
+  assert.equal(timeout.value,'120');
+  await sync({}, device, true);
+  assert.match(status.textContent,/读取失败/); assert.equal(elements.get('txTimeoutRetry').hidden,false);
+  device.capabilities.tx_timeout = 0;
+  await sync(); assert.match(status.textContent,/手台固件不支持/);
+  console.log('PASS: shared TX timeout identity, integral bounds, busy, read failure, lost reply and draft');
   await context.loadBridgeChans();
   assert.match(elements.get('brChan1').innerHTML, /value="1" disabled/);
   assert.match(elements.get('brChan1').innerHTML, /value="2">/);

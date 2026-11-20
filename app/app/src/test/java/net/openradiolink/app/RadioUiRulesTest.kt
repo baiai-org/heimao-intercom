@@ -57,5 +57,12 @@ class RadioUiRulesTest {
         listOf("", "4", "601", "5.0", "5e1", "+5", " 5").forEach {
             assertNotNull(RadioUiRules.parameterError("tx_timeout_s", it))
         }
+        listOf(5, 180, 600).forEach {
+            assertEquals(it, RadioUiRules.txTimeoutSeconds(JSONObject().put("tx_timeout_s", it)))
+        }
+        listOf(4, 601, 5.5, "180").forEach {
+            assertNull(RadioUiRules.txTimeoutSeconds(JSONObject().put("tx_timeout_s", it)))
+        }
+        assertNull(RadioUiRules.txTimeoutSeconds(JSONObject()))
     }
 }

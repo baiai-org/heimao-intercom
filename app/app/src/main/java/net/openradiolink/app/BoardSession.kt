@@ -167,7 +167,8 @@ class BoardSession(
         if(capabilities.optInt("custom_name")>=1)acceptName(info,true)
         else if(profile.nameRevision>=0) { profile=profile.copy(customName="",nameRevision=-1);nameCache(profile) }
         publish { it.copy(profileId=profile.id,deviceId=id,phase="读取实际状态",error="",
-            eqPresetsSupported=capabilities.optInt("eq_presets")>=1) }
+            eqPresetsSupported=capabilities.optInt("eq_presets")>=1,
+            txTimeoutSupported=capabilities.optInt("tx_timeout")>=1) }
     }
     private suspend fun acceptName(data:JSONObject,verified:Boolean=false)=nameLock.withLock {
         if(closed || data.optString("device_id")!=api.deviceId || !data.has("custom_name") || !data.has("name_revision"))return@withLock
@@ -211,11 +212,16 @@ class BoardSession(
         val version=reads.get()
         val status=api.json("api/status")
         if(closed || version!=reads.get())return
+        require(status.optString("device_id", api.deviceId) == api.deviceId) { "设备身份已变化，请重新连接" }
         acceptName(status)
         // Publish the status now; configuration queries do not hold up activity.
         publish { it.copy(status=status,connected=true,phase="已连接",updated=System.currentTimeMillis(),error="") }
         val live=api.json("api/live")
-        val radio=api.json("api/radio")
+        val radio = try { api.json("api/radio") }
+        catch (e: CancellationException) { throw e }
+        catch (e: CertificateFailure) { throw e }
+        catch (_: Exception) { null }
+        require((radio?.optString("device_id", api.deviceId) ?: api.deviceId) == api.deviceId) { "设备身份已变化，请重新连接" }
         val wifi=api.json("api/wifi")
         val control=api.json("api/control")
         val deviceMaintenance=if(capabilities.optInt("maintenance")>=1) {
@@ -226,8 +232,16 @@ class BoardSession(
         val channels=if (tables) JSONArray(String(api.bytes("api/channels",256*1024),Charsets.UTF_8)) else view.value.channels
         if (closed || version!=reads.get()) return
         applyControl(control)
-        publish { it.copy(status=status,live=live,radio=radio,wifi=wifi,channels=channels,deviceMaintenance=deviceMaintenance,connected=true,
-            phase="已连接",updated=System.currentTimeMillis(),error="") }
+        publish { old ->
+            if (version != reads.get()) old else {
+                val timeout = radio?.let(RadioUiRules::txTimeoutSeconds)
+                val updated = old.copy(status=status,live=live,wifi=wifi,channels=channels,deviceMaintenance=deviceMaintenance,
+                    connected=true,phase="已连接",updated=System.currentTimeMillis(),error="")
+                if (old.txTimeoutSaving) updated else updated.copy(radio=radio ?: old.radio,
+                    txTimeoutReadFailed=old.txTimeoutSupported == true && timeout == null,
+                    txTimeoutResult=if (timeout != null && timeout != RadioUiRules.txTimeoutSeconds(old.radio)) "" else old.txTimeoutResult)
+            }
+        }
     }
     private suspend fun refreshActivity() {
         val version=reads.get()
@@ -318,11 +332,6 @@ class BoardSession(
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
         val response = api.json("api/set", JSONObject().put("k", key).put("v", value))
         when (key) {
-            "tx_timeout_s" -> {
-                val radio = api.json("api/radio")
-                check(radio.optInt("tx_timeout_s") == value.toInt()) { "手台发射超时回读不一致" }
-                publish { it.copy(radio=radio) }
-            }
             "spk_vol" -> {
                 refresh()
                 check(view.value.status.optInt("spk",-1)==value.toInt()) { "手台喇叭档位未确认" }
@@ -334,6 +343,63 @@ class BoardSession(
                 check(confirmed.id != 8 && confirmed.customSeconds == 0.0) { "尾音删除未确认" }
             }
             else -> refresh()
+        }
+    }
+
+    private suspend fun txTimeoutRadio(): JSONObject {
+        val radio = api.json("api/radio")
+        val device = radio.optString("device_id").ifBlank { api.json("api/device").optString("device_id") }
+        check(device == api.deviceId) { "设备身份已变化，请重新连接" }
+        check(RadioUiRules.txTimeoutSeconds(radio) != null) { "发射超时回读无效" }
+        return radio
+    }
+
+    suspend fun readTxTimeout() {
+        reads.incrementAndGet()
+        try {
+            val radio = txTimeoutRadio()
+            reads.incrementAndGet()
+            publish { it.copy(radio=radio, txTimeoutReadFailed=false, txTimeoutResult="") }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            reads.incrementAndGet()
+            publish { it.copy(txTimeoutReadFailed=true) }
+            if (e is CertificateFailure) throw e
+        }
+    }
+
+    suspend fun saveTxTimeout(seconds: Int): Boolean {
+        reads.incrementAndGet()
+        publish { it.copy(txTimeoutSaving=true, txTimeoutResult="") }
+        try {
+            ensureLease()
+            val state = view.value
+            check(seconds in 5..600 && state.txTimeoutSupported == true) { "发射超时设置不可用" }
+            check(!state.maintenance) { "请结束维护后保存" }
+            // Older firmware can return the value without an identity in /api/radio.
+            if (state.radio.optString("device_id").isBlank()) {
+                check(api.json("api/device").optString("device_id") == api.deviceId) { "设备身份已变化，请重新连接" }
+            }
+            try {
+                api.json("api/set", JSONObject().put("k", "tx_timeout_s").put("v", seconds.toString()))
+            } catch (e: CancellationException) { throw e }
+            catch (e: CertificateFailure) { throw e }
+            catch (e: ApiFailure) { if (e.status < 500) throw e }
+            catch (_: Exception) { /* The write might have reached the device. Read once below. */ }
+            val radio = txTimeoutRadio()
+            val confirmed = RadioUiRules.txTimeoutSeconds(radio) == seconds
+            publish { it.copy(radio=radio, txTimeoutReadFailed=false, txTimeoutResult=
+                if (confirmed) "已保存，下一次发射生效" else "回读与输入不一致，请核对后重试") }
+            return confirmed
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            publish { it.copy(txTimeoutResult=if (e is ApiFailure && e.status < 500) e.message.orEmpty()
+                else "保存未确认，请核对后重试") }
+            if (e is CertificateFailure) throw e
+            return false
+        } finally {
+            reads.incrementAndGet()
+            publish { it.copy(txTimeoutSaving=false) }
         }
     }
 

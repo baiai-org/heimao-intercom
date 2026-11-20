@@ -9,8 +9,8 @@ android {
         applicationId = "net.openradiolink.app"
         minSdk = 24
         targetSdk = 37
-        versionCode = 39
-        versionName = "1.2.27-heimao"
+        versionCode = 40
+        versionName = "1.2.28-heimao"
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
