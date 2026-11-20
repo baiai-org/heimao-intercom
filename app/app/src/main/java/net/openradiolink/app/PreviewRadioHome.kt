@@ -39,10 +39,12 @@ import kotlinx.coroutines.delay
     val cardInk=if(active)Color.White else MaterialTheme.colorScheme.onSurface
     val cardSecondary=if(active)Color.White.copy(alpha=.88f) else secondary
     val cardAccent=if(active)Color.White else blue
-    BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         val short=maxHeight<460.dp || LocalDensity.current.fontScale>1.35f
-        Column(Modifier.fillMaxSize().then(if(short)Modifier.verticalScroll(rememberScrollState()) else Modifier)) {
-            Column((if(short)Modifier else Modifier.weight(1f).verticalScroll(rememberScrollState())).padding(horizontal=20.dp).padding(top=8.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+        val scrollPage=short || WindowInsets.ime.getBottom(LocalDensity.current)>0
+        Column(Modifier.fillMaxSize().imePadding().then(if(scrollPage)Modifier.verticalScroll(rememberScrollState()) else Modifier)) {
+            if(short) PreviewPttDock(manager,p,s,pttDown,timeoutEditor)
+            Column((if(scrollPage)Modifier else Modifier.weight(1f).verticalScroll(rememberScrollState())).padding(horizontal=20.dp).padding(top=8.dp,bottom=4.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                 Surface(onClick=chooseDevice,color=panel,shape=RoundedCornerShape(20.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min=68.dp).padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                         Icon(Icons.Outlined.Sensors,null,modifier=Modifier.size(20.dp))
@@ -99,7 +101,7 @@ import kotlinx.coroutines.delay
                     if(s.progress>=0)LinearProgressIndicator(progress={s.progress/100f},modifier=Modifier.fillMaxWidth())else LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
-            PreviewPttDock(manager,p,s,pttDown,timeoutEditor)
+            if(!short) PreviewPttDock(manager,p,s,pttDown,timeoutEditor)
         }
     }
 }
