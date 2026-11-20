@@ -37,6 +37,37 @@ const tailState=()=>{
 };
 const channels=[0,1,2].map(i=>({i,name:'测试信道'+(i+1),rx:433.5+i*.0125,tx:433.5+i*.0125,bw:0,sq:3,vol:5,pwr:0,band:'UHF',compatible:true}));
 const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'SA818S-U',compatible:true,ready:true,power_applied:0,power_pending:0};
+
+async function assertEqSlotLayout(page, columns, filled) {
+ const list=page.locator('#eqPresetList');
+ await list.waitFor();
+ await page.waitForFunction(expected=>{
+  const slots=[...document.querySelectorAll('#eqPresetList .eq-user-slot')];
+  return slots.length===3 && slots.filter(slot=>!slot.querySelector('.eq-user-more').hidden).length===expected &&
+      slots.every(slot=>slot.querySelector('strong').textContent.includes(' · '));
+ },filled);
+ const {bounds,slots}=await list.evaluate(element=>({
+  bounds:element.getBoundingClientRect().toJSON(),
+  slots:[...element.children].map(slot=>({
+   ...slot.getBoundingClientRect().toJSON(),
+   nameWidth:slot.querySelector('strong').getBoundingClientRect().width,
+   actionsRight:slot.querySelector('.eq-user-actions').getBoundingClientRect().right
+  }))
+ }));
+ for(let index=0;index<slots.length;index++){
+  const slot=slots[index];
+  assert(slot.nameWidth>0 && slot.actionsRight<=slot.right+1, 'A slot must keep its name and actions inside the card');
+  if(columns===3){
+   assert(Math.abs(slot.top-slots[0].top)<1 && Math.abs(slot.width-slots[0].width)<1);
+   if(index>0)assert(slot.left>=slots[index-1].right);
+  }else{
+   assert(Math.abs(slot.left-bounds.left)<1 && Math.abs(slot.width-bounds.width)<1);
+   if(index>0)assert(slot.top>=slots[index-1].bottom);
+  }
+ }
+ assert(Math.abs(slots[0].left-bounds.left)<1 && Math.abs(slots[2].right-bounds.right)<1);
+}
+
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
  try{
@@ -360,10 +391,12 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   await page.evaluate(()=>{holdSyncUntil=0;last='';return refresh();});
   assert.equal(await page.locator('#ftx').inputValue(),'433.5050');
   await page.screenshot({animations:'disabled',path:path.join(output,'layout-detail-desktop.png')});
+  await assertEqSlotLayout(page,3,0);
   await page.setViewportSize({width:390,height:844});
   assert((await toggle.boundingBox()).height>=48);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.screenshot({animations:'disabled',path:path.join(output,'layout-detail-mobile.png')});
   await page.locator('#mobNav [data-sec-tab=eq]').click();
+  await assertEqSlotLayout(page,1,0);
   for(let i=0;i<4;i++){
    await toggle.click();await page.waitForFunction(()=>document.body.dataset.panelLayout==='simple');
    assert(await page.locator('#ftx').isVisible());
@@ -414,13 +447,17 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   await page.locator('.panel-more').click();
   await page.locator('[data-page=audio]').click();
   await page.setViewportSize({width:320,height:812});
-  assert.equal(await page.locator('#eqPresetList .eq-user-slot').count(),3);
+  await assertEqSlotLayout(page,1,0);
   const slot=page.locator('#eqPresetList [data-slot="1"]');
   const more=slot.getByRole('button',{name:'槽位 1 更多操作'});
   await slot.getByRole('button',{name:'保存',exact:true}).click();
   await page.locator('#eqPresetName').fill('车载');
   await page.locator('#eqPresetSubmit').click();
   await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已保存'));
+  await assertEqSlotLayout(page,1,1);
+  await page.setViewportSize({width:1440,height:900});
+  await assertEqSlotLayout(page,3,1);
+  await page.setViewportSize({width:320,height:812});
   const longName='夜间通联'.repeat(6);
   eqConflict=true;
   await more.click();
@@ -445,7 +482,6 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   assert.equal(await more.getAttribute('aria-expanded'),'false');
   await slot.getByRole('button',{name:'应用'}).click();
   await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已应用'));
-  await page.locator('#eqUserPresets').screenshot({path:path.join(output,'eq-slots-mobile.png')});
   await more.click();
   await slot.getByRole('button',{name:'覆盖'}).click();
   assert.equal(await page.locator('#eqPresetName').inputValue(),longName);
@@ -454,12 +490,48 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   await slot.getByRole('button',{name:'删除'}).click();
   await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent==='已删除');
   assert.equal(eqSlots[0],null);
+  await page.setViewportSize({width:1440,height:900});
+  await assertEqSlotLayout(page,3,0);
+  for(const [index,name] of [longName,'车载','日常'].entries()){
+   const row=page.locator('#eqPresetList').locator('.eq-user-slot').nth(index);
+   await row.getByRole('button',{name:'保存',exact:true}).click();
+   await page.locator('#eqPresetName').fill(name);
+   await page.locator('#eqPresetSubmit').click();
+   await row.locator('strong').filter({hasText:name}).waitFor();
+   assert.equal(eqSlots[index].name,name);
+  }
+  await assertEqSlotLayout(page,3,3);
+  await slot.getByRole('button',{name:'应用'}).click();
+  await page.waitForFunction(()=>document.querySelector('#eqPresetFeedback').textContent.includes('已应用'));
+  await more.click();
+  assert.equal(await slot.locator('.eq-user-menu span').innerText(),longName);
+  await page.keyboard.press('Escape');
+  await page.locator('#eqUserPresets').screenshot({path:path.join(output,'eq-slots-desktop.png')});
+  await page.setViewportSize({width:761,height:850});
+  await assertEqSlotLayout(page,3,3);
+  await page.setViewportSize({width:760,height:850});
+  await assertEqSlotLayout(page,1,3);
+  const touch=await page.context().newCDPSession(page);
+  await page.setViewportSize({width:844,height:390});
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true});
+  await page.waitForFunction(()=>matchMedia('(hover: none) and (pointer: coarse)').matches);
+  await assertEqSlotLayout(page,1,3);
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+  await touch.detach();
+  await page.setViewportSize({width:320,height:812});
+  await assertEqSlotLayout(page,1,3);
+  await page.locator('#eqUserPresets').screenshot({path:path.join(output,'eq-slots-mobile.png')});
   await page.reload();
   await page.waitForFunction(()=>document.querySelector('#panelClockZone').value==='345');
   await page.locator('#panelLayoutToggle').click();
   await page.waitForFunction(()=>document.body.dataset.panelLayout==='detail');
   assert(await page.locator('#panelClock').evaluate(el=>el.nextElementSibling.classList.contains('name-plate')));
   assert.equal(await page.locator('#ixSeg .relay-state').count(),0);
+  await page.locator('#mobNav [data-sec-tab=eq]').click();
+  await assertEqSlotLayout(page,1,3);
+  await page.setViewportSize({width:1440,height:900});
+  await assertEqSlotLayout(page,3,3);
+  await page.locator('#eqUserPresets').screenshot({path:path.join(output,'eq-slots-detail-desktop.png')});
   await page.goto('http://heimao.test/setup');
   await page.waitForFunction(()=>document.getElementById('state').textContent.includes('重名'));
   assert.equal(await page.locator('#openHost').getAttribute('href'),'https://heimao-2.local/');
@@ -469,8 +541,10 @@ const radio={freq_grid_hz:500,freq_decimals:4,band:'UHF',min:400,max:480,model:'
   assert(await page.locator('#openHost').isHidden());
   assert.equal(await page.locator('#openIp').getAttribute('href'),'https://192.0.2.2/');
   assert.deepEqual(errors,[]);
-  fs.writeFileSync(path.join(output,'inventory.json'),JSON.stringify({desktop,mobile,errors},null,2));
-  console.log(JSON.stringify({desktop,mobile,errors},null,2));
+  const layoutReport={desktop,mobile,eqSlots:{desktopColumns:3,mobileColumns:1,boundary:760,
+   filledCounts:[0,1,3],detail:true,touchLandscape:true},errors};
+  fs.writeFileSync(path.join(output,'inventory.json'),JSON.stringify(layoutReport,null,2));
+  console.log(JSON.stringify(layoutReport,null,2));
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
 

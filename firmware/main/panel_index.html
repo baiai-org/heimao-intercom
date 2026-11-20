@@ -70,6 +70,10 @@
 .clock-zone { color: var(--fg-2); display: flex; gap: 8px; align-items: center; }
 .clock-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .eq-user-presets { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 14px; }
+#eqPresetList { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 760px), (hover: none) and (pointer: coarse) {
+  #eqPresetList { grid-template-columns: minmax(0, 1fr); }
+}
 .eq-user-slot { display:flex; align-items:center; gap:6px;
   padding:4px 8px; border:1px solid var(--line); border-radius:8px; }
 .eq-user-slot strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
