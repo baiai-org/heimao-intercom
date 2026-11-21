@@ -1617,13 +1617,15 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
   border-color: #326285;
   color: #e5f8ff;
 }
-#audioSpectrum canvas {
-  display: block;
-  width: 100%;
+#audioSpectrum .spectrum-plot {
+  position: relative;
+  overflow: hidden;
   height: clamp(222px, 38vw, 300px);
   border-radius: 8px;
   background: radial-gradient(ellipse at 51% 82%, #121e3b 0%, #080e1c 68%);
 }
+#audioSpectrum canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+#audioSpectrum [data-spectrum-problem] { color: #ffc785; }
 #audioSpectrum .spectrum-legend {
   display: flex;
   align-items: center;
@@ -1742,13 +1744,17 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <header>
           <h2 id="audioSpectrumTitle">实时音频频谱</h2>
           <span data-spectrum-source>等待语音</span>
+          <span data-spectrum-problem role="status" hidden></span>
           <select data-spectrum-path aria-label="频谱音频路径" hidden></select>
         </header>
         <div class="spectrum-switch" role="group" aria-label="频谱视图">
           <button type="button" data-view="surface" aria-pressed="true">3D 频谱</button>
           <button type="button" data-view="waterfall" aria-pressed="false">彩色瀑布</button>
         </div>
-        <canvas role="img" aria-label="3D 彩色音频频谱，125 Hz 至 8 kHz">音频频谱，125 Hz 至 8 kHz。</canvas>
+        <div class="spectrum-plot">
+          <canvas data-spectrum-gl aria-hidden="true" hidden></canvas>
+          <canvas data-spectrum-axes role="img" aria-label="3D 彩色音频频谱，125 Hz 至 8 kHz">音频频谱，125 Hz 至 8 kHz。</canvas>
+        </div>
         <div class="spectrum-legend" aria-label="电平色阶，从负七十八到负十六 dBFS">
           <span>−78</span><span class="spectrum-ramp" aria-hidden="true"></span><span>−16 dBFS</span>
         </div>
@@ -2885,8 +2891,10 @@ function sdrRegisterAudio() {
     constructor(options) {
       super(); this.wire = options.processorOptions.wire;
       this.frameSize = Math.min(1024, Math.round(this.wire * 0.040));
-      this.active = false;
+      this.active = false; this.preview = false;
       this.port.onmessage = e => {
+        if (typeof e.data.preview === 'boolean') this.preview = e.data.preview;
+        if (!('on' in e.data)) return;
         if (!e.data.on) {
           if (e.data.flush && this.active && e.data.epoch === this.epoch) {
             this.sendAudio();
@@ -2923,6 +2931,11 @@ function sdrRegisterAudio() {
           const v = Math.max(-32768, Math.min(32767, Math.round(this.sum/this.count*32767)));
           this.sum = 0; this.count = 0; this.buf[this.fill++] = v;
           this.peak = Math.max(this.peak, Math.abs(v));
+          if (this.preview && this.fill % this.frameSize === 0) {
+            const samples = this.buf.slice(this.fill - this.frameSize, this.fill);
+            this.port.postMessage({epoch:this.epoch, preview:true, samples,
+              first:this.sent + this.fill - this.frameSize, stamp:currentTime}, [samples.buffer]);
+          }
           if (this.fill === this.size) this.sendAudio();
         }
       }
@@ -3059,7 +3072,6 @@ function sdrSendAudio(pcm, stamp) {
       sdrAbortAudio('HTTP 语音积压', pcm.length); return;
     }
     SDR.txQueue.push({pcm, stamp}); SDR.txQueued += pcm.length;
-    sdrSpectrum('microphone', pcm);
     if (!SDR.txBusy) SDR.txIdle = sdrHttpTxPump();
     return;
   }
@@ -3074,7 +3086,6 @@ function sdrSendAudio(pcm, stamp) {
       const part = pcm.subarray(i, i+max), frame = new ArrayBuffer(8+part.byteLength), view = new DataView(frame);
       view.setUint32(0, SDR.sid, true); view.setUint32(4, SDR.activeTx, true);
       new Int16Array(frame, 8).set(part); ws.send(frame);
-      sdrSpectrum('microphone', part);
       SDR.txSent += part.length;
     }
     catch (e) { sdrAbortAudio('WebSocket 语音发送失败', pcm.length - i, true); break; }
@@ -3404,6 +3415,16 @@ async function sdrPttDown(ev) {
     SDR.micLabel = stream.getAudioTracks()[0].label || '麦克风';
     node.port.onmessage = e => {
       if (!active() || !SDR.keyed || e.data.epoch !== epoch) return;
+      if (e.data.preview) {
+        sdrSpectrum('microphone', e.data.samples, e.data.first,
+          performance.now() - Math.max(0, ctx.currentTime - e.data.stamp) * 1000);
+        return;
+      }
+      const preview = !!window.ORLAudioSpectrum?.microphoneReady();
+      if (node.spectrumPreview !== preview) {
+        node.spectrumPreview = preview;
+        node.port.postMessage({preview});
+      }
       if (e.data.flushed) {
         if (SDR.txFlush) { SDR.txFlush(true); }
         return;
@@ -3427,7 +3448,8 @@ async function sdrPttDown(ev) {
     if (ctx.state !== 'running') throw new Error('音频设备已暂停');
     SDR.keyPending = false; SDR.keyed = true; SDR.rxGain.gain.value = 0; sdrRxClear();
     SDR.txOpenedAt = performance.now();
-    node.port.postMessage({on: true, epoch, batch: SDR.http ? 3 : 1});
+    node.spectrumPreview = !!window.ORLAudioSpectrum?.microphoneReady();
+    node.port.postMessage({on: true, epoch, batch: SDR.http ? 3 : 1, preview:node.spectrumPreview});
     $('sdrPtt').className = 'tx live'; setPttLabel($('sdrPtt'), '■ 发射中 · 点击停止');
   } catch (e) {
     if (active()) { sdrPttUp(); log('麦克风发射失败: ' + e, 'err'); }

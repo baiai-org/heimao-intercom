@@ -1,55 +1,30 @@
 #include "audio_spectrum.h"
 #include "audio_i2s.h"
-#include "spectrum_kiss.h"
 
-#include <math.h>
 #include <stdatomic.h>
 #include <string.h>
-
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
 
-enum {
-    FFT_SIZE = SPECTRUM_FFT_SIZE,
-    HOP_SAMPLES = AUDIO_SAMPLE_RATE_HZ / 8,
-    HISTORY_ROWS = 4,
-    LEASE_MS = 2000,
-    ACTIVE_MS = 350,
-};
+enum { PCM_CAPACITY = 24000, JOIN_SAMPLES = 2560, LEASE_MS = 1000, ACTIVE_MS = 180 };
 _Static_assert(AUDIO_SAMPLE_RATE_HZ == 16000 && SPECTRUM_PATH_COUNT < 32,
-               "Update the spectrum protocol when the audio format changes");
-
-typedef struct {
-    uint32_t sequence, stamp;
-    uint8_t bins[SPECTRUM_BINS];
-} spectrum_row_t;
+               "Update the PCM protocol when the audio format changes");
 
 typedef struct {
     uint32_t path_time[SPECTRUM_PATH_COUNT];
-    audio_spectrum_path_t path, previous_path, selected;
-    uint32_t generation, input_revision, sequence, stamp;
-    unsigned input_head, input_count, input_new;
-    unsigned row_head, row_count;
-    int16_t input[FFT_SIZE];
-    int16_t snapshot[FFT_SIZE];
-    float hann[FFT_SIZE], time_domain[FFT_SIZE];
-    kiss_fft_cpx frequency_domain[FFT_SIZE / 2 + 1];
-    spectrum_row_t rows[HISTORY_ROWS];
-    kiss_fftr_cfg fft;
-    void *fft_memory;
-    size_t fft_bytes;
+    audio_spectrum_path_t path, selected;
+    uint32_t boot, generation, next, stamp;
+    unsigned head, count;
+    int16_t pcm[PCM_CAPACITY];
 } spectrum_state_t;
 
 static StaticSemaphore_t s_mutex_storage;
 static SemaphoreHandle_t s_mutex;
 static spectrum_state_t *s_state;
-static atomic_uint s_lease_until;
-static atomic_uint s_missed;
+static atomic_uint s_lease_until, s_missed, s_contention;
 
 static uint32_t now_ms(void)
 {
@@ -95,140 +70,59 @@ static unsigned priority(audio_spectrum_path_t path)
     }
 }
 
-static void reset_input(spectrum_state_t *s)
+static void reset_stream(spectrum_state_t *s)
 {
-    s->input_head = s->input_count = s->input_new = 0;
-    ++s->input_revision;
+    if (++s->generation == 0) { ++s->generation; }
+    s->head = s->count = s->next = 0;
 }
 
 static void use_path(spectrum_state_t *s, audio_spectrum_path_t path)
 {
-    if (s->path == path) { return; }
-    s->path = path;
-    reset_input(s);
-    if (path && path != s->previous_path) {
-        s->previous_path = path;
-        ++s->generation;
-        s->row_count = s->row_head = 0;
+    if (s->path != path) {
+        s->path = path;
+        reset_stream(s);
     }
-}
-
-static void choose_path(spectrum_state_t *s, uint32_t now)
-{
-    if (path_active(s, s->selected, now)) {
-        use_path(s, s->selected);
-        return;
-    }
-    s->selected = SPECTRUM_AUTO;
-    audio_spectrum_path_t path = path_active(s, s->path, now) ? s->path : SPECTRUM_AUTO;
-    for (audio_spectrum_path_t p = 1; p < SPECTRUM_PATH_COUNT; ++p) {
-        if (path_active(s, p, now) && priority(p) > priority(path)) { path = p; }
-    }
-    use_path(s, path);
 }
 
 void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t samples)
 {
-    if (!atomic_load_explicit(&s_lease_until, memory_order_relaxed) ||
-        path <= SPECTRUM_AUTO || path >= SPECTRUM_PATH_COUNT || !pcm || !samples) { return; }
+    if (path <= SPECTRUM_AUTO || path >= SPECTRUM_PATH_COUNT || !pcm || !samples) { return; }
     const uint32_t now = now_ms();
     if (!leased(now)) { return; }
     const unsigned bit = 1u << path;
     if (xSemaphoreTake(s_mutex, 0) != pdTRUE) {
         atomic_fetch_or_explicit(&s_missed, bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&s_contention, 1, memory_order_relaxed);
         return;
     }
     spectrum_state_t *s = s_state;
     const uint32_t gap = now - s->path_time[path];
     s->path_time[path] = now ? now : 1;
-    if (s->selected == path || !path_active(s, s->path, now) ||
-        (!path_active(s, s->selected, now) && priority(path) > priority(s->path))) {
+    if (s->selected == path || (!path_active(s, s->selected, now) &&
+        (!path_active(s, s->path, now) || priority(path) > priority(s->path)))) {
         use_path(s, path);
     }
+    const bool missed = atomic_fetch_and_explicit(&s_missed, ~bit, memory_order_relaxed) & bit;
     if (s->path == path) {
-        const bool missed = atomic_fetch_and_explicit(&s_missed, ~bit, memory_order_relaxed) & bit;
-        if (gap > 160 || missed) { reset_input(s); }
-        if (samples > FFT_SIZE) { pcm += samples - FFT_SIZE; samples = FFT_SIZE; }
-        const unsigned room = FFT_SIZE - s->input_head;
-        const unsigned first = samples < room ? (unsigned)samples : room;
-        memcpy(s->input + s->input_head, pcm, first * sizeof(*pcm));
-        memcpy(s->input, pcm + first, (samples - first) * sizeof(*pcm));
-        s->input_head = (s->input_head + samples) % FFT_SIZE;
-        const unsigned filled = s->input_count + samples;
-        s->input_count = filled < FFT_SIZE ? filled : FFT_SIZE;
-        const unsigned added = s->input_new + samples;
-        s->input_new = added < FFT_SIZE ? added : FFT_SIZE;
+        if (samples > PCM_CAPACITY) {
+            pcm += samples - PCM_CAPACITY;
+            samples = PCM_CAPACITY;
+            reset_stream(s);
+        }
+        if (s->count && (gap > ACTIVE_MS || missed || samples > UINT32_MAX - s->next)) {
+            reset_stream(s);
+        }
+        const size_t room = PCM_CAPACITY - s->head;
+        const size_t first = samples < room ? samples : room;
+        memcpy(s->pcm + s->head, pcm, first * sizeof(*pcm));
+        memcpy(s->pcm, pcm + first, (samples - first) * sizeof(*pcm));
+        s->head = (s->head + samples) % PCM_CAPACITY;
+        const unsigned filled = s->count + samples;
+        s->count = filled < PCM_CAPACITY ? filled : PCM_CAPACITY;
+        s->next += samples;
         s->stamp = now;
     }
     xSemaphoreGive(s_mutex);
-}
-
-static void analyse(spectrum_state_t *s, uint8_t bins[SPECTRUM_BINS])
-{
-    for (unsigned i = 0; i < FFT_SIZE; ++i) {
-        s->time_domain[i] = (float)s->snapshot[i] * s->hann[i];
-    }
-    kiss_fftr(s->fft, s->time_domain, s->frequency_domain);
-    for (unsigned i = 0; i < SPECTRUM_BINS; ++i) {
-        const unsigned bin = i + SPECTRUM_FIRST_BIN;
-        const kiss_fft_cpx v = s->frequency_domain[bin];
-        /* Hann coherent gain and signed PCM full scale. A real transform's
-         * Nyquist bin has no negative-frequency partner to double. */
-        const float scale = (bin == FFT_SIZE / 2 ? 1.0f : 2.0f) /
-            (32768.0f * (FFT_SIZE - 1) * 0.5f);
-        const float power = (v.r * v.r + v.i * v.i) * scale * scale;
-        const float db = power > 0.0f ? 10.0f * log10f(power) : -120.0f;
-        const float intensity = (db + 78.0f) * (255.0f / 62.0f);
-        bins[i] = intensity <= 0 ? 0 : intensity >= 255 ? 255 : (uint8_t)(intensity + 0.5f);
-    }
-}
-
-static void spectrum_worker(void *arg)
-{
-    spectrum_state_t *s = arg;
-    uint8_t bins[SPECTRUM_BINS];
-    s->fft = kiss_fftr_alloc(FFT_SIZE, 0, s->fft_memory, &s->fft_bytes);
-    for (unsigned i = 0; i < FFT_SIZE; ++i) {
-        s->hann[i] = 0.5f - 0.5f * cosf(6.28318530718f * i / (FFT_SIZE - 1));
-    }
-    for (;;) {
-        const uint32_t now = now_ms();
-        vTaskDelay(pdMS_TO_TICKS(leased(now) ? 20 : 200));
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        if (!leased(now_ms())) {
-            atomic_store_explicit(&s_lease_until, 0, memory_order_relaxed);
-            use_path(s, SPECTRUM_AUTO);
-            s->selected = SPECTRUM_AUTO;
-            xSemaphoreGive(s_mutex);
-            continue;
-        }
-        choose_path(s, now_ms());
-        if (!s->fft || s->input_count < FFT_SIZE || s->input_new < HOP_SAMPLES) {
-            xSemaphoreGive(s_mutex);
-            continue;
-        }
-        const unsigned head = s->input_head;
-        memcpy(s->snapshot, s->input + head, (FFT_SIZE - head) * sizeof(s->input[0]));
-        memcpy(s->snapshot + FFT_SIZE - head, s->input, head * sizeof(s->input[0]));
-        /* Keep any block overshoot so the long-run spacing is 2000 samples. */
-        s->input_new -= HOP_SAMPLES;
-        const uint32_t revision = s->input_revision;
-        const uint32_t stamp = s->stamp;
-        xSemaphoreGive(s_mutex);
-
-        analyse(s, bins);
-
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        if (s->input_revision == revision && leased(now_ms())) {
-            spectrum_row_t *row = &s->rows[s->row_head];
-            row->sequence = ++s->sequence;
-            row->stamp = stamp;
-            memcpy(row->bins, bins, sizeof(bins));
-            s->row_head = (s->row_head + 1) % HISTORY_ROWS;
-            if (s->row_count < HISTORY_ROWS) { ++s->row_count; }
-        }
-        xSemaphoreGive(s_mutex);
-    }
 }
 
 void audio_spectrum_init(void)
@@ -239,21 +133,11 @@ void audio_spectrum_init(void)
 static bool start_locked(void)
 {
     if (s_state) { return true; }
-    spectrum_state_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s) { return false; }
-    kiss_fftr_alloc(FFT_SIZE, 0, NULL, &s->fft_bytes);
-    s->fft_memory = heap_caps_malloc(s->fft_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s->fft_memory) {
-        s->generation = esp_random();
-        if (xTaskCreatePinnedToCoreWithCaps(spectrum_worker, "audio_spectrum", 5120, s, 1,
-                                          NULL, 0, MALLOC_CAP_SPIRAM) == pdPASS) {
-            s_state = s;
-            return true;
-        }
-    }
-    heap_caps_free(s->fft_memory);
-    heap_caps_free(s);
-    return false;
+    s_state = heap_caps_calloc(1, sizeof(*s_state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_state) { return false; }
+    s_state->boot = esp_random();
+    s_state->generation = 1;
+    return true;
 }
 
 static void le32(uint8_t *out, uint32_t value)
@@ -261,41 +145,55 @@ static void le32(uint8_t *out, uint32_t value)
     for (unsigned i = 0; i < 4; ++i) { out[i] = (uint8_t)(value >> (i * 8)); }
 }
 
-size_t audio_spectrum_read(uint32_t after, bool select, audio_spectrum_path_t path,
+size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, audio_spectrum_path_t path,
                            uint8_t out[SPECTRUM_REPLY_BYTES])
 {
-    if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(40)) != pdTRUE) { return 0; }
+    if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5)) != pdTRUE) { return 0; }
     if (!start_locked()) { xSemaphoreGive(s_mutex); return 0; }
     const uint32_t now = now_ms();
-    atomic_store_explicit(&s_lease_until, now + LEASE_MS, memory_order_relaxed);
     spectrum_state_t *s = s_state;
-    if (select && path < SPECTRUM_PATH_COUNT) { s->selected = path; }
-    choose_path(s, now);
+    if (!leased(now)) {
+        use_path(s, SPECTRUM_AUTO);
+        memset(s->path_time, 0, sizeof(s->path_time));
+        s->selected = SPECTRUM_AUTO;
+    }
+    atomic_store_explicit(&s_lease_until, now + LEASE_MS, memory_order_relaxed);
+    if (select && path < SPECTRUM_PATH_COUNT) {
+        s->selected = path;
+        if (path_active(s, path, now)) { use_path(s, path); }
+    }
+
     uint32_t active = 0;
     for (audio_spectrum_path_t p = 1; p < SPECTRUM_PATH_COUNT; ++p) {
         if (path_active(s, p, now)) { active |= 1u << p; }
     }
-    memcpy(out, "ASP\x01", 4);
-    le32(out + 4, s->generation);
-    le32(out + 8, active);
-    le32(out + 12, now);
-    out[16] = (uint8_t)s->path;
-    out[18] = (uint8_t)(SPECTRUM_BINS & 255);
-    out[19] = (uint8_t)(SPECTRUM_BINS >> 8);
-    size_t len = SPECTRUM_HEADER_BYTES;
-    unsigned rows = 0;
-    const unsigned limit = s->row_count < 2 ? s->row_count : 2;
-    for (unsigned i = limit; i > 0; --i) {
-        const unsigned index = (s->row_head + HISTORY_ROWS - i) % HISTORY_ROWS;
-        const spectrum_row_t *row = &s->rows[index];
-        if (after && (int32_t)(row->sequence - after) <= 0) { continue; }
-        le32(out + len, row->sequence);
-        le32(out + len + 4, row->stamp);
-        memcpy(out + len + 8, row->bins, SPECTRUM_BINS);
-        len += SPECTRUM_ROW_BYTES;
-        ++rows;
+    /* Allow a delayed reader to drain the end of a short transmission. */
+    if (!active && s->path && now - s->stamp > LEASE_MS) { use_path(s, SPECTRUM_AUTO); }
+
+    const uint32_t oldest = s->next - s->count;
+    uint32_t first = after;
+    if (generation != s->generation || after > s->next || after < oldest) {
+        first = s->count > JOIN_SAMPLES ? s->next - JOIN_SAMPLES : oldest;
     }
-    out[17] = (uint8_t)rows;
+    unsigned count = s->next - first;
+    if (count > SPECTRUM_MAX_SAMPLES) { count = SPECTRUM_MAX_SAMPLES; }
+    memcpy(out, "APC\x01", 4);
+    le32(out + 4, s->boot);
+    le32(out + 8, s->generation);
+    le32(out + 12, active);
+    le32(out + 16, now);
+    le32(out + 20, s->stamp);
+    le32(out + 24, first);
+    le32(out + 28, s->next);
+    le32(out + 32, count);
+    le32(out + 36, s->path);
+    le32(out + 40, atomic_load_explicit(&s_contention, memory_order_relaxed));
+
+    const size_t index = (s->head + PCM_CAPACITY - (s->next - first)) % PCM_CAPACITY;
+    const size_t run = count < PCM_CAPACITY - index ? count : PCM_CAPACITY - index;
+    /* ESP32-S3 stores the signed 16-bit samples in wire byte order. */
+    memcpy(out + SPECTRUM_HEADER_BYTES, s->pcm + index, run * sizeof(int16_t));
+    memcpy(out + SPECTRUM_HEADER_BYTES + run * sizeof(int16_t), s->pcm, (count - run) * sizeof(int16_t));
     xSemaphoreGive(s_mutex);
-    return len;
+    return SPECTRUM_HEADER_BYTES + count * sizeof(int16_t);
 }

@@ -2,11 +2,12 @@
   'use strict';
   const sampleRate = 16000;
   const fftSize = 2048;
-  const hop = 2000;
+  const hop = 640;
   const rowMs = 1000 * hop / sampleRate;
   const firstBin = 16;
   const bandCount = fftSize / 2 - firstBin + 1;
-  const historyCount = 80;
+  const historyCount = 250;
+  const ringSize = historyCount + 16;
   const minimumDb = -78;
   const maximumDb = -16;
 
@@ -62,16 +63,144 @@
         return Math.round(255 * Math.min(1, Math.max(0, (db - minimumDb) / (maximumDb - minimumDb))));
       });
     }
+    const headerBytes = 44;
+    const maxSamples = 5120;
+    const window = new Int16Array(fftSize);
+    let fill = 0;
+    let session = null;
+
+    function rows(pcm, startAt) {
+      const result = [];
+      for (let pos = 0; pos < pcm.length;) {
+        const take = Math.min(fftSize - fill, pcm.length - pos);
+        window.set(pcm.subarray(pos, pos + take), fill);
+        fill += take;
+        pos += take;
+        if (fill === fftSize) {
+          result.push({at: startAt + pos / (sampleRate / 1000), buffer: spectrum(window).buffer});
+          window.copyWithin(0, hop);
+          fill -= hop;
+        }
+      }
+      return result;
+    }
+
+    function reply(current, output, info = {}) {
+      self.postMessage({epoch: current.epoch, rows: output, ...info}, output.map(row => row.buffer));
+    }
+
+    function decode(buffer, current, received, rtt) {
+      if (buffer.byteLength < headerBytes) throw new Error('format');
+      const view = new DataView(buffer);
+      const boot = view.getUint32(4, true);
+      const generation = view.getUint32(8, true);
+      const mask = view.getUint32(12, true);
+      const now = view.getUint32(16, true);
+      const stamp = view.getUint32(20, true);
+      const first = view.getUint32(24, true);
+      const latest = view.getUint32(28, true);
+      const count = view.getUint32(32, true);
+      const path = view.getUint32(36, true);
+      const contention = view.getUint32(40, true);
+      if (view.getUint32(0, true) !== 0x01435041 || !generation || path > 16 ||
+          count > maxSamples || first + count > latest || (count && !path) ||
+          buffer.byteLength !== headerBytes + count * 2) throw new Error('format');
+
+      const reboot = current.boot !== boot;
+      const restart = reboot || current.generation !== generation;
+      const gap = !restart && first !== current.after;
+      const elapsed = reboot || current.boardNow === null ? now : current.boardElapsed + ((now - current.boardNow) >>> 0);
+      current.boardNow = now;
+      current.boardElapsed = elapsed;
+      const offset = received - elapsed - rtt / 2;
+      current.clockOffset = reboot ? offset : Math.min(current.clockOffset, offset);
+      if (restart || gap) {
+        fill = 0;
+        current.anchor = null;
+      }
+      if (count && current.anchor === null) {
+        current.anchor = elapsed + current.clockOffset - ((now - stamp) >>> 0) - latest / (sampleRate / 1000);
+      }
+      const pcm = new Int16Array(buffer, headerBytes, count);
+      const started = performance.now();
+      const output = count ? rows(pcm, current.anchor + first / (sampleRate / 1000)) : [];
+      const fftMs = output.length ? (performance.now() - started) / output.length : 0;
+      const reset = reboot || (current.path && path && current.path !== path);
+      current.boot = boot;
+      current.generation = generation;
+      if (path) current.path = path;
+      current.after = first + count;
+      current.selection = null;
+      reply(current, output, {mask, path, reset, gap: gap || (restart && !reset && !!count),
+        samples: count, rtt, fftMs, contention});
+      return {mask, behind: latest - current.after};
+    }
+
+    async function read(current) {
+      if (session !== current) return;
+      const started = performance.now();
+      const controller = new AbortController();
+      current.controller = controller;
+      const timeout = setTimeout(() => controller.abort(), 900);
+      const query = new URLSearchParams({after: current.after, generation: current.generation});
+      if (current.selection !== null) query.set('select', current.selection);
+      let interval = 100;
+      try {
+        const response = await fetch('/api/audio_spectrum?' + query, {cache:'no-store', signal:controller.signal});
+        if (!response.ok) throw new Error(response.status === 503 ? 'busy' : 'network');
+        const buffer = await response.arrayBuffer();
+        if (session !== current) return;
+        const elapsed = performance.now() - started;
+        const {mask, behind} = decode(buffer, current, performance.timeOrigin + performance.now(), elapsed);
+        current.errors = 0;
+        current.lastGood = performance.now();
+        interval = behind > hop ? 0 : mask ? 100 : 240;
+      } catch (error) {
+        if (session !== current) return;
+        const reason = error.message === 'format' || error.message === 'busy' ? error.message : 'network';
+        if (++current.errors > 1 && performance.now() - current.lastGood >= 1000) {
+          reply(current, [], {problem: reason});
+        }
+        interval = Math.min(800, 200 * current.errors);
+      } finally {
+        clearTimeout(timeout);
+        if (session === current) {
+          current.timer = setTimeout(() => void read(current), Math.max(0, interval - (performance.now() - started)));
+        }
+      }
+    }
+
     self.onmessage = ({data}) => {
-      const result = spectrum(new Int16Array(data.buffer));
-      self.postMessage({epoch: data.epoch, at: data.at, buffer: result.buffer}, [result.buffer]);
+      if (data.type === 'pcm') {
+        if (session?.mode !== 'microphone' || session.epoch !== data.epoch) return;
+        const pcm = new Int16Array(data.buffer);
+        if (session.after !== data.first) {
+          fill = 0;
+          session.anchor = null;
+        }
+        if (session.anchor === null) {
+          session.anchor = data.at - (data.first + pcm.length) / (sampleRate / 1000);
+        }
+        session.after = data.first + pcm.length;
+        reply(session, rows(pcm, session.anchor + data.first / (sampleRate / 1000)), {samples: pcm.length});
+        return;
+      }
+      session?.controller?.abort();
+      clearTimeout(session?.timer);
+      session = null;
+      fill = 0;
+      if (data.type === 'stop') return;
+      session = {mode: data.type, epoch: data.epoch, selection: data.selection,
+        generation: 0, boot: null, boardNow: null, clockOffset: Infinity, after: 0, anchor: null,
+        errors: 0, lastGood: performance.now()};
+      if (session.mode === 'radio') void read(session);
     };
     return;
   }
 
   const root = document.getElementById('audioSpectrum');
   if (!root) return;
-  const canvas = root.querySelector('canvas');
+  const canvas = root.querySelector('[data-spectrum-axes]');
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const buttons = [...root.querySelectorAll('[data-view]')];
@@ -104,50 +233,102 @@
       'rgb(' + r + ',' + g + ',' + b + ') ' + (level * 100) + '%'
     ).join(', ') + ')');
 
-  const history = [];
-  const occupied = Array(historyCount).fill(false);
+  const layer = root.querySelector('[data-spectrum-gl]');
+  const history = Array(ringSize).fill(null);
+  const occupied = Array(historyCount).fill(null);
+  const ages = Array.from({length: historyCount}, (_, i) => i)
+    .filter(i => i < 50 || i % 4 === 2 || i === historyCount - 1);
   let active = 'surface';
   let columns = 0;
-  let framePixels = null;
-  let heatImage = null;
   let mesh = null;
+  let head = 0;
+  let phase = 0;
+  let slotNow = 0;
   const bitmap = document.createElement('canvas');
   const bitmapContext = bitmap.getContext('2d');
   const textColor = '#b3c4dd';
   const gridColor = 'rgba(151, 175, 219, 0.23)';
+  bitmap.height = ringSize;
+  let heatRow;
 
-  function collectForScreen(count) {
-    if (count !== columns) {
-      columns = count;
-      framePixels = new Uint8Array(columns * historyCount);
-      bitmap.width = columns;
-      bitmap.height = historyCount;
-      heatImage = bitmapContext.createImageData(columns, historyCount);
-    }
-    framePixels.fill(0);
-    occupied.fill(false);
-    const now = performance.now();
-    for (const frame of history) {
-      const row = Math.max(0, Math.floor((now - frame.at) / rowMs));
-      if (row >= historyCount) continue;
-      occupied[row] = true;
-      const source = frame.bins;
-      const target = row * columns;
-      if (columns === bandCount) {
-        framePixels.set(source, target);
-        continue;
-      }
-      for (let col = 0; col < columns; col++) {
+  const slot = step => ((-step % ringSize) + ringSize) % ringSize;
+
+  function prepareRow(row, index) {
+    if (columns === bandCount) row.pixels = row.bins;
+    else {
+      const pixels = new Uint8Array(columns);
+      for (let col = 0; col < columns; ++col) {
         const start = Math.floor(col * bandCount / columns);
         const end = Math.floor((col + 1) * bandCount / columns);
-        let highest = source[start];
-        for (let bin = start + 1; bin < end; bin++) highest = Math.max(highest, source[bin]);
-        framePixels[target + col] = highest;
+        let peak = 0;
+        for (let bin = start; bin < end; ++bin) peak = Math.max(peak, row.bins[bin]);
+        pixels[col] = peak;
       }
+      row.pixels = pixels;
+    }
+    row.shades = [];
+    const shadeSize = Math.ceil(columns / 24);
+    for (let x = 0; x < columns; x += shadeSize) {
+      let peak = 0;
+      for (let i = x; i < Math.min(columns, x + shadeSize); ++i) peak = Math.max(peak, row.pixels[i]);
+      row.shades.push([x / (columns - 1), rgb(peak)]);
+    }
+    for (let x = 0; x < columns; ++x) {
+      const [r, g, b] = palette[row.pixels[x]];
+      const offset = 4 * x;
+      heatRow.data[offset] = r;
+      heatRow.data[offset + 1] = g;
+      heatRow.data[offset + 2] = b;
+      heatRow.data[offset + 3] = 255;
+    }
+    bitmapContext.putImageData(heatRow, 0, index);
+  }
+
+  function addRow(bins, at) {
+    const step = Math.round(at / rowMs);
+    const index = slot(step);
+    if (history[index]?.step >= step) return false;
+    const row = {bins, step, at};
+    history[index] = row;
+    if (columns) prepareRow(row, index);
+    return true;
+  }
+
+  function clearRows() {
+    occupied.fill(null);
+    // Rows are validated by step during each paint, including after a clear.
+  }
+
+  function prepare(now, count) {
+    if (count !== columns) {
+      columns = count;
+      bitmap.width = columns;
+      heatRow = bitmapContext.createImageData(columns, 1);
+      history.forEach((row, i) => { if (row) prepareRow(row, i); });
+    }
+    slotNow = Math.floor(now / rowMs);
+    head = slot(slotNow);
+    phase = now / rowMs - slotNow;
+    for (let age = 0; age < historyCount; ++age) {
+      const row = history[(head + age) % ringSize];
+      occupied[age] = row?.step === slotNow - age ? row : null;
     }
   }
 
-  function begin() {
+  const historyAge = row => (row + phase) / (historyCount - 1);
+
+  layer.addEventListener('webglcontextlost', event => {
+    event.preventDefault();
+    mesh = false;
+    layer.hidden = true;
+    redraw();
+  });
+  layer.addEventListener('webglcontextrestored', () => {
+    mesh = null;
+    redraw();
+  });
+
+  function begin(now) {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
     if (!ctx || width < 130 || height < 70) return null;
@@ -165,7 +346,7 @@
     ctx.lineWidth = 1;
     const left = 42;
     const span = width - 91;
-    collectForScreen(Math.min(bandCount, Math.max(2, Math.floor(span * scale))));
+    prepare(now, Math.min(bandCount, Math.max(2, Math.floor(span * scale))));
     return { width, height, left, span, front: height - 30, depth: (height - 40) * 0.52,
       amplitude: (height - 40) * 0.44 };
   }
@@ -178,8 +359,7 @@
   }
 
   function makeMesh() {
-    const layer = document.createElement('canvas');
-    const gl = layer.getContext('webgl2', { alpha: true, antialias: true, preserveDrawingBuffer: true });
+    const gl = layer.getContext('webgl2', { alpha: true, antialias: true });
     if (!gl) return null;
     const vertex = [
       '#version 300 es',
@@ -187,6 +367,9 @@
       'uniform sampler2D levels;',
       'uniform int bins;',
       'uniform int rows;',
+      'uniform int head;',
+      'uniform int slots;',
+      'uniform float phase;',
       'uniform vec2 viewSize;',
       'uniform vec4 projection;',
       'uniform float amplitude;',
@@ -194,9 +377,9 @@
       'out vec3 surface;',
       'void main() {',
       '  ivec2 cell = ivec2(gl_VertexID % bins, gl_VertexID / bins);',
-      '  level = texelFetch(levels, cell, 0).r;',
+      '  level = texelFetch(levels, ivec2(cell.x, (head + cell.y) % slots), 0).r;',
       '  float f = float(cell.x) / float(bins - 1);',
-      '  float t = float(cell.y) / float(rows - 1);',
+      '  float t = (float(cell.y) + phase) / float(rows - 1);',
       '  float x = projection.x + projection.y * (f * (1.0 - 0.28 * t) + 0.15 * t);',
       '  float y = projection.z - projection.w * t - amplitude * level;',
       '  gl_Position = vec4(x * 2.0 / viewSize.x - 1.0, 1.0 - y * 2.0 / viewSize.y,',
@@ -239,11 +422,12 @@
     gl.bindVertexArray(gl.createVertexArray());
     const indexBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    const uniforms = Object.fromEntries(['viewSize','projection','amplitude','bins','rows','levels','colorMap']
+    const uniforms = Object.fromEntries(['viewSize','projection','amplitude','bins','rows','head','slots','phase','levels','colorMap']
       .map(name => [name, gl.getUniformLocation(program, name)]));
     gl.uniform1i(uniforms.levels, 0);
     gl.uniform1i(uniforms.colorMap, 1);
     gl.uniform1i(uniforms.rows, historyCount);
+    gl.uniform1i(uniforms.slots, ringSize);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     const data = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0);
@@ -259,6 +443,7 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.enable(gl.DEPTH_TEST);
     let lastWidth = 0;
+    const uploaded = Array(ringSize).fill(null);
 
     return {
       draw(plot) {
@@ -269,41 +454,55 @@
           gl.viewport(0, 0, layer.width, layer.height);
         }
         if (columns !== lastWidth) {
-          const indices = new Uint32Array((columns - 1) * (historyCount - 1) * 6);
+          const indices = new Uint32Array((columns - 1) * (ages.length - 1) * 6);
           let i = 0;
-          for (let row = 0; row < historyCount - 1; row++) {
+          for (let row = 0; row < ages.length - 1; row++) {
             for (let x = 0; x < columns - 1; x++) {
-              const p = row * columns + x;
+              const p = ages[row] * columns + x;
+              const q = ages[row + 1] * columns + x;
               indices[i++] = p;
               indices[i++] = p + 1;
-              indices[i++] = p + columns;
+              indices[i++] = q;
               indices[i++] = p + 1;
-              indices[i++] = p + columns + 1;
-              indices[i++] = p + columns;
+              indices[i++] = q + 1;
+              indices[i++] = q;
             }
           }
           gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
           gl.uniform1i(uniforms.bins, columns);
           lastWidth = columns;
+          uploaded.fill(null);
           gl.activeTexture(gl.TEXTURE0);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, columns, historyCount, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, columns, ringSize, 0, gl.RED, gl.UNSIGNED_BYTE, null);
         }
         gl.activeTexture(gl.TEXTURE0);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, columns, historyCount, gl.RED, gl.UNSIGNED_BYTE, framePixels);
+        for (let age = 0; age < historyCount; ++age) {
+          const index = (head + age) % ringSize;
+          const row = occupied[age];
+          if (!row || uploaded[index] === row) continue;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, index, columns, 1, gl.RED, gl.UNSIGNED_BYTE, row.pixels);
+          uploaded[index] = row;
+        }
+        gl.uniform1i(uniforms.head, head);
+        gl.uniform1f(uniforms.phase, phase);
         gl.uniform2f(uniforms.viewSize, plot.width, plot.height);
         gl.uniform4f(uniforms.projection, plot.left, plot.span, plot.front, plot.depth);
         gl.uniform1f(uniforms.amplitude, plot.amplitude);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        // Fill only adjacent real rows. Lost time slots remain empty.
+        // Coalesce only consecutive strips with valid audio across the full span.
         const strip = (columns - 1) * 6;
-        for (let row = 0; row < historyCount - 1;) {
-          if (!occupied[row] || !occupied[row + 1]) { ++row; continue; }
-          const start = row++;
-          while (row < historyCount - 1 && occupied[row + 1]) ++row;
-          gl.drawElements(gl.TRIANGLES, (row - start) * strip, gl.UNSIGNED_INT, start * strip * 4);
+        let first = -1;
+        for (let row = 0; row < ages.length - 1; ++row) {
+          let valid = true;
+          for (let age = ages[row]; age <= ages[row + 1]; ++age) valid &&= !!occupied[age];
+          if (valid && first < 0) first = row;
+          if (first >= 0 && (!valid || row === ages.length - 2)) {
+            const end = valid ? row + 1 : row;
+            gl.drawElements(gl.TRIANGLES, (end - first) * strip, gl.UNSIGNED_INT, first * strip * 4);
+            first = -1;
+          }
         }
-        ctx.drawImage(layer, 0, 0, plot.width, plot.height);
         return true;
       }
     };
@@ -317,25 +516,25 @@
   }
 
   function traceRow(plot, row) {
-    const age = row / (historyCount - 1);
-    for (let x = 0; x < columns; x++) {
-      const [px, py] = project(plot, x / (columns - 1), age, framePixels[row * columns + x] / 255);
-      if (x === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
+    const age = historyAge(row);
+    const data = occupied[row].pixels;
+    const left = plot.left + plot.span * 0.15 * age;
+    const dx = plot.span * (1 - 0.28 * age) / (columns - 1);
+    const y = plot.front - plot.depth * age;
+    const db = plot.amplitude / 255;
+    ctx.moveTo(left, y - db * data[0]);
+    for (let x = 1; x < columns; ++x) ctx.lineTo(left + x * dx, y - db * data[x]);
   }
 
   function drawRidges(plot, isolated) {
     for (let row = historyCount - 1; row >= 0; row--) {
-      if (!occupied[row] || (isolated && (occupied[row - 1] || occupied[row + 1]))) continue;
-      const age = row / (historyCount - 1);
+      const item = occupied[row];
+      if (!item || (isolated ? (occupied[row - 1] || occupied[row + 1]) : row >= 10 && row % 9)) continue;
+      const age = historyAge(row);
       const [left] = project(plot, 0, age);
       const [right] = project(plot, 1, age);
       const shade = ctx.createLinearGradient(left, 0, right, 0);
-      for (let x = 0; x < columns; x += 4) {
-        const peak = Math.max(...framePixels.subarray(row * columns + x, row * columns + Math.min(x + 4, columns)));
-        shade.addColorStop(x / (columns - 1), rgb(peak));
-      }
+      for (const [x, color] of item.shades) shade.addColorStop(x, color);
       ctx.beginPath();
       traceRow(plot, row);
       ctx.lineWidth = 0.85;
@@ -361,25 +560,32 @@
   }
 
   function drawSurface(plot) {
+    if (mesh === null) {
+      try { mesh = makeMesh() || false; }
+      catch { mesh = false; }
+    }
+    let rendered = false;
+    if (mesh) {
+      try { rendered = mesh.draw(plot); }
+      catch { mesh = false; }
+    }
+    layer.hidden = !rendered;
+
     const corners = [project(plot, 0, 0), project(plot, 1, 0), project(plot, 1, 1), project(plot, 0, 1)];
     ctx.beginPath();
     ctx.moveTo(...corners[0]);
     for (const corner of corners.slice(1)) ctx.lineTo(...corner);
     ctx.closePath();
-    ctx.fillStyle = '#101f3b';
-    ctx.fill();
+    if (!rendered) {
+      ctx.fillStyle = '#101f3b';
+      ctx.fill();
+    }
     ctx.strokeStyle = gridColor;
     ctx.stroke();
-
-    if (mesh === null) {
-      try { mesh = makeMesh() || false; }
-      catch { mesh = false; }
-    }
-    const rendered = mesh && mesh.draw(plot);
     drawRidges(plot, rendered);
     root.dataset.rendering = rendered ? 'mesh' : 'ridges';
 
-    const front = occupied.indexOf(true);
+    const front = occupied.findIndex(Boolean);
     if (front >= 0 && front < 3) {
       ctx.beginPath();
       traceRow(plot, front);
@@ -408,17 +614,23 @@
   function drawWaterfall(plot) {
     const top = 16;
     const depth = plot.front - top;
-    for (let index = 0; index < framePixels.length; index++) {
-      const [r, g, b] = palette[framePixels[index]];
-      const offset = 4 * index;
-      heatImage.data[offset] = r;
-      heatImage.data[offset + 1] = g;
-      heatImage.data[offset + 2] = b;
-      heatImage.data[offset + 3] = 255;
-    }
-    bitmapContext.putImageData(heatImage, 0, 0);
+    layer.hidden = true;
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(bitmap, plot.left, top, plot.span, depth);
+    const height = depth / historyCount;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.left, top, plot.span, depth);
+    ctx.clip();
+    for (let age = 0; age < historyCount;) {
+      if (!occupied[age]) { ++age; continue; }
+      const start = age;
+      const index = (head + age) % ringSize;
+      const end = age + ringSize - index;
+      while (age < historyCount && age < end && occupied[age]) ++age;
+      ctx.drawImage(bitmap, 0, index, columns, age - start,
+        plot.left, top + (start + phase) * height, plot.span, (age - start) * height);
+    }
+    ctx.restore();
     ctx.strokeStyle = gridColor;
     ctx.strokeRect(plot.left, top, plot.span, depth);
     ctx.fillStyle = textColor;
@@ -430,8 +642,8 @@
     root.dataset.rendering = 'waterfall';
   }
 
-  function render() {
-    const plot = begin();
+  function render(now) {
+    const plot = begin(now);
     if (!plot) return;
     if (active === 'surface') drawSurface(plot);
     else drawWaterfall(plot);
@@ -444,28 +656,34 @@
       canvas.setAttribute('aria-label', active === 'surface'
         ? '用 2048 点 FFT 绘制的 3D 频谱。横轴为频率，峰高为电平，时间向后延伸。'
         : '用 2048 点 FFT 绘制的彩色瀑布。横轴为频率，时间向下，颜色表示电平。');
-      render();
+      redraw();
     });
   }
 
   let onScreen = !('IntersectionObserver' in window);
-  let timer = 0;
-  let inflight = null;
-  let after = 0;
-  let generation = null;
-  let available = -1;
-  let requested = null;
+  let worker = null;
+  let watching = false;
   let mode = 'radio';
   let epoch = 0;
-  let micWorker = null;
-  let micPending = false;
-  const micBuffer = new Int16Array(fftSize);
-  let micHead = 0;
-  let micCount = 0;
-  let micNew = 0;
+  let available = -1;
+  let selection = null;
+  let animation = 0;
+  let lastDraw = 0;
+  let latestAt = -Infinity;
+  let lead = 185;
+  let forceDraw = true;
+  let retries = 0;
+  let workerRetry = 0;
+  const errorLabel = root.querySelector('[data-spectrum-problem]');
+  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0, age:0};
 
   function visible() {
     return onScreen && !document.hidden && root.getClientRects().length > 0;
+  }
+
+  function problem(message) {
+    errorLabel.textContent = message;
+    errorLabel.hidden = !message;
   }
 
   function source(mask, path, message) {
@@ -478,176 +696,156 @@
       pathSelect.replaceChildren(new Option('自动跟随', '0'), ...options);
       pathSelect.hidden = options.length < 2;
     }
-    if (document.activeElement !== pathSelect) pathSelect.value = String(path);
+    if (document.activeElement !== pathSelect) pathSelect.value = String(path || 0);
     sourceLabel.hidden = !pathSelect.hidden;
     if (!sourceLabel.hidden) sourceLabel.textContent = message || pathNames[path] || '等待语音';
   }
 
-  function addRow(bins, at) {
-    history.push({bins, at});
-    while (history.length > historyCount || history[0].at < performance.now() - rowMs * historyCount) {
-      history.shift();
-      if (!history.length) break;
-    }
-  }
-
-  function acceptFrame(buffer) {
-    if (buffer.byteLength < 20) throw Error('频谱帧长度无效');
-    const view = new DataView(buffer);
-    const count = view.getUint8(17);
-    if (view.getUint32(0, true) !== 0x01505341 || view.getUint16(18, true) !== bandCount ||
-        count > 2 || buffer.byteLength !== 20 + count * (8 + bandCount)) {
-      throw Error('频谱帧格式无效');
-    }
-    const nextGeneration = view.getUint32(4, true);
-    if (generation !== nextGeneration) {
-      generation = nextGeneration;
-      after = 0;
-      history.length = 0;
-    }
+  function paint() {
+    animation = 0;
+    if (!visible()) return;
     const now = performance.now();
-    const boardTime = view.getUint32(12, true);
-    for (let offset = 20; offset < buffer.byteLength; offset += 8 + bandCount) {
-      const sequence = view.getUint32(offset, true);
-      const age = (boardTime - view.getUint32(offset + 4, true)) >>> 0;
-      if (after && (sequence - after | 0) <= 0) continue;
-      after = sequence;
-      if (age < rowMs * historyCount) addRow(new Uint8Array(buffer, offset + 8, bandCount), now - age);
-    }
-    source(view.getUint32(8, true), view.getUint8(16));
-    render();
-  }
-
-  function schedule(delay) {
-    clearTimeout(timer);
-    if (visible() && mode === 'radio') timer = setTimeout(() => void read(), delay);
-  }
-
-  async function read() {
-    if (!visible() || mode !== 'radio' || inflight) return;
-    const cursor = epoch;
-    const controller = new AbortController();
-    inflight = controller;
-    const selected = requested;
-    const query = new URLSearchParams({after});
-    if (selected !== null) query.set('select', selected);
-    const timeout = setTimeout(() => controller.abort(), 1600);
-    let delay = 250;
-    try {
-      const response = await fetch('/api/audio_spectrum?' + query, {cache:'no-store', signal:controller.signal});
-      if (!response.ok) throw Error('读取频谱失败');
-      const frame = await response.arrayBuffer();
-      if (cursor === epoch && visible() && mode === 'radio') {
-        acceptFrame(frame);
-        if (selected === requested) requested = null;
-        if (requested !== null) delay = 0;
-        else if (!available && !history.some(row => row.at >= performance.now() - rowMs * historyCount)) delay = 850;
+    const scrolling = now - latestAt < rowMs * historyCount + lead;
+    const interval = canvas.clientWidth < 600 || mesh === false ? 32 : 15;
+    if (forceDraw || (scrolling && now - lastDraw >= interval)) {
+      forceDraw = false;
+      lastDraw = now;
+      try {
+        render(now - lead);
+        ++stats.drawn;
+      } catch (error) {
+        problem('频谱绘制异常');
+        console.warn('频谱绘制异常', error);
       }
-    } catch (error) {
-      if (cursor === epoch && visible() && mode === 'radio') {
-        source(0, 0, '频谱暂不可用');
-        render();
-        delay = 850;
-      }
-    } finally {
-      clearTimeout(timeout);
-      inflight = null;
-      schedule(delay);
     }
+    if (scrolling) animation = requestAnimationFrame(paint);
   }
 
-  function initWorker() {
-    if (micWorker || typeof Worker !== 'function') return;
+  function redraw(force = true) {
+    forceDraw ||= force;
+    if (!animation && visible()) animation = requestAnimationFrame(paint);
+  }
+
+  function clearHistory() {
+    history.fill(null);
+    latestAt = -Infinity;
+    clearRows();
+    redraw();
+  }
+
+  function received({data}) {
+    if (data.epoch !== epoch || !watching || !visible()) return;
+    retries = 0;
+    if (data.problem) {
+      problem({network:'频谱取流超时', busy:'板端频谱暂忙', format:'频谱帧格式异常'}[data.problem]);
+      return;
+    }
+    if (data.reset) clearHistory();
+    if (data.mask !== undefined) source(data.mask, data.mask ? data.path : 0);
+    if (data.rtt !== undefined) {
+      stats.rtt = data.rtt;
+      stats.contention = data.contention;
+      if (data.rows.length) {
+        stats.fftMs = data.fftMs;
+        // Move the playout delay gradually so normal RTT jitter does not shift the time grid.
+        const target = Math.max(155, Math.min(320, 119 + data.rtt * 0.8));
+        lead += Math.max(-2, Math.min(4, target - lead));
+      }
+    }
+    if (data.gap) ++stats.gaps;
+    if (data.samples) stats.samples += data.samples;
+    problem('');
+    for (const row of data.rows) {
+      const at = row.at - performance.timeOrigin;
+      if (addRow(new Uint8Array(row.buffer), at)) {
+        ++stats.rows;
+        latestAt = Math.max(latestAt, at);
+      }
+    }
+    if (data.rows.length || data.reset) redraw(false);
+  }
+
+  function ensureWorker() {
+    if (worker) return true;
     try {
-      micWorker = new Worker('/audio-spectrum.js');
-      micWorker.onmessage = ({data}) => {
-        micPending = false;
-        if (data.epoch !== epoch || mode !== 'microphone' || !visible()) return;
-        addRow(new Uint8Array(data.buffer), data.at);
-        render();
+      worker = new Worker('/audio-spectrum.js');
+      worker.onmessage = received;
+      worker.onerror = () => {
+        worker.terminate();
+        worker = null;
+        watching = false;
+        problem('频谱计算异常');
+        if (visible() && retries++ < 3) workerRetry = setTimeout(sync, 400);
       };
-      micWorker.onerror = () => {
-        micPending = false;
-        micWorker.terminate();
-        micWorker = null;
-      };
+      return true;
     } catch {
-      micWorker = null;
+      problem('浏览器无法启动频谱计算');
+      return false;
     }
   }
 
-  const microphone = pcm => {
-    if (mode !== 'microphone' || !visible() || !micWorker) return;
-    if (pcm.length > fftSize) pcm = pcm.subarray(pcm.length - fftSize);
-    const first = Math.min(pcm.length, fftSize - micHead);
-    micBuffer.set(pcm.subarray(0, first), micHead);
-    micBuffer.set(pcm.subarray(first), 0);
-    micHead = (micHead + pcm.length) % fftSize;
-    micCount = Math.min(fftSize, micCount + pcm.length);
-    micNew = Math.min(fftSize, micNew + pcm.length);
-    if (micCount < fftSize || micNew < hop || micPending) return;
-    const ordered = new Int16Array(fftSize);
-    ordered.set(micBuffer.subarray(micHead));
-    ordered.set(micBuffer.subarray(0, micHead), fftSize - micHead);
-    micNew -= hop;
-    micPending = true;
-    micWorker.postMessage({epoch, at:performance.now(), buffer:ordered.buffer}, [ordered.buffer]);
-  };
+  function stop() {
+    clearTimeout(workerRetry);
+    if (!watching) return;
+    watching = false;
+    worker?.postMessage({type:'stop', epoch:++epoch});
+  }
+
+  function sync() {
+    if (!visible() || mode === 'releasing') { stop(); return; }
+    if (!watching && ensureWorker()) {
+      watching = true;
+      worker.postMessage({type: mode, epoch: ++epoch, selection});
+    }
+    redraw();
+  }
 
   window.ORLAudioSpectrum = {
-    microphone,
+    microphone(pcm, first, stamp) {
+      if (mode !== 'microphone' || !watching || !visible()) return;
+      const buffer = pcm.buffer;
+      worker.postMessage({type:'pcm', epoch, buffer, first, at:performance.timeOrigin + stamp}, [buffer]);
+    },
+    microphoneReady() { return mode === 'microphone' && watching && visible(); },
+    diagnostics() { return {...stats}; },
     beginMicrophone() {
-      ++epoch;
+      stop();
       mode = 'microphone';
-      clearTimeout(timer);
-      inflight?.abort();
-      history.length = 0;
-      micHead = micCount = micNew = 0;
+      clearHistory();
       source(0, 0, '浏览器麦克风预览');
-      if (visible()) requestAnimationFrame(render);
+      sync();
     },
     releaseMicrophone(confirm) {
       if (mode === 'radio') return;
-      const cursor = ++epoch;
+      stop();
       mode = 'releasing';
+      const token = ++epoch;
       source(0, 0, '正在确认松键');
       void Promise.resolve(confirm).then(ok => {
-        if (epoch !== cursor) return;
+        if (epoch !== token) return;
         if (!ok) { source(0, 0, '等待松键确认'); return; }
-        history.length = 0;
-        after = 0;
-        generation = null;
+        clearHistory();
         mode = 'radio';
         source(0, 0);
-        schedule(0);
+        sync();
       });
     }
   };
 
   pathSelect.onchange = () => {
-    requested = pathSelect.value;
-    schedule(0);
+    selection = pathSelect.value;
+    stop();
+    sync();
   };
 
-  function visibilityChanged() {
-    if (!visible()) {
-      clearTimeout(timer);
-      inflight?.abort();
-      return;
-    }
-    if (mode === 'radio') initWorker();
-    render();
-    schedule(0);
-  }
-  document.addEventListener('visibilitychange', visibilityChanged);
+  document.addEventListener('visibilitychange', sync);
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(([entry]) => {
       onScreen = entry.isIntersecting;
-      visibilityChanged();
+      sync();
     }).observe(root);
   }
-  if ('ResizeObserver' in window) new ResizeObserver(visibilityChanged).observe(canvas);
-  else window.addEventListener('resize', visibilityChanged);
-  initWorker();
-  visibilityChanged();
+  if ('ResizeObserver' in window) new ResizeObserver(sync).observe(canvas);
+  else window.addEventListener('resize', sync);
+  sync();
 })();

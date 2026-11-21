@@ -58,8 +58,6 @@ idf_component_register(
         "netcom.c"
         "net_endpoint.c"
         "audio_spectrum.c"
-        "spectrum_kiss_fft.c"
-        "spectrum_kiss_fftr.c"
         "g711.c"
         "g722.c"     # ITU G.722 64 kbit/s, public domain (relay codec)
         "opus_link.c"   # Opus for the audio link (see opus_link.h)
@@ -168,7 +166,7 @@ target_link_options(${COMPONENT_LIB} INTERFACE
 set_source_files_properties(device_maintenance.c maintenance_http.c factory_reset.c peer_labels.c release_update.c
     PROPERTIES COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
 
-set_source_files_properties(audio_spectrum.c spectrum_kiss_fft.c spectrum_kiss_fftr.c PROPERTIES
+set_source_files_properties(audio_spectrum.c PROPERTIES
     COMPILE_OPTIONS "-O2")
 
 # HTTP tasks have 10 KB stacks. Reserve at least 4 KB beyond each local frame

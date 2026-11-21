@@ -26,15 +26,12 @@ typedef enum {
 } audio_spectrum_path_t;
 
 enum {
-    SPECTRUM_FFT_SIZE = 2048,
-    SPECTRUM_FIRST_BIN = 16,
-    SPECTRUM_BINS = SPECTRUM_FFT_SIZE / 2 - SPECTRUM_FIRST_BIN + 1,
-    SPECTRUM_HEADER_BYTES = 20,
-    SPECTRUM_ROW_BYTES = 8 + SPECTRUM_BINS,
-    SPECTRUM_REPLY_BYTES = SPECTRUM_HEADER_BYTES + 2 * SPECTRUM_ROW_BYTES,
+    SPECTRUM_MAX_SAMPLES = 5120,
+    SPECTRUM_HEADER_BYTES = 44,
+    SPECTRUM_REPLY_BYTES = SPECTRUM_HEADER_BYTES + 2 * SPECTRUM_MAX_SAMPLES,
 };
 
 void audio_spectrum_init(void);
 void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t samples);
-size_t audio_spectrum_read(uint32_t after, bool select, audio_spectrum_path_t path,
+size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, audio_spectrum_path_t path,
                            uint8_t out[SPECTRUM_REPLY_BYTES]);

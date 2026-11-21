@@ -2819,8 +2819,14 @@ static esp_err_t h_audio_spectrum(httpd_req_t *req)
     if (choice[0] && (path >= SPECTRUM_PATH_COUNT || (path == 0 && strcmp(choice, "0")))) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid spectrum path");
     }
-    uint8_t *reply = heap_caps_malloc(SPECTRUM_REPLY_BYTES, MALLOC_CAP_SPIRAM);
-    const size_t length = reply ? audio_spectrum_read(after, choice[0] != 0, path, reply) : 0;
+    const uint32_t generation = sdr_query_id(req, "generation");
+    /* Each HTTP server serializes its own handlers. Keep their send buffers
+     * separate so sending does not hold the audio tap lock. */
+    static uint8_t *http_reply, *https_reply;
+    uint8_t **slot = req->handle == s_tls_handle ? &https_reply : &http_reply;
+    if (!*slot) { *slot = heap_caps_malloc(SPECTRUM_REPLY_BYTES, MALLOC_CAP_SPIRAM); }
+    uint8_t *reply = *slot;
+    const size_t length = reply ? audio_spectrum_read(after, generation, choice[0] != 0, path, reply) : 0;
     esp_err_t err;
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (length) {
@@ -2830,7 +2836,6 @@ static esp_err_t h_audio_spectrum(httpd_req_t *req)
         httpd_resp_set_status(req, "503 Service Unavailable");
         err = send_result(req, false, "频谱暂不可用");
     }
-    heap_caps_free(reply);
     return err;
 }
 

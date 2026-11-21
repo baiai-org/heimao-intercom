@@ -1,4 +1,4 @@
-"""Check the board's spectrum routing, binary frames and real KISS FFT."""
+"""Check spectrum routing and the PCM cursor with the production board code."""
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +10,6 @@ MAIN = ROOT / "firmware/main"
 
 STUBS = r"""
 #include "audio_spectrum.h"
-#include "spectrum_kiss.h"
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -20,8 +19,6 @@ STUBS = r"""
 #define MALLOC_CAP_SPIRAM 1
 #define MALLOC_CAP_8BIT 2
 #define pdTRUE 1
-#define pdPASS 1
-#define portMAX_DELAY 1000
 #define pdMS_TO_TICKS(ms) (ms)
 
 typedef bool StaticSemaphore_t;
@@ -29,10 +26,7 @@ typedef StaticSemaphore_t *SemaphoreHandle_t;
 static uint32_t clock_ms = 1000;
 static int64_t esp_timer_get_time(void) { return 1000 * clock_ms; }
 static uint32_t esp_random(void) { return 100; }
-static void vTaskDelay(int ticks) { (void)ticks; }
 static void *heap_caps_calloc(size_t n, size_t size, int caps) { (void)caps; return calloc(n, size); }
-static void *heap_caps_malloc(size_t n, int caps) { (void)caps; return malloc(n); }
-#define heap_caps_free free
 static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *lock) { return lock; }
 static int xSemaphoreTake(SemaphoreHandle_t lock, int ticks)
 {
@@ -41,12 +35,6 @@ static int xSemaphoreTake(SemaphoreHandle_t lock, int ticks)
     return pdTRUE;
 }
 static void xSemaphoreGive(SemaphoreHandle_t lock) { assert(*lock); *lock = false; }
-static int xTaskCreatePinnedToCoreWithCaps(void (*fn)(void *), const char *name, unsigned stack,
-                                          void *arg, int priority, void *out, int core, int caps)
-{
-    (void)fn; (void)name; (void)stack; (void)arg; (void)priority; (void)out; (void)core; (void)caps;
-    return pdPASS;
-}
 """
 
 TEST = r"""
@@ -58,61 +46,55 @@ static uint32_t read_le32(const uint8_t *data)
 int main(void)
 {
     audio_spectrum_init();
-    uint8_t reply[SPECTRUM_REPLY_BYTES];
-    int16_t block[256] = {0};
-    audio_spectrum_tap(SPECTRUM_RF_SPEAKER, block, 256);
+    static uint8_t reply[SPECTRUM_REPLY_BYTES];
+    int16_t block[320] = {0};
+    audio_spectrum_tap(SPECTRUM_RF_SPEAKER, block, 320);
     assert(!s_state);
-    assert(audio_spectrum_read(0, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    assert(!memcmp(reply, "ASP\x01", 4) && reply[16] == 0);
+    assert(audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
+    assert(!memcmp(reply, "APC\x01", 4) && !read_le32(reply + 36));
     for (audio_spectrum_path_t path = 1; path < SPECTRUM_PATH_COUNT; ++path) {
-        audio_spectrum_tap(path, block, 256);
+        audio_spectrum_tap(path, block, 320);
     }
-    assert(audio_spectrum_read(0, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    assert(read_le32(reply + 8) == (1u << SPECTRUM_PATH_COUNT) - 2);
-    assert(reply[16] == SPECTRUM_MIC_RF);
-    const uint32_t old_generation = read_le32(reply + 4);
-    assert(audio_spectrum_read(0, true, SPECTRUM_MQTT_RF, reply) == SPECTRUM_HEADER_BYTES);
-    assert(reply[16] == SPECTRUM_MQTT_RF && read_le32(reply + 4) != old_generation);
-    spectrum_state_t *s = s_state;
-    for (unsigned frame = 0; frame < 8; ++frame) {
-        for (unsigned i = 0; i < 256; ++i) {
-            const float t = (frame * 256 + i) / 16000.0f;
-            block[i] = (int16_t)(3200 * sinf(6.2831853f * 1000 * t) +
-                                 2200 * sinf(6.2831853f * 1046.875f * t));
-        }
-        clock_ms += 16;
-        audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 256);
-        audio_spectrum_tap(SPECTRUM_REMOTE_RF, block, 256);
+    audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 12) == (1u << SPECTRUM_PATH_COUNT) - 2);
+    assert(read_le32(reply + 36) == SPECTRUM_MIC_RF);
+    const uint32_t old_gen = read_le32(reply + 8);
+    assert(audio_spectrum_read(0, 0, true, SPECTRUM_MQTT_RF, reply) == SPECTRUM_HEADER_BYTES);
+    assert(read_le32(reply + 36) == SPECTRUM_MQTT_RF && read_le32(reply + 8) != old_gen);
+    const uint32_t gen = read_le32(reply + 8);
+    for (unsigned frame = 0; frame < 90; ++frame) {
+        for (unsigned i = 0; i < 320; ++i) block[i] = (int16_t)(frame * 320 + i);
+        clock_ms += 20;
+        audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+        audio_spectrum_tap(SPECTRUM_MIC_RF, block, 320);
+        if (frame % 10 == 0) { audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply); }
     }
-    assert(s->path == SPECTRUM_MQTT_RF && s->input_count == FFT_SIZE);
-    s->fft = kiss_fftr_alloc(FFT_SIZE, 0, s->fft_memory, &s->fft_bytes);
-    assert(s->fft);
-    for (unsigned i = 0; i < FFT_SIZE; ++i) {
-        s->hann[i] = 0.5f - 0.5f * cosf(6.28318530718f * i / (FFT_SIZE - 1));
-        s->snapshot[i] = s->input[i];
+    assert(s_state->next == 28800 && s_state->count == PCM_CAPACITY);
+    /* Check a complete contiguous reply crossing physical ring wrap. */
+    size_t len = audio_spectrum_read(23995, gen, false, SPECTRUM_AUTO, reply);
+    assert(len == SPECTRUM_HEADER_BYTES + 2 * 4805);
+    assert(read_le32(reply + 24) == 23995 && read_le32(reply + 28) == 28800);
+    for (unsigned i = 0; i < 4805; ++i) {
+        const unsigned j = SPECTRUM_HEADER_BYTES + 2 * i;
+        assert((unsigned)(reply[j] | reply[j + 1] << 8) == 23995 + i);
     }
-    spectrum_row_t *row = &s->rows[0];
-    analyse(s, row->bins);
-    const uint8_t *bins = row->bins + (128 - SPECTRUM_FIRST_BIN);
-    assert(bins[0] > 225 && bins[6] > 212);
-    assert(bins[0] > bins[-1] && bins[0] > bins[1]);
-    assert(bins[6] > bins[5] && bins[6] > bins[7] && bins[3] < 12);
-
-    row->sequence = 16;
-    row->stamp = clock_ms;
-    s->row_count = s->row_head = 1;
-    assert(audio_spectrum_read(15, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES + SPECTRUM_ROW_BYTES);
-    assert(reply[17] == 1 && read_le32(reply + 20) == 16);
-    assert(!memcmp(reply + 28, row->bins, SPECTRUM_BINS));
-    assert(audio_spectrum_read(16, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    assert(!reply[17]);
-    clock_ms += 170;
-    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 256);
-    assert(s->input_count == 256);
-    clock_ms += 3000;
-    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 256);
-    assert(s->input_count == 256);
-    puts("PASS: every route, shared route switch, expiry and overlap gap, binary cursor, 1009 bins and two independent 1000/1046.875 Hz peaks");
+    audio_spectrum_read(10, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 24) == 28800 - JOIN_SAMPLES);
+    assert(audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
+    /* A missed tap creates a discontinuity instead of joining unrelated samples. */
+    assert(xSemaphoreTake(s_mutex, 0));
+    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    xSemaphoreGive(s_mutex);
+    clock_ms += 20;
+    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 8) != gen && read_le32(reply + 32) == 320 && read_le32(reply + 40) == 1);
+    clock_ms += 1500;
+    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    assert(s_state->next == 320);
+    audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 36) == SPECTRUM_AUTO);
+    puts("PASS: all routes, priority and manual selection, exact PCM, wrap, missed taps and subscription expiry");
     return 0;
 }
 """
@@ -128,14 +110,11 @@ def main():
         test = folder / "test.c"
         test.write_text(STUBS + source + TEST, encoding="utf-8")
         executable = folder / "test.exe"
-        libc = ROOT / "firmware/components/speexdsp/upstream/include"
         env = dict(os.environ, TMP=directory, TEMP=directory, TMPDIR=directory)
         subprocess.run([
             shutil.which("gcc"), "-std=c11", "-O2", "-Wall", "-Wextra",
             "-Wno-unused-parameter", "-Werror=implicit-function-declaration",
-            "-I", str(MAIN), "-I", str(libc), str(test),
-            str(MAIN / "spectrum_kiss_fft.c"), str(MAIN / "spectrum_kiss_fftr.c"),
-            "-lm", "-o", str(executable),
+            "-I", str(MAIN), str(test), "-o", str(executable),
         ], env=env, check=True)
         subprocess.run([str(executable)], env=env, check=True)
 
