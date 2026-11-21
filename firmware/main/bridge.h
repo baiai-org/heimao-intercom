@@ -91,6 +91,8 @@ typedef enum {
 typedef struct {
     uint32_t levels;
     rf_denoise_level_t selection_level;
+    uint32_t paths;
+    uint32_t revision;
 } bridge_denoise_config_t;
 
 uint8_t bridge_denoise_network_setting(uint8_t mode, denoise_network_path_t path);
@@ -101,6 +103,7 @@ uint32_t bridge_denoise_flags(uint32_t levels);
 rf_denoise_route_t bridge_denoise_route(uint8_t setting);
 esp_err_t bridge_denoise_save_selection(rf_denoise_level_t level, uint32_t paths,
                                         bridge_denoise_config_t expected);
+esp_err_t bridge_denoise_save_config(rf_denoise_level_t level, uint32_t paths, uint32_t expected_revision);
 /* The mask uses setting IDs as bit positions. A packed level uses three bits
  * starting at (setting - 1) * 3, with zero for all unmasked settings. */
 esp_err_t bridge_denoise_update_levels(uint8_t mode, uint32_t mask, uint32_t expected, uint32_t values);

@@ -20,12 +20,15 @@ internal data class PeerInfo(
     val isHub: Boolean = false,
     val id: String = "",
     val customLabel: Boolean = false,
+    val configuredAddress: String = "",
 ) {
     val stateText: String get() = if(viaHub) {
         if(state=="linked") "最近收到语音" else "等待新语音"
     } else when (state) {
         "linked" -> "已连通"
         "knocking" -> "敲击中"
+        "resolving" -> "解析中"
+        "dns_error" -> "解析或地址检查失败"
         "expired" -> "已过期"
         else -> state.ifBlank { "未知" }
     }
@@ -67,6 +70,7 @@ internal data class Np2pState(
     val labelsVersion: Int = 0,
     val labelsReady: Boolean = false,
     val labelRevision: Long = -1,
+    val hostnames: Boolean = false,
 ) {
     val linkedCount: Int get() = peers.count { !it.viaHub && it.state == "linked" }
     val peerCount: Int get() = peers.size
@@ -110,6 +114,8 @@ internal data class Np2pState(
                     val n = list.optJSONObject(i) ?: continue
                     val ip = n.optString("ip")
                     val p = n.optInt("port", V6_PORT)
+                    val host = n.optString("host")
+                    val hostPort = n.optInt("host_port")
                     val viaHub=n.optString("route")=="hub"
                     val hubName=n.optString("via")
                     // IPv6 literals need brackets so the text stays one paste-ready run.
@@ -129,11 +135,13 @@ internal data class Np2pState(
                         drop = n.optInt("drop", 0),
                         viaHub = viaHub, hubName = hubName, isHub = n.optBoolean("hub",false),
                         id = n.optString("id"), customLabel = n.optBoolean("custom_label"),
+                        configuredAddress = if(host.isNotBlank() && hostPort in 1..65535) "$host:$hostPort" else "",
                     ))
                 }
             }
             return Np2pState(
                 available = true,
+                hostnames = np.optBoolean("hostnames"),
                 ready = ready,
                 ipv4Text = if (ready) "$pub:$port" else "",
                 ipv6Text = if (v6.isNotEmpty() && v6 != "::") "[$v6]:$V6_PORT" else "",

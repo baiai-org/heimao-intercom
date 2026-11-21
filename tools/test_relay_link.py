@@ -30,7 +30,9 @@ typedef void *esp_mqtt_client_handle_t;
 typedef esp_mqtt_client_handle_t esp_mqtt5_client_handle_t;
 typedef void *esp_event_base_t;
 typedef struct {bool no_local_flag;} esp_mqtt5_subscribe_property_config_t;
-typedef struct {int connect_return_code,error_type,esp_transport_sock_errno,esp_tls_stack_err;} mqtt_error_t;
+#define ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME 0x8001
+#include "net_endpoint.h"
+typedef struct {int connect_return_code,error_type,esp_transport_sock_errno,esp_tls_stack_err,esp_tls_last_esp_err;} mqtt_error_t;
 typedef struct {
  int event_id, msg_id, data_len, current_data_offset, total_data_len;
  esp_mqtt_client_handle_t client; const char *data; mqtt_error_t *error_handle;
@@ -40,7 +42,7 @@ enum {MQTT_EVENT_BEFORE_CONNECT,MQTT_EVENT_ERROR,MQTT_EVENT_CONNECTED,
 enum {MQTT_CONNECTION_REFUSE_BAD_USERNAME=4,MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED=5};
 static int64_t clock_ms, s_start_ms;
 static int s_attempts;
-static char s_last_err[48],s_uri[64],s_sub_topic[32],s_topic_root[24]="test";
+static char s_last_err[48],s_uri[NET_ENDPOINT_SIZE],s_sub_topic[32],s_topic_root[24]="test";
 static int mqtt_client, previous_client, sub_message_id=11;
 static esp_mqtt_client_handle_t s_client=&mqtt_client;
 static uint8_t s_mac[6];
@@ -94,6 +96,8 @@ int main(void){
     const mqtt_error_t bad={.connect_return_code=0x86};
     event(MQTT_EVENT_ERROR,0,NULL,(mqtt_error_t*)&bad,s_client);state("error","authentication");
     event(MQTT_EVENT_DISCONNECTED,0,NULL,NULL,s_client);state("error","authentication");
+    const mqtt_error_t dns={.esp_tls_last_esp_err=ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME};
+    event(MQTT_EVENT_ERROR,0,NULL,(mqtt_error_t*)&dns,s_client);state("error","dns");
     assert(!netcom_tx_ready());
     s_cfg.mode=NETCOM_MODE_NETP2P;assert(netcom_tx_ready());
     puts("PASS: CONNACK/SUBACK, wrong client and message, subscription timeout/refusal, authentication, immediate disconnect and P2P readiness");

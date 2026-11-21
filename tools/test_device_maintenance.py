@@ -147,6 +147,7 @@ static int maintenance_commit(int h) {
     pending_slot=0;
     return result;
 }
+static void netcom_apply_pending_broker(void) {}
 #define nvs_get_blob maintenance_get_blob
 #define nvs_commit maintenance_commit
 static int factory_reset_prepare(void) { ++prepared;return preparing_fails?77:ESP_OK; }
@@ -350,7 +351,7 @@ def main():
     policy=plain('maintenance_policy.h')+plain('maintenance_policy.c')
     run('policy',BASE+policy+POLICY_TEST)
     run('clock',CLOCK_ENV+plain('maintenance_clock.h')+plain('maintenance_clock.c')+CLOCK_TEST)
-    labels=plain('np_peer_store.h')+plain('np_access.h')+plain('np_access.c')+plain('peer_labels.h')
+    labels=plain('net_endpoint.h')+plain('np_peer_store.h')+plain('np_access.h')+plain('np_access.c')+plain('peer_labels.h')
     labels+=function((MAIN/'device_name.c').read_text(encoding='utf-8'),'device_name_validate')
     labels=labels.replace('DEVICE_NAME_BYTES','96')
     run('labels',BASE+LABEL_ENV+labels+plain('peer_labels.c')+LABEL_TEST)

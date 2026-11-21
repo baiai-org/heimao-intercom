@@ -46,6 +46,8 @@ internal object NetworkModes {
         if(mode!=2)return RelayStatus("中继未启用",RelayTone.NEUTRAL)
         val reason=when(intercom.optString("relay_reason")){
             "authentication"->"请检查服务器用户名和密码"
+            "dns"->"服务器域名解析失败"
+            "saved_waiting"->"服务器地址已保存，等待话段结束后重连"
             "network"->"请检查手台联网和服务器地址"
             "subscribing"->"等待服务器确认语音订阅"
             "subscribe_failed"->"语音订阅失败，请检查服务器权限"

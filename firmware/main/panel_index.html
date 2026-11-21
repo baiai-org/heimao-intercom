@@ -1574,6 +1574,73 @@ body[data-panel-layout="simple"] .telemetry-strip #lanPill{display:none}
 .panel-messages #panelNotice:empty{display:none}.panel-messages #panelNotice{color:var(--amber);padding:12px;border:1px solid var(--amber);border-radius:8px}
 body[data-panel-layout="detail"] .panel-nav{display:none}
 @media(max-width:760px){.telemetry-strip{flex-wrap:wrap;overflow:visible}#panelLayoutToggle{flex-basis:100%;width:100%;margin-bottom:4px}.panel-messages{padding:0 12px}}
+#audioSpectrum {
+  color-scheme: dark;
+  margin-top: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #283959;
+  border-radius: 10px;
+  background: #0d1525;
+  color: #e7effc;
+}
+#audioSpectrum header { display: grid; gap: 4px; }
+#audioSpectrum h2 { margin: 0; color: #f0f6ff; font-size: 15px; font-weight: 620; }
+#audioSpectrum [data-spectrum-source], #audioSpectrum [data-spectrum-path] { color: #8ce1ef; }
+#audioSpectrum [data-spectrum-path] {
+  width: max-content;
+  max-width: 100%;
+  background: #142441;
+  border-color: #326285;
+}
+#audioSpectrum .spectrum-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0;
+  padding: 3px;
+  border: 1px solid #2a3a56;
+  border-radius: 8px;
+  background: #0a1120;
+}
+#audioSpectrum button {
+  min-height: 32px;
+  padding: 3px 11px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: #a9bcd8;
+  font: inherit;
+}
+#audioSpectrum button[aria-pressed="true"] {
+  background: #1d4164;
+  border-color: #326285;
+  color: #e5f8ff;
+}
+#audioSpectrum canvas {
+  display: block;
+  width: 100%;
+  height: clamp(222px, 38vw, 300px);
+  border-radius: 8px;
+  background: radial-gradient(ellipse at 51% 82%, #121e3b 0%, #080e1c 68%);
+}
+#audioSpectrum .spectrum-legend {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  color: #aebed4;
+  font: 12px/1.4 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+#audioSpectrum .spectrum-ramp {
+  height: 8px;
+  width: clamp(64px, 22vw, 170px);
+  border-radius: 3px;
+  background: var(--scope-ramp);
+}
+#audioSpectrum [hidden] { display: none; }
+@media (pointer: coarse) { #audioSpectrum button { min-height: 44px; } }
 </style>
 </head>
 <body data-panel-layout="simple">
@@ -1671,6 +1738,21 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
 
       <!-- 8-Cell Telemetry Matrix -->
       <div class="kv-matrix" id="stat"></div>
+      <section id="audioSpectrum" aria-labelledby="audioSpectrumTitle">
+        <header>
+          <h2 id="audioSpectrumTitle">实时音频频谱</h2>
+          <span data-spectrum-source>等待语音</span>
+          <select data-spectrum-path aria-label="频谱音频路径" hidden></select>
+        </header>
+        <div class="spectrum-switch" role="group" aria-label="频谱视图">
+          <button type="button" data-view="surface" aria-pressed="true">3D 频谱</button>
+          <button type="button" data-view="waterfall" aria-pressed="false">彩色瀑布</button>
+        </div>
+        <canvas role="img" aria-label="3D 彩色音频频谱，125 Hz 至 8 kHz">音频频谱，125 Hz 至 8 kHz。</canvas>
+        <div class="spectrum-legend" aria-label="电平色阶，从负七十八到负十六 dBFS">
+          <span>−78</span><span class="spectrum-ramp" aria-hidden="true"></span><span>−16 dBFS</span>
+        </div>
+      </section>
     </div>
 
     <!-- Right: Mode Architecture, Master PTT & RoIP Bridge Hub -->
@@ -1742,7 +1824,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <span class="relay-state" id="relayStageState" role="status">读取中…</span>
         <div class="row" style="margin:3px 0">
           <label>EMQX 服务器</label>
-          <input type="text" id="ixBroker2" placeholder="host:port">
+          <input type="text" id="ixBroker2" maxlength="261" aria-label="中继服务器域名或 IP" placeholder="relay.example.net 或域名:端口">
           <button id="ixBrokerSet2" class="pri">保存重连</button>
         </div>
         <div class="row" style="margin:3px 0">
@@ -1804,7 +1886,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         </div>
         <div class="row" style="margin:3px 0">
           <input type="text" id="npPeerName" maxlength="96" placeholder="名称（最多24字符）" style="width:160px;flex:none">
-          <input type="text" id="npPeerAddr" placeholder="公网 ip:port" style="flex:1">
+          <input type="text" id="npPeerAddr" maxlength="261" aria-label="对端域名或 IP" placeholder="peer.example.net 或域名:端口" style="flex:1">
           <button id="npPeerAdd" class="pri">添加对端</button>
         </div>
         <div class="row" style="margin:3px 0">
@@ -2184,6 +2266,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <button type="button" data-dn="retry" hidden>重试</button>
         <div data-dn="form" hidden>
           <label class="denoise-level">降噪档位 <select data-dn="level">
+            <option value="0">关闭</option>
             <option value="1">轻度</option><option value="2">标准</option>
             <option value="3">强力</option><option value="4">极强</option>
           </select></label>
@@ -2467,6 +2550,8 @@ const relayStates = {
 };
 const relayReasons = {
   authentication:'请检查服务器用户名和密码',
+  dns:'服务器域名解析失败',
+  saved_waiting:'服务器地址已保存，等待话段结束后重连',
   network:'请检查手台联网和服务器地址',
   subscribing:'等待服务器确认语音订阅',
   subscribe_failed:'语音订阅失败，请检查服务器权限',
@@ -2960,6 +3045,10 @@ function sdrAcceptTxAck(sid, tx, samples) {
     SDR.txConfirmed = samples; SDR.txConfirmedAt = performance.now();
   }
 }
+function sdrSpectrum(method, ...args) {
+  try { window.ORLAudioSpectrum?.[method](...args); }
+  catch (e) { console.warn('音频频谱更新失败', e); }
+}
 function sdrSendAudio(pcm, stamp) {
   if (!SDR.on || !SDR.ptt || !SDR.keyed || !pcm.length) return;
   if (SDR.ctx && SDR.ctx.currentTime - stamp > 0.5) {
@@ -2970,6 +3059,7 @@ function sdrSendAudio(pcm, stamp) {
       sdrAbortAudio('HTTP 语音积压', pcm.length); return;
     }
     SDR.txQueue.push({pcm, stamp}); SDR.txQueued += pcm.length;
+    sdrSpectrum('microphone', pcm);
     if (!SDR.txBusy) SDR.txIdle = sdrHttpTxPump();
     return;
   }
@@ -2984,6 +3074,7 @@ function sdrSendAudio(pcm, stamp) {
       const part = pcm.subarray(i, i+max), frame = new ArrayBuffer(8+part.byteLength), view = new DataView(frame);
       view.setUint32(0, SDR.sid, true); view.setUint32(4, SDR.activeTx, true);
       new Int16Array(frame, 8).set(part); ws.send(frame);
+      sdrSpectrum('microphone', part);
       SDR.txSent += part.length;
     }
     catch (e) { sdrAbortAudio('WebSocket 语音发送失败', pcm.length - i, true); break; }
@@ -3283,6 +3374,7 @@ async function sdrPttDown(ev) {
     log('浏览器麦克风需要 HTTPS，请从面板 HTTPS 入口打开', 'err'); return;
   }
   SDR.ptt = true; const epoch = ++SDR.txEpoch, tx = ++SDR.txId, sid = SDR.sid;
+  sdrSpectrum('beginMicrophone');
   SDR.activeTx = tx;
   SDR.txCaptured = SDR.txSent = SDR.txConfirmed = SDR.txDrop = 0;
   SDR.txConfirmedAt = -Infinity; SDR.txDeadline = 0; SDR.txReason = 'transmitting';
@@ -3406,6 +3498,7 @@ function sdrPttUp(notify = true) {
   }
   if (SDR.rxGain) SDR.rxGain.gain.value = 1;
   $('sdrPtt').className = 'tx'; setPttLabel($('sdrPtt'), '● 点击发射 (PTT)');
+  if (transmitting) sdrSpectrum('releaseMicrophone', release ? SDR.releasePending : Promise.resolve(true));
   return release ? SDR.releasePending : Promise.resolve(true);
 }
 async function sdrBeepTest() {
@@ -3647,7 +3740,34 @@ $('spkVol').addEventListener('change', async () => {
   }
 });
 $('ixRoomSet1').onclick = () => cmd('ix_room', $('ixRoom1').value);
-$('ixBrokerSet2').onclick = () => cmd('ix_broker', $('ixBroker2').value.trim());
+$('ixBrokerSet2').onclick = async () => {
+  const field = $('ixBroker2');
+  const button = $('ixBrokerSet2');
+  const value = field.value;
+  const device = window._st?.device_id;
+  if (!device || !value.trim()) { log('请填写中继服务器域名或 IP', 'err'); return; }
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/network/broker', {
+      method:'POST', headers:{'Content-Type':'application/json','X-ORL-Device':device},
+      body:JSON.stringify({address:value.trim()})
+    });
+    const reply = await response.json();
+    if (!response.ok || !reply.ok) throw Error(reply.err || '地址保存未确认');
+    if (field.value === value) {
+      field.value = reply.address;
+      panelDirty.delete(field.id);
+      field.removeAttribute('aria-description');
+    }
+    log(reply.scheduled ? '服务器地址已保存，空闲后重连' : '服务器地址已保存', 'good');
+  } catch (error) {
+    log(error.message || '地址保存未确认', 'err');
+  } finally {
+    button.disabled = false;
+    last = '';
+    setTimeout(refresh, 60);
+  }
+};
 
 /* MQTT credentials need their own setter: cmd() logs "k = v", which would put
  * the password in the event log (and the /api/status log tail).  An empty
@@ -4261,7 +4381,7 @@ $('brTest2').onclick = () => cmd('bridge_test', 3000);
 $('npPeerAdd').onclick = async () => {
   const name = $('npPeerName').value.trim();
   const addr = $('npPeerAddr').value.trim();
-  if (!name || !addr) { log('请填写对端名称与 ip:port', 'err'); return; }
+  if (!name || !addr) { log('请填写对端名称及域名或 IP，省略端口时使用 54321', 'err'); return; }
   const policy = window._st && window._st.np2p && window._st.np2p.access_version >= 1;
   if (policy && !confirm('添加此对端？如果此地址曾被拒绝，将解除对应拒绝并恢复连接。')) return;
   const np = window._st?.np2p;
@@ -4361,17 +4481,19 @@ function renderNp2p(s) {
   badge.textContent = ho ? ('枢纽离线 ' + (np.hub_quiet_s || 0) + 's') : '枢纽离线';
   /* "linked" now really means the link is alive (PING/PONG), so the label no
    * longer needs to hint at expiry; the audio age is shown next to it. */
-  const stMap = { linked: '已连通', knocking: '敲击中', expired: '已过期' };
+  const stMap = { linked: '已连通', knocking: '敲击中', expired: '已过期',
+    resolving: '解析中', dns_error: '解析或地址检查失败' };
   const rows = (np.peers || []).map((p, i) => {
     const indirect = p.route === 'hub';
-    const st = indirect ? (p.state === 'linked' ? '最近收到语音' : '等待新语音') : (stMap[p.state] || p.state);
+    const st = indirect ? (p.state === 'linked' ? '最近收到语音' : '等待新语音') :
+      p.host && p.state === 'knocking' ? '等待握手' : (stMap[p.state] || p.state);
     const address = indirect ? '经 ' + (p.via || '枢纽') + ' 转发 · 无直连地址'
       : (!p.ip || p.ip === '0.0.0.0' || p.ip === '::' || !p.port ? '等待握手取得地址'
       : (String(p.ip).includes(':') ? '[' + p.ip + ']' : p.ip) + ':' + p.port);
     const stCls = p.state === 'linked' ? 'linked' : (p.state === 'knocking' ? 'knocking' : '');
     return '<div class="np2p-peerrow">' +
       '<span class="np-name">' + escHtml(p.name || ('#' + i)) + (p.hub ? ' · 枢纽' : '') + '</span>' +
-      '<span class="np-addr">' + escHtml(address) + '</span>' +
+      '<span class="np-addr">' + escHtml(p.host ? p.host + ':' + p.host_port + ' · 当前 IP ' + address : address) + '</span>' +
       '<span class="np-st ' + stCls + '">' + st + '</span>' +
       '<span class="np-meta">rtt ' + (p.rtt_ms >= 0 ? p.rtt_ms + 'ms' : '-') +
         ' · rx ' + p.rx + ' / tx ' + p.tx + ' / 丢 ' + p.drop + '</span>' +
@@ -5035,7 +5157,8 @@ refresh();
   move(document.querySelector('.name-plate'),'device');
   const lcd=document.querySelector('.lcd-cockpit');
   const telemetry=document.createElement('details');telemetry.innerHTML='<summary>详细运行状态</summary>';
-  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);move(lcd,'talk');
+  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));
+  lcd.append(telemetry,document.getElementById('audioSpectrum'));move(lcd,'talk');
   move(document.getElementById('ixSeg').parentElement,'network');
   const handheld=card('手台麦克风');handheld.append(document.querySelector('.ptt-console'));pages.talk.append(handheld);
   move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
@@ -5075,7 +5198,7 @@ refresh();
   const draft=document.createElement('div');draft.className='panel-draft';draft.hidden=true;messages.append(draft);
   setInterval(()=>{draft.hidden=!panelDirty.size;draft.textContent=panelDirty.size?'有未保存输入，切页会保留；请回对应页面保存。':'';},300);
   const retry=document.createElement('button');retry.textContent='重试停止浏览器发射';retry.hidden=true;notice.after(retry);
-  retry.onclick=async()=>{if(busy)return;busy=true;try{if(!await sdrHttpPtt(false,SDR.activeTx,SDR.sid))throw new Error('手台端未确认松开 PTT');SDR.releasePending=Promise.resolve(true);retry.hidden=true;notice.textContent='已确认停止，可以切换页面。';}catch(e){notice.textContent='停止尚未确认：'+e.message;}finally{busy=false;}};
+  retry.onclick=async()=>{if(busy)return;busy=true;try{if(!await sdrHttpPtt(false,SDR.activeTx,SDR.sid))throw new Error('手台端未确认松开 PTT');SDR.releasePending=Promise.resolve(true);sdrSpectrum('releaseMicrophone',SDR.releasePending);retry.hidden=true;notice.textContent='已确认停止，可以切换页面。';}catch(e){notice.textContent='停止尚未确认：'+e.message;}finally{busy=false;}};
   let current='talk',busy=false;const scroll={};
   async function release(){
     if(talkBusy){notice.textContent='发话请求处理中，请稍后再切换。';return false;}
@@ -5137,6 +5260,7 @@ refresh();
 </script>
 <script src="/maintenance.js"></script>
 <script src="/rf-denoise.js"></script>
+<script src="/audio-spectrum.js"></script>
 <script src="/eq-presets.js"></script>
 </body>
 </html>

@@ -26,6 +26,7 @@
 #include "net_http.h"
 #include "brand.h"
 #include "audio_i2s.h"   /* AUDIO_SAMPLE_RATE_HZ / AUDIO_PKT_SAMPLES */
+#include "audio_spectrum.h"
 
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -520,8 +521,8 @@ static void local_denoise_stats(rf_denoise_route_t route, bool enabled, rf_denoi
 static bool denoise_number(const cJSON *item, uint32_t max, uint32_t *value)
 {
     if (!cJSON_IsNumber(item) || !(item->valuedouble >= 0 && item->valuedouble <= max) ||
-        item->valuedouble != item->valueint) { return false; }
-    *value = (uint32_t)item->valueint;
+        item->valuedouble != (uint32_t)item->valuedouble) { return false; }
+    *value = (uint32_t)item->valuedouble;
     return true;
 }
 
@@ -565,9 +566,20 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         const cJSON *selection = cJSON_GetObjectItemCaseSensitive(body, "selection_level");
         const cJSON *expected_selection = cJSON_GetObjectItemCaseSensitive(body, "expected_selection_level");
         const cJSON *paths = cJSON_GetObjectItemCaseSensitive(body, "paths");
+        const cJSON *revision = cJSON_GetObjectItemCaseSensitive(body, "config_revision");
+        const cJSON *selected_level = cJSON_GetObjectItemCaseSensitive(body, "selected_level");
+        const cJSON *selected_paths = cJSON_GetObjectItemCaseSensitive(body, "selected_paths");
         uint32_t m, bits, before, values;
         esp_err_t err = ESP_ERR_INVALID_ARG;
-        if (selection || expected_selection || paths) {
+        if (revision || selected_level || selected_paths) {
+            if (!mode && !mask && !enabled && !expected && !legacy_values && !levels &&
+                !selection && !expected_selection && !paths && !expected_levels &&
+                denoise_number(revision, UINT32_MAX, &before) &&
+                denoise_number(selected_level, RF_DENOISE_LEVEL_EXTREME, &m) &&
+                denoise_number(selected_paths, DENOISE_CONFIG_MASK, &bits)) {
+                err = bridge_denoise_save_config(m, bits, before);
+            }
+        } else if (selection || expected_selection || paths) {
             uint32_t previous_level;
             if (!mode && !mask && !enabled && !expected && !legacy_values && !levels &&
                 denoise_number(selection, RF_DENOISE_LEVEL_EXTREME, &m) &&
@@ -625,7 +637,9 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
     const int root = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
-        "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"selection_level\":%u,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
+        "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"selection_level\":%u,"
+        "\"selected_level\":%u,\"selected_paths\":%lu,\"config_revision\":%lu,"
+        "\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
         "\"speaker\":%s,\"handset\":%s,\"network_ring_discarded_samples\":%lu,"
         "\"network_playout\":{\"underruns\":%lu,\"resumes\":%lu,\"last_underrun_us\":%lld,\"last_resume_us\":%lld},"
         "\"i2s\":{\"receive_stalls\":%lu,\"short_writes\":%lu,\"errors\":%lu}",
@@ -633,7 +647,9 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
         (unsigned)stats.state, (unsigned long)stats.frames, (unsigned long)stats.max_us,
         (unsigned long)stats.overruns, (unsigned long)stats.workspace_bytes,
-        (unsigned)mode, (unsigned long)flags, (unsigned long)levels, (unsigned)config.selection_level,
+        (unsigned)mode, (unsigned long)flags, (unsigned long)levels,
+        (unsigned)(config.selection_level ? config.selection_level : RF_DENOISE_LEVEL_STANDARD),
+        (unsigned)config.selection_level, (unsigned long)config.paths, (unsigned long)config.revision,
         netcom_rf_tx() ? "true" : "false",
         bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
@@ -683,6 +699,14 @@ static esp_err_t h_eq_presets_script(httpd_req_t *req)
     httpd_resp_set_type(req, "application/javascript; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, eq_presets_script, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t h_audio_spectrum_script(httpd_req_t *req)
+{
+    extern const char audio_spectrum_script[] asm("_binary_audio_spectrum_js_start");
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, audio_spectrum_script, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t h_provision(httpd_req_t *req)
@@ -773,7 +797,7 @@ static esp_err_t h_device(httpd_req_t *req)
         "\"panel_name\":\"" HM_PANEL_NAME "\",\"app_name\":\"" HM_APP_NAME "\","
         "\"device_id\":\"%s\",\"custom_name\":\"%s\",\"name_revision\":%lu,\"model\":\"ESP32-S3-N16R8\",\"firmware\":\"%s\",\"api_version\":2,"
         "\"capabilities\":{\"saved_wifi\":true,\"recovery_ms\":60000,\"control_lease\":true,"
-        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1,\"eq_presets\":1,\"tx_timeout\":1},"
+        "\"channels\":99,\"ota\":true,\"files\":true,\"audio\":true,\"json_settings\":true,\"audio_clients\":1,\"radio_activity\":1,\"setup_session\":1,\"custom_name\":1,\"maintenance\":2,\"peer_labels\":1,\"tail_activate\":1,\"eq_presets\":1,\"tx_timeout\":1,\"network_endpoints\":1},"
         "\"audio\":{\"format\":\"pcm_s16le\",\"rate\":16000,\"channels\":1,\"websocket\":\"/ws/sdr\"},"
         "\"discovery\":{\"mdns\":\"_openradiolink._tcp\",\"gateway_udp\":54322}}",
         device_identity_id(), escaped, (unsigned long)name.revision, esp_app_get_description()->version);
@@ -1666,7 +1690,8 @@ static esp_err_t h_status(httpd_req_t *req)
     char ix_diag[256] = "";
     netcom_diag(ix_diag, sizeof(ix_diag));
     const netrelay_link_t relay_link = netcom_mode() == NETCOM_MODE_RELAY ?
-        netrelay_link_status() : (netrelay_link_t){ "disabled", "" };
+        (netcom_broker_pending() ? (netrelay_link_t){ "connecting", "saved_waiting" } :
+                                  netrelay_link_status()) : (netrelay_link_t){ "disabled", "" };
     netcom_ptt_diag_t ptd;
     netcom_ptt_diag_get(&ptd);
     bridge_rx_stats_t br_rx;
@@ -1695,7 +1720,7 @@ static esp_err_t h_status(httpd_req_t *req)
     }
 
     char esc_ssid[100], esc_ap_ssid[100], esc_host[100], esc_mdns_host[100];
-    char esc_broker[80], esc_diag[256], esc_br_name[80], esc_user[80];
+    char broker[NET_ENDPOINT_SIZE], esc_diag[256], esc_br_name[80], esc_user[80];
     json_escape_str(net_wifi_ssid(), esc_ssid, sizeof(esc_ssid));
     char ip6all[192] = "[]";
     (void)net_wifi_ip6_json(ip6all, sizeof(ip6all));
@@ -1708,7 +1733,8 @@ static esp_err_t h_status(httpd_req_t *req)
     int wifi_disc_reason = -1;
     int64_t wifi_disc_age = -1;
     net_wifi_disc_stats(&wifi_disc, &wifi_disc_reason, &wifi_disc_age);
-    json_escape_str(netcom_broker_str(), esc_broker, sizeof(esc_broker));
+    /* Numeric literals and LDH hostnames use only JSON-safe characters. */
+    netcom_broker_address(broker, sizeof(broker));
     {
         const char *u = "";
         netcom_credentials(&u, NULL, NULL);
@@ -1813,7 +1839,7 @@ static esp_err_t h_status(httpd_req_t *req)
         cfg.filter_pre_deemph, cfg.filter_highpass, cfg.filter_lowpass,
         /* intercom (netcom): mode / room / engine state / stats / broker. */
         (int)netcom_mode(), (unsigned)netcom_room(), ix_state,
-        (unsigned)ix_tx, (unsigned)ix_rx, ix_peers, (unsigned)netcom_tx_qdrop(), esc_broker,
+        (unsigned)ix_tx, (unsigned)ix_rx, ix_peers, (unsigned)netcom_tx_qdrop(), broker,
         esc_diag, esc_user, ix_pass_set ? 1 : 0, relay_link.state, relay_link.reason,
         (unsigned)ptd.tx_end_requests, (unsigned)ptd.tx_end_sent, (unsigned)ptd.tx_end_failed,
         (long long)ptd.tx_end_ms, (long long)ptd.tx_sent_ms, (long long)ptd.tx_delay_ms,
@@ -2328,40 +2354,16 @@ static esp_err_t h_set(httpd_req_t *req)
             return send_result(req, false, "rf: could not be saved");
         }
     } else if (!strcmp(key, "np2p_peer_add") || !strcmp(key, "np2p_peer_restore")) {
-        /* NET-P2P peer, "name,ip:port" (name up to 7 chars). */
         char name[8] = {0};
-        char addr[64];
         const char *comma = strchr(val, ',');
-        if (!comma || (size_t)(comma - val) >= sizeof(name)) {
-            return send_result(req, false, "peer add: name,ip:port");
+        net_endpoint_t endpoint;
+        if (!comma || comma == val || (size_t)(comma - val) >= sizeof(name) ||
+            !net_endpoint_parse(comma + 1, 54321, &endpoint)) {
+            return send_result(req, false, "请输入名称和有效的域名或 IP，可附带端口 1–65535");
         }
-        size_t nl = (size_t)(comma - val);
-        memcpy(name, val, nl);
-        name[nl] = '\0';
-        if (snprintf(addr, sizeof(addr), "%s", comma + 1) >= (int)sizeof(addr)) {
-            return send_result(req, false, "peer add: name,ip:port");
-        }
-        /* "[v6]:port" or "ip:port"; a bare IPv6 literal keeps the default */
-        uint16_t port = 54321;
-        if (addr[0] == '[') {
-            char *rb = strchr(addr, ']');
-            if (!rb) {
-                return send_result(req, false, "peer add: [ipv6]:port");
-            }
-            *rb = '\0';
-            memmove(addr, addr + 1, strlen(addr));
-            if (rb[1] == ':') {
-                port = (uint16_t)atoi(rb + 2);
-            }
-        } else if (strchr(addr, ':') != NULL && strchr(addr, ':') == strrchr(addr, ':')) {
-            char *colon = strrchr(addr, ':');
-            if (colon == addr) {
-                return send_result(req, false, "peer add: name,ip:port");
-            }
-            *colon = '\0';
-            port = (uint16_t)atoi(colon + 1);
-        }
-        esp_err_t err = netp2pnet_peer_add_confirmed(name, addr, port, !strcmp(key, "np2p_peer_restore"));
+        memcpy(name, val, (size_t)(comma - val));
+        esp_err_t err = netp2pnet_peer_add_confirmed(name, endpoint.host, endpoint.port,
+                                                   !strcmp(key, "np2p_peer_restore"));
         if (err != ESP_OK) {
             const char *msg = (err == ESP_ERR_INVALID_ARG)
                 ? "peer add: bad ip or port"
@@ -2806,6 +2808,30 @@ static uint32_t sdr_query_id(httpd_req_t *req, const char *key)
     char *end = NULL;
     const unsigned long long v = strtoull(value, &end, 10);
     return end && !*end && v > 0 && v <= UINT32_MAX ? (uint32_t)v : 0;
+}
+
+static esp_err_t h_audio_spectrum(httpd_req_t *req)
+{
+    const uint32_t after = sdr_query_id(req, "after");
+    char choice[16];
+    query_str(req, "select", choice, sizeof(choice));
+    const uint32_t path = sdr_query_id(req, "select");
+    if (choice[0] && (path >= SPECTRUM_PATH_COUNT || (path == 0 && strcmp(choice, "0")))) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid spectrum path");
+    }
+    uint8_t *reply = heap_caps_malloc(SPECTRUM_REPLY_BYTES, MALLOC_CAP_SPIRAM);
+    const size_t length = reply ? audio_spectrum_read(after, choice[0] != 0, path, reply) : 0;
+    esp_err_t err;
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (length) {
+        httpd_resp_set_type(req, "application/octet-stream");
+        err = httpd_resp_send(req, (const char *)reply, length);
+    } else {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        err = send_result(req, false, "频谱暂不可用");
+    }
+    heap_caps_free(reply);
+    return err;
 }
 
 static void sdr_reply_json(char *reply, size_t n, bool ok, uint32_t id, bool activity)
@@ -3406,6 +3432,8 @@ extern const uint8_t serverkey_pem_start[]  asm("_binary_serverkey_pem_start");
 
 static const httpd_uri_t s_routes[] = {
     { .uri = "/rf-denoise.js", .method = HTTP_GET, .handler = h_rf_denoise_script },
+    { .uri = "/audio-spectrum.js", .method = HTTP_GET, .handler = h_audio_spectrum_script },
+    { .uri = "/api/audio_spectrum", .method = HTTP_GET, .handler = h_audio_spectrum },
     { .uri = "/eq-presets.js", .method = HTTP_GET, .handler = h_eq_presets_script },
     { .uri = "/api/eq_presets", .method = HTTP_GET, .handler = eq_presets_http },
     { .uri = "/api/eq_presets", .method = HTTP_POST, .handler = eq_presets_http },
@@ -3443,6 +3471,7 @@ static const httpd_uri_t s_routes[] = {
     { .uri = "/api/channels",  .method = HTTP_GET, .handler = h_channels,  },
     { .uri = "/api/channel",   .method = HTTP_GET, .handler = h_channel,   },
     { .uri = "/api/np2p/denied", .method = HTTP_GET, .handler = h_np_denied },
+    { .uri = "/api/network/broker", .method = HTTP_POST, .handler = broker_http },
     { .uri = "/api/status",    .method = HTTP_GET, .handler = h_status,    },
     { .uri = "/api/diagnostics", .method = HTTP_GET, .handler = h_diagnostics },
     { .uri = "/api/radio",     .method = HTTP_GET, .handler = h_radio,     },
@@ -3551,6 +3580,7 @@ esp_err_t net_http_start(void)
     sdr_init();
     device_identity_init();
     radio_activity_init();
+    audio_spectrum_init();
     ESP_RETURN_ON_ERROR(app_control_init(revoke_phone_control), TAG, "control lease init");
     /*
      * One mutex for the shared SDR buffers (see s_sdr_pcm): the WebSocket

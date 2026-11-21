@@ -329,6 +329,11 @@ class BoardSession(
     }
     suspend fun set(key: String,value: String) {
         ensureLease();reads.incrementAndGet()
+        if(key=="ix_broker" && capabilities.optInt("network_endpoints")>=1) {
+            api.json("api/network/broker",JSONObject().put("address",value))
+            refresh()
+            return
+        }
         check(capabilities.optBoolean("json_settings")) { "需要支持新版参数接口的配套固件" }
         val response = api.json("api/set", JSONObject().put("k", key).put("v", value))
         when (key) {

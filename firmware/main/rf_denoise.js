@@ -26,7 +26,8 @@
   }
 
   function matches(snapshot, value, mask) {
-    return snapshot.selection_level === value && snapshot.levels === packed(value, mask);
+    return snapshot.selected_level === value && snapshot.selected_paths === mask &&
+      snapshot.levels === packed(value, mask);
   }
 
   function renderStats() {
@@ -73,9 +74,9 @@
     get('connection').hidden = Boolean(saved && !readError);
     get('connection').textContent = readError || (saved ? '' : '正在读取降噪设置…');
     if (!saved) return;
-    const selected = draft?.level ?? saved.selection_level;
-    const mask = draft?.paths ?? saved.flags;
-    const mixed = !matches(saved, saved.selection_level, saved.flags);
+    const selected = draft?.level ?? saved.selected_level;
+    const mask = draft?.paths ?? saved.selected_paths;
+    const mixed = !matches(saved, saved.selected_level, saved.selected_paths);
     level.value = String(selected);
     level.disabled = pending;
     for (const input of paths) {
@@ -108,7 +109,9 @@
         throw Error('设备身份已变化，请重新打开面板');
       }
       if (!Number.isInteger(next.mode) || next.mode < 0 || next.mode > 2 ||
-          !Number.isInteger(next.selection_level) || next.selection_level < 1 || next.selection_level > 4 ||
+          !Number.isInteger(next.selected_level) || next.selected_level < 0 || next.selected_level > 4 ||
+          !Number.isInteger(next.selected_paths) || next.selected_paths < 0 || (next.selected_paths & ~0x7fe) ||
+          !Number.isInteger(next.config_revision) || next.config_revision < 0 || next.config_revision > 0xffffffff ||
           !Number.isInteger(next.levels) || next.levels < 0 || next.levels > 0x3fffffff ||
           !Number.isInteger(next.flags) || next.flags < 0 || (next.flags & ~0x7fe) ||
           paths.some(input => levelAt(next.levels, Number(input.dataset.path)) > 4) ||
@@ -153,9 +156,9 @@
 
   async function save() {
     if (pending || !saved) return;
-    const change = draft ?? {level: saved.selection_level, paths: saved.flags, expected: saved};
-    const body = {selection_level: change.level, paths: change.paths,
-      expected_selection_level: change.expected.selection_level, expected_levels: change.expected.levels};
+    const change = draft ?? {level: saved.selected_level, paths: saved.selected_paths, expected: saved};
+    const body = {selected_level: change.level, selected_paths: change.paths,
+      config_revision: change.expected.config_revision};
     pending = true;
     ++epoch;
     render();

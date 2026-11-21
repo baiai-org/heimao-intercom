@@ -83,6 +83,7 @@ const char *net_wifi_ap_ip(void);
 esp_err_t net_wifi_scan_json(char *out, size_t out_len, bool force);
 
 bool        net_wifi_connected(void);
+uint32_t    net_wifi_ip_epoch(void);
 /* Drop accounting: total disconnects, last reason code, ms since the last one. */
 void        net_wifi_disc_stats(uint32_t *count, int *reason, int64_t *age_ms);
 const char *net_wifi_ip(void);

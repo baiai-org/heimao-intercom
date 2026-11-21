@@ -11,7 +11,7 @@
 
 #include "esp_err.h"
 #include "np_peer_store.h"
-#define NETP2PNET_STATUS_RESERVE (1536 + NP_PEER_LIMIT * 512)
+#define NETP2PNET_STATUS_RESERVE (1536 + NP_PEER_LIMIT * 832)
 
 #ifdef __cplusplus
 extern "C" {

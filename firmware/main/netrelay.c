@@ -42,6 +42,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_tls.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -50,6 +51,7 @@
 #include "mqtt_client.h"
 
 #include "audio_i2s.h"
+#include "audio_spectrum.h"
 #include "board_hw.h"
 #include "bridge.h"
 #include "net_audio_denoise.h"
@@ -145,7 +147,7 @@ static uint32_t s_late;      /* arrived after the play head had passed */
 static uint32_t s_plc;       /* lost frames Opus concealed */                 /* playout waits while a stream is live */
 static volatile bool     s_started;
 static _Atomic uint32_t s_connected;
-static char     s_uri[64];
+static char     s_uri[NET_ENDPOINT_SIZE];
 static char     s_my_topic[32];
 static char     s_sub_topic[32];
 static portMUX_TYPE s_link_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -425,8 +427,10 @@ static void relay_mqtt_handler(void *arg, esp_event_base_t base,
                            ? (int)ev->error_handle->connect_return_code : -1;
         const bool authentication = rc == MQTT_CONNECTION_REFUSE_BAD_USERNAME ||
             rc == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED || rc == 0x86 || rc == 0x87;
+        const bool dns = ev->error_handle &&
+            ev->error_handle->esp_tls_last_esp_err == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME;
         s_connected = false;
-        relay_link_set("error", authentication ? "authentication" : "network");
+        relay_link_set("error", authentication ? "authentication" : dns ? "dns" : "network");
         if (authentication) {
             /* CONNACK 5 = not authorized.  The broker rejected the username or
              * password; say so, because "err type ... rc 5" reads like a
@@ -1050,13 +1054,15 @@ static void relay_play_task(void *arg)
             source, have, ready && dac_owned, block, now_ms());
         bridge_key_update(rendered, denoise.pending);
         int16_t *pcm = rendered ? block : silence;
-        if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, REL_PKT_SAMPLES); }
+        const bool on_rf = ptt_bridge_keyed();
+        if (!on_rf) { voice_speaker_apply(pcm, REL_PKT_SAMPLES); }
         if (voice_dac_held_by_talk()) {
             s_amp_on = false;
             vTaskDelay(pdMS_TO_TICKS(REL_PKT_MS));
         } else {
-            if (audio_i2s_write(pcm, REL_PKT_SAMPLES) == ESP_OK && have && rendered) {
-                network_audio_refill(&denoise, block, now_ms());
+            if (audio_i2s_write(pcm, REL_PKT_SAMPLES) == ESP_OK && rendered) {
+                audio_spectrum_tap(on_rf ? SPECTRUM_MQTT_RF : SPECTRUM_MQTT_SPEAKER, pcm, REL_PKT_SAMPLES);
+                if (have) { network_audio_refill(&denoise, block, now_ms()); }
             }
         }
     }
@@ -1165,11 +1171,13 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
 
     if (!s_rx_mux) { s_rx_mux = xSemaphoreCreateMutex(); }
     if (!s_rx_mux) { return ESP_ERR_NO_MEM; }
-    snprintf(s_uri, sizeof(s_uri), "mqtt://%s", netcom_broker_str());
+    net_endpoint_format(&cfg->broker, s_uri, sizeof(s_uri));
     ESP_LOGI(TAG, "connecting to broker %s as %s", s_uri, device_id());
 
     esp_mqtt_client_config_t mcfg = {
-        .broker.address.uri = s_uri,
+        .broker.address.hostname = cfg->broker.host,
+        .broker.address.port = cfg->broker.port,
+        .broker.address.transport = MQTT_TRANSPORT_OVER_TCP,
         .session.keepalive = 30,
         /*
          * The broker is on the LAN: a TCP connect either completes in

@@ -29,6 +29,7 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "net_endpoint.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,7 +53,7 @@ extern "C" {
 #define NETCOM_ROOM_MAX     9999
 
 #define NETCOM_PSK_LEN      13   /* pre-shared key length (see netcom_psk) */
-#define NETCOM_BROKER_LEN   32   /* host or host:port, NUL included */
+#define NETCOM_BROKER_DEFAULT_PORT 1883
 
 /*
  * MQTT credentials for the relay (EMQX) mode.  The broker was anonymous-only
@@ -68,8 +69,7 @@ typedef struct {
     uint16_t room;               /* 1000..9999 (NET-P2P group)           */
     uint8_t  psk[NETCOM_PSK_LEN];/* KNOCK handshake key (netp2pnet)      */
     bool     psk_set;
-    char     broker[NETCOM_BROKER_LEN]; /* "host" or "host:port"         */
-    uint16_t broker_port;        /* parsed port, default 1883            */
+    net_endpoint_t broker;
     char     user[NETCOM_USER_LEN];  /* MQTT username, "" = anonymous    */
     char     pass[NETCOM_PASS_LEN];  /* MQTT password, "" = none         */
     bool     creds_set;          /* user[0] != 0                         */
@@ -165,8 +165,9 @@ void netcom_credentials(const char **user, const char **pass, bool *set);
 /* Current state accessors. */
 uint8_t   netcom_mode(void);
 uint16_t  netcom_room(void);
-const char *netcom_broker_str(void);                  /* "host:port" */
-uint16_t  netcom_broker_port(void);
+void netcom_broker_address(char *out, size_t size);
+bool netcom_broker_pending(void);
+void netcom_apply_pending_broker(void);
 /*
  * The 13-byte PSK (NVS ncpsk).  *set is true only if the operator configured
  * one; otherwise out is unmodified.  netp2pnet uses it as the KNOCK handshake

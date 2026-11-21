@@ -52,6 +52,7 @@ static TaskHandle_t s_worker;
 static portMUX_TYPE s_event_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_pending_events;
 static uint32_t s_disc_count;
+static uint32_t s_ip_epoch;
 static int s_disc_reason = -1;
 static int64_t s_disc_ms;
 static esp_netif_t *s_netif, *s_ap_netif;
@@ -299,12 +300,19 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *d = data;
         portENTER_CRITICAL(&s_event_mux);
-        ++s_disc_count; s_disc_reason = d ? d->reason : -1; s_disc_ms = wifi_now();
+        ++s_disc_count; ++s_ip_epoch; s_disc_reason = d ? d->reason : -1; s_disc_ms = wifi_now();
         portEXIT_CRITICAL(&s_event_mux);
         bits = EV_DISC;
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) { bits = EV_IP; }
     if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) { bits = EV_LOST_IP; }
+    if (bits == EV_IP || bits == EV_LOST_IP ||
+        (base == IP_EVENT && id == IP_EVENT_GOT_IP6 && data &&
+         ((const ip_event_got_ip6_t *)data)->esp_netif == s_netif)) {
+        portENTER_CRITICAL(&s_event_mux);
+        ++s_ip_epoch;
+        portEXIT_CRITICAL(&s_event_mux);
+    }
     if (bits) { signal_wifi(bits); }
 }
 
@@ -783,6 +791,13 @@ bool net_wifi_setup_ap_active(void) { return s_ap_on; }
 const char *net_wifi_setup_ssid(void) { return s_ap_ssid; }
 const char *net_wifi_ap_ip(void) { return s_ap_on ? "192.168.4.1" : ""; }
 bool net_wifi_connected(void) { return s_connected; }
+uint32_t net_wifi_ip_epoch(void)
+{
+    portENTER_CRITICAL(&s_event_mux);
+    const uint32_t epoch = s_ip_epoch;
+    portEXIT_CRITICAL(&s_event_mux);
+    return epoch;
+}
 const char *net_wifi_ip(void) { return s_ip; }
 
 esp_err_t net_wifi_debug_radio_off_schedule(void)

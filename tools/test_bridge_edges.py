@@ -23,6 +23,10 @@ STUBS = r'''
 #include <stdlib.h>
 #include <string.h>
 typedef int esp_err_t;
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(mux) ((void)(mux))
+#define portEXIT_CRITICAL(mux) ((void)(mux))
 #define ESP_OK 0
 #define ESP_ERR_INVALID_ARG 1
 #define ESP_ERR_INVALID_STATE 2
@@ -59,6 +63,8 @@ esp_err_t nvs_get_u8(nvs_handle_t, const char *, uint8_t *);
 esp_err_t nvs_set_u8(nvs_handle_t, const char *, uint8_t);
 esp_err_t nvs_get_u32(nvs_handle_t, const char *, uint32_t *);
 esp_err_t nvs_set_u32(nvs_handle_t, const char *, uint32_t);
+esp_err_t nvs_get_blob(nvs_handle_t, const char *, void *, size_t *);
+esp_err_t nvs_set_blob(nvs_handle_t, const char *, const void *, size_t);
 esp_err_t nvs_commit(nvs_handle_t);
 void nvs_close(nvs_handle_t);
 int channels_count(void);
@@ -92,6 +98,8 @@ size_t tail_fetch(int, size_t, int16_t *, size_t);
 HARNESS = r'''
 #include "channel_control.c"
 #include "bridge.c"
+void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t n)
+{ (void)path; (void)pcm; (void)n; }
 static unsigned samples, ends, tunes, releases;
 static bool engine_up = true, keyed, probe_release, radio_ready = true, compatible = true;
 static esp_err_t tune_error;
@@ -112,6 +120,8 @@ static bool denoise_exists, denoise_pending, commit_fail;
 static bool legacy_config_exists;
 static uint32_t legacy_config;
 static uint32_t denoise_config, pending_config;
+static uint32_t settings_revision, settings_paths, settings_level;
+static uint32_t pending_revision, pending_paths, pending_level;
 static unsigned denoise_commits;
 static rf_denoise_level_t started_level;
 static bool protect_during_finish;
@@ -174,11 +184,30 @@ esp_err_t nvs_set_u32(nvs_handle_t h, const char *key, uint32_t v) {
     denoise_pending = true; pending_config = v;
     return ESP_OK;
 }
+esp_err_t nvs_get_blob(nvs_handle_t h, const char *key, void *value, size_t *size) {
+    (void)h;
+    assert(!strcmp(key,"auddn_sel2") && *size == 5 * sizeof(uint32_t));
+    if (!denoise_exists) { return ESP_ERR_NVS_NOT_FOUND; }
+    const uint32_t record[] = {2, settings_revision, denoise_config, settings_paths, settings_level};
+    memcpy(value,record,sizeof(record));
+    return ESP_OK;
+}
+esp_err_t nvs_set_blob(nvs_handle_t h, const char *key, const void *value, size_t size) {
+    (void)h;
+    assert(!strcmp(key,"auddn_sel2") && size == 5 * sizeof(uint32_t));
+    if (storage_fail) { return ESP_ERR_INVALID_STATE; }
+    const uint32_t *record = value;
+    assert(record[0]==2);
+    pending_revision=record[1]; pending_config=record[2]; pending_paths=record[3]; pending_level=record[4];
+    denoise_pending=true;
+    return ESP_OK;
+}
 esp_err_t nvs_commit(nvs_handle_t h) {
     (void)h;
     if (denoise_pending) {
         if (commit_fail) { return ESP_ERR_INVALID_STATE; }
         denoise_config = pending_config; denoise_exists = true; ++denoise_commits;
+        settings_revision=pending_revision; settings_paths=pending_paths; settings_level=pending_level;
     }
     return ESP_OK;
 }
@@ -498,7 +527,7 @@ def main():
         directory = Path(temp)
         environment = dict(os.environ, TEMP=temp, TMP=temp, TMPDIR=temp)
         (directory / 'freertos').mkdir()
-        for name in ('bridge.c', 'bridge.h', 'rf_denoise.h', 'channel_control.c', 'channel_control.h', 'sa818_cfg.h', 'sa818_freq.h', 'tx_timeout.h'):
+        for name in ('bridge.c', 'bridge.h', 'audio_spectrum.h', 'rf_denoise.h', 'channel_control.c', 'channel_control.h', 'sa818_cfg.h', 'sa818_freq.h', 'tx_timeout.h'):
             shutil.copy2(ROOT / 'firmware/main' / name, directory / name)
         (directory / 'stubs.h').write_text(STUBS, encoding='utf-8')
         for name in ('esp_err.h', 'esp_log.h', 'esp_timer.h', 'nvs.h',

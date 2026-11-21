@@ -15,6 +15,7 @@ MAIN = ROOT / "firmware/main"
 ENV = r'''
 #include <assert.h>
 #include <stdint.h>
+#define audio_spectrum_tap(...) ((void)0)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

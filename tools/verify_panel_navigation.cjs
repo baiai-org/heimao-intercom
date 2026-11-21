@@ -20,16 +20,40 @@ let rejectChannel=false,refuseStop=false,stops=0;
 let failDenoiseSave=false, denoiseWrites=0, failDenoiseRead=false, holdDenoiseRead=null, loseDenoiseReply=false;
 const idleDenoise={state:0,level:0,frames:0,max_us:0,overruns:0,wait_max_us:0,
  input_frames:0,wet_frames:0,dry_frames:0,queue_full:0,recoveries:0};
-const denoise={ok:true,levels:0,selection_level:2,active_mode:0,...idleDenoise,
+const denoise={ok:true,levels:0,selection_level:2,selected_level:0,selected_paths:0x7fe,config_revision:0,active_mode:0,...idleDenoise,
  speaker_stats:{...idleDenoise},handset_stats:{...idleDenoise},bridge_stats:{...idleDenoise},
  i2s:{receive_stalls:0,short_writes:0,errors:0},
  network_stats:[{...idleDenoise},{...idleDenoise},{...idleDenoise}]};
 const packLevel=(setting,level)=>level << ((setting-1)*3);
 const getLevel=setting=>(denoise.levels >> ((setting-1)*3)) & 7;
-const putLevel=(setting,level)=>{denoise.levels=(denoise.levels & ~packLevel(setting,7)) | packLevel(setting,level);};
+const putLevel=(setting,level)=>{denoise.levels=(denoise.levels & ~packLevel(setting,7)) | packLevel(setting,level);denoise.config_revision++;};
 const settings=Array.from({length:10},(_,i)=>i+1);
 const configLevels=(level,paths)=>settings.reduce((values,i)=>values | (paths & (1<<i) ? packLevel(i,level) : 0),0);
-denoise.levels=configLevels(2,0x7fe);
+let spectrumPath=1,spectrumGeneration=1,spectrumSequence=0,spectrumReads=0;
+function spectrumFrame(query){
+ if(query.has('select')){
+  const path=Number(query.get('select'))||1;
+  if(spectrumPath!==path){spectrumPath=path;spectrumGeneration++;}
+ }
+ spectrumReads++;
+ const now=Date.now()>>>0;
+ const result=Buffer.alloc(20+2*(1009+8));
+ result.writeUInt32LE(0x01505341,0);
+ result.writeUInt32LE(spectrumGeneration,4);
+ result.writeUInt32LE((1<<1)|(1<<7),8);
+ result.writeUInt32LE(now,12);
+ result[16]=spectrumPath;result[17]=2;result.writeUInt16LE(1009,18);
+ for(let frame=0;frame<2;frame++){
+  const offset=20+frame*1017;
+  result.writeUInt32LE(++spectrumSequence,offset);
+  result.writeUInt32LE((now-(1-frame)*125)>>>0,offset+4);
+  for(let bin=0;bin<1009;bin++){
+   result[offset+8+bin]=Math.round(22+14*Math.sin(bin*5.1+spectrumSequence/3)+
+    175*Math.exp(-((bin-112)**2)/18)+125*Math.exp(-((bin-118)**2)/10));
+  }
+ }
+ return result;
+}
 const tailState=()=>{
  const {tail,intercom:{mode}}=status;
  return {...tail,mode,enabled:!!(tail.id && (tail.modes & (1<<mode))),
@@ -80,7 +104,7 @@ async function assertEqSlotLayout(page, columns, filled) {
    const p=url.pathname;let json;
    if(p==='/')return route.fulfill({contentType:'text/html; charset=utf-8',body:fs.readFileSync(path.join(main,'panel_index.html'))});
    if(p==='/setup')return route.fulfill({contentType:'text/html; charset=utf-8',body:fs.readFileSync(path.join(main,'setup.html'))});
-   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js','/rf-denoise.js':'rf_denoise.js','/eq-presets.js':'eq_presets.js'};
+   const scripts={'/app-control.js':'app_control.js','/device-name.js':'device_name.js','/rx-guard.js':'rx_guard.js','/rf-denoise.js':'rf_denoise.js','/eq-presets.js':'eq_presets.js','/audio-spectrum.js':'audio_spectrum.js'};
    if(scripts[p])return route.fulfill({contentType:'application/javascript',body:fs.readFileSync(path.join(main,scripts[p]))});
    if(p==='/api/device')json=identity;
    else if(p==='/api/wifi')json={...status.wifi,profiles:[],scan_running:false,offline_ms:0};
@@ -124,17 +148,18 @@ async function assertEqSlotLayout(page, columns, filled) {
    else if(p==='/api/rf_denoise'){
     if(route.request().method()==='POST'){
      assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
-     const {selection_level,paths,expected_levels,expected_selection_level}=route.request().postDataJSON();
+     const {selected_level,selected_paths:paths,config_revision}=route.request().postDataJSON();
      assert.equal(paths & ~0x7fe,0);
-     assert(selection_level>=1 && selection_level<=4);
+     assert(selected_level>=0 && selected_level<=4);
      denoiseWrites++;
      if(failDenoiseSave)return route.fulfill({status:503,json:{ok:false}});
-     const levels=configLevels(selection_level,paths);
-     if((denoise.levels!==levels || denoise.selection_level!==selection_level) &&
-         (denoise.levels!==expected_levels || denoise.selection_level!==expected_selection_level)) {
+     const levels=configLevels(selected_level,paths);
+     if((denoise.levels!==levels || denoise.selected_level!==selected_level || denoise.selected_paths!==paths) &&
+         denoise.config_revision!==config_revision) {
       return route.fulfill({status:409,json:{ok:false}});
      }
-     Object.assign(denoise,{levels,selection_level});
+     Object.assign(denoise,{levels,selected_level,selected_paths:paths,selection_level:selected_level||2,
+      config_revision:denoise.config_revision+1});
      if(loseDenoiseReply)return route.abort('timedout');
     }
     json={...denoise,flags:settings.reduce((bits,i)=>bits | (getLevel(i)?1<<i:0),0),
@@ -144,6 +169,14 @@ async function assertEqSlotLayout(page, columns, filled) {
      if(failDenoiseRead)return route.fulfill({status:503,json:{ok:false}});
      if(holdDenoiseRead)await holdDenoiseRead;
     }
+   }
+   else if(p==='/api/audio_spectrum')return route.fulfill({contentType:'application/octet-stream',body:spectrumFrame(url.searchParams)});
+   else if(p==='/api/network/broker'){
+    assert.equal(route.request().headers()['x-orl-device'],identity.device_id);
+    const {address}=route.request().postDataJSON();
+    assert.equal(address,'relay.example.test');
+    Object.assign(status.intercom,{broker:address+':1883',relay_link:'connecting',relay_reason:'saved_waiting'});
+    json={ok:true,scheduled:true,address:status.intercom.broker};
    }
    else if(p==='/api/np2p/denied')json={ready:true,count:denied.length,limit:64,entries:denied};
    else if(p==='/api/radio')json=radio;
@@ -277,8 +310,8 @@ async function assertEqSlotLayout(page, columns, filled) {
   const saved=()=>page.waitForFunction(()=>document.querySelector('#rfDenoiseStatus').textContent.includes('已保存'));
   assert.equal(await card.locator('select:visible').count(),1);
   assert.equal(await card.locator('input:checked').count(),10);
-  assert.deepEqual(await level.locator('option').allTextContents(),['轻度','标准','强力','极强']);
-  assert.equal(await level.inputValue(),'2');
+  assert.deepEqual(await level.locator('option').allTextContents(),['关闭','轻度','标准','强力','极强']);
+  assert.equal(await level.inputValue(),'0');
   assert(await save.isDisabled());
   let finishOldGet;
   holdDenoiseRead=new Promise(resolve=>{finishOldGet=resolve;});
@@ -342,6 +375,14 @@ async function assertEqSlotLayout(page, columns, filled) {
   await save.click();await saved();
   assert.equal(denoise.levels,0);
   assert.equal(denoise.selection_level,2);
+  await level.selectOption('0');
+  await input(1).check();
+  await save.click();await saved();
+  assert.equal(denoise.selected_paths,2);
+  assert.equal(denoise.levels,0);
+  await level.selectOption('2');
+  await save.click();await saved();
+  assert.equal(getLevel(1),2);
   failDenoiseRead=true;
   await page.waitForFunction(()=>document.querySelector('[data-dn=connection]').textContent.includes('暂未更新'));
   assert.equal(await level.inputValue(),'2');
@@ -417,6 +458,10 @@ async function assertEqSlotLayout(page, columns, filled) {
   assert.equal(await page.locator('#ixSeg .relay-state').count(),0);
   assert.equal(await page.locator('#relayStageState').getAttribute('data-kind'),'connected');
   assert(!(await page.locator('.mode-stage[data-modes="2"]').innerText()).includes('27'));
+  await page.locator('#ixBroker2').fill('relay.example.test');
+  await page.locator('#ixBrokerSet2').click();
+  await page.waitForFunction(()=>document.querySelector('#relayStageState').textContent.includes('已保存'));
+  assert.equal(await page.locator('#ixBroker2').inputValue(),'relay.example.test:1883');
   Object.assign(status.intercom,{relay_link:'error',relay_reason:'authentication'});
   await page.waitForFunction(()=>document.querySelector('#relayStageState').textContent.includes('用户名'));
   assert.equal(await page.locator('#relayStageState').getAttribute('data-kind'),'down');
@@ -424,6 +469,32 @@ async function assertEqSlotLayout(page, columns, filled) {
   await page.waitForFunction(()=>document.querySelector('#relayStageState').textContent.includes('正在重连'));
   await page.locator('[data-page=talk]').click();
   assert(await page.locator('#relayTalkState').isVisible());
+  const spectrum=page.locator('#audioSpectrum'), routes=spectrum.locator('[data-spectrum-path]');
+  assert(await spectrum.evaluate(el=>el.previousElementSibling.querySelector('summary').textContent==='详细运行状态'));
+  await spectrum.evaluate(el=>el.scrollIntoView({block:'center'}));
+  await routes.waitFor();
+  await routes.selectOption('7');
+  await page.waitForFunction(()=>document.querySelector('[data-spectrum-path]').value==='7');
+  await spectrum.locator('[data-view=waterfall]').click();
+  assert.equal(await spectrum.getAttribute('data-rendering'),'waterfall');
+  assert.equal(await routes.inputValue(),'7');
+  await spectrum.screenshot({path:path.join(output,'spectrum-waterfall.png')});
+  await spectrum.locator('[data-view=surface]').click();
+  assert.match(await spectrum.getAttribute('data-rendering'),/^(mesh|ridges)$/);
+  await spectrum.screenshot({path:path.join(output,'spectrum-3d.png')});
+  await page.evaluate(()=>window.ORLAudioSpectrum.beginMicrophone());
+  const readsDuringPtt=spectrumReads;
+  await page.waitForTimeout(600);
+  assert.equal(spectrumReads,readsDuringPtt);
+  await page.evaluate(()=>window.ORLAudioSpectrum.releaseMicrophone(Promise.resolve(true)));
+  await routes.waitFor();
+  const viewportBeforeSpectrum = page.viewportSize();
+  await page.setViewportSize({width:320,height:800});
+  await spectrum.evaluate(el=>el.scrollIntoView({block:'center'}));
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await spectrum.locator('[data-view=waterfall]').click();
+  await spectrum.screenshot({path:path.join(output,'spectrum-mobile-320.png')});
+  await page.setViewportSize(viewportBeforeSpectrum);
   status.bridge.keyed=1;
   await page.waitForFunction(()=>!document.querySelector('#speakerBridgeState').hidden);
   await page.locator('#spkVol').evaluate(el=>{

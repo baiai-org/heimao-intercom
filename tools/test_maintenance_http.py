@@ -29,6 +29,10 @@ static int device_maintenance_factory_reset(void){++factory_resets;return operat
 static uint32_t peer_labels_revision(void){return 7;}
 static int netp2pnet_peer_rename(const char*id,const char*label,uint32_t rev){assert(!strcmp(id,"m-001122334455"));assert(strlen(label)<=96);(void)rev;++renames;return operation_error;}
 static int netp2pnet_peer_add_named(const char*label,const char*ip,uint16_t port,bool restore,uint32_t rev,bool*added){(void)label;(void)ip;(void)port;(void)restore;(void)rev;++adds;*added=added_partial;return operation_error;}
+static net_endpoint_t broker;
+static int netcom_set_broker(const char *text){return net_endpoint_parse(text,1883,&broker) ? operation_error : ESP_ERR_INVALID_ARG;}
+static bool netcom_broker_pending(void){return true;}
+static void netcom_broker_address(char *out,size_t n){net_endpoint_format(&broker,out,n);}
 '''
 TEST=r'''
 static httpd_req_t req(const char*body){httpd_req_t r={0};r.method=body?HTTP_POST:HTTP_GET;r.body=body;r.content_len=body?strlen(body):0;r.type="application/json";r.device=device_identity_id();r.status=200;return r;}
@@ -51,10 +55,18 @@ int main(void){
  operation_error=ESP_ERR_NOT_SUPPORTED;r=req("{\"op\":\"factory_reset\",\"boot_id\":\"boot-1\"}");maintenance_http(&r);assert(r.status==503&&factory_resets==1);
  operation_error=0;r=req("{\"op\":\"factory_reset\",\"boot_id\":\"boot-1\"}");maintenance_http(&r);assert(r.status==200&&factory_resets==2);
  operation_error=ESP_ERR_INVALID_STATE;r=req("{\"op\":\"cleanup\"}");maintenance_http(&r);assert(r.status==409&&cleanups==1);operation_error=0;
- char ip[64];uint16_t port;assert(endpoint_parse("[2001:db8::1]:65535",ip,&port)&&port==65535);assert(endpoint_parse("2001:db8::1",ip,&port)&&port==54321);
- assert(endpoint_parse("192.0.2.1:54321",ip,&port)&&port==54321);
- const char*badaddr[]={"192.0.2.1:0","192.0.2.1:65536","192.0.2.1:-1","192.0.2.1:1x","192.0.2.1:","[2001:db8::1]extra","bad", "[::1]:99999999999999999999999"};
- for(unsigned i=0;i<sizeof(badaddr)/sizeof(*badaddr);i++)assert(!endpoint_parse(badaddr[i],ip,&port));
+ net_endpoint_t ep;
+ assert(net_endpoint_parse("[2001:db8::1]:65535",54321,&ep)&&ep.port==65535&&ep.kind==NET_HOST_IPV6);
+ assert(net_endpoint_parse("2001:db8::1",54321,&ep)&&ep.port==54321&&ep.kind==NET_HOST_IPV6);
+ assert(net_endpoint_parse("192.0.2.1:54321",54321,&ep)&&ep.port==54321&&ep.kind==NET_HOST_IPV4);
+ assert(net_endpoint_parse(" Peer.Example.NET.:55000 ",54321,&ep)&&ep.port==55000&&!strcmp(ep.host,"peer.example.net"));
+ assert(net_endpoint_parse("station.local",54321,&ep)&&ep.port==54321&&ep.kind==NET_HOST_DNS);
+ char longhost[254]; memset(longhost,'a',253); longhost[63]=longhost[127]=longhost[191]='.';longhost[253]=0;
+ assert(net_endpoint_parse(longhost,1883,&ep)&&strlen(ep.host)==253);
+ const char*badaddr[]={"192.0.2.1:0","192.0.2.1:65536","192.0.2.1:-1","192.0.2.1:1x","192.0.2.1:","[2001:db8::1]extra","-bad.example","bad..test","http://test.local","bad_.test", "[::1]:99999999999999999999999"};
+ for(unsigned i=0;i<sizeof(badaddr)/sizeof(*badaddr);i++)assert(!net_endpoint_parse(badaddr[i],54321,&ep));
+ r=req("{\"address\":\"relay.example.net\"}");broker_http(&r);assert(r.status==200&&broker.port==1883&&strstr(r.response,"relay.example.net:1883"));
+ r=req("{\"address\":\"[2001:db8::1]:2883\"}");broker_http(&r);assert(r.status==200&&broker.port==2883&&strstr(r.response,"[2001:db8::1]:2883"));
  r=req("{\"op\":\"rename\",\"id\":\"m-001122334455\",\"name\":\"山顶中继\",\"revision\":7}");peer_labels_http(&r);assert(r.status==200&&renames==1);
  r=req("{\"op\":\"rename\",\"id\":\"m-001122334455\",\"name\":\"bad\\u0000name\",\"revision\":7}");assert(peer_labels_http(&r)==ESP_FAIL&&r.status==400&&renames==1);
  r=req("{\"op\":\"rename\",\"op\":\"add\",\"name\":\"x\",\"revision\":7}");assert(peer_labels_http(&r)==ESP_FAIL&&r.status==400);
@@ -64,8 +76,8 @@ int main(void){
 '''
 def main():
     control=(MAIN/'app_control.c').read_text(encoding='utf-8');device=(MAIN/'device_name.c').read_text(encoding='utf-8')
-    code=STUBS+plain('maintenance_policy.h')+ENV+function(device,'device_name_validate').replace('DEVICE_NAME_BYTES','96')
-    code+=function(control,'control_error')+function(control,'app_read_json')+plain('maintenance_http.c')+TEST
+    code=STUBS+plain('maintenance_policy.h')+plain('net_endpoint.h')+ENV+function(device,'device_name_validate').replace('DEVICE_NAME_BYTES','96')
+    code+=function(control,'control_error')+function(control,'app_read_json')+plain('net_endpoint.c')+plain('maintenance_http.c')+TEST
     cjson=ROOT/'tools/vendor/cJSON';(ROOT/'.tmp').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='maintenance-http-',dir=ROOT/'.tmp') as tmp:
         p=Path(tmp);(p/'test.c').write_text(code,encoding='utf-8');env=dict(os.environ,TEMP=tmp,TMP=tmp,TMPDIR=tmp)

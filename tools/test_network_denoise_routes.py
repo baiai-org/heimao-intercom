@@ -9,6 +9,7 @@ from test_rf_denoise import MAIN, ROOT, HARNESS, compile_executable
 
 FIXTURE = r'''
 #include "net_audio_denoise.h"
+#define audio_spectrum_tap(...) ((void)0)
 enum { PTT_OWNER_NONE, PTT_OWNER_NETWORK, PTT_OWNER_TALK, PTT_TX, VOICE_MONITOR, BLOCK_FRAMES = 256 };
 typedef int ptt_owner_t;
 typedef enum { DENOISE_NET_TX, DENOISE_NET_SPEAKER, DENOISE_NET_RF } denoise_network_path_t;
@@ -54,9 +55,10 @@ static int voice_apply_tx_processing(int16_t *pcm, size_t n) {
     for (size_t i = 0; i < n; ++i) pcm[i] += 13;
     return 10;
 }
-static void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us) {
+static bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us) {
     const bool active = !tail && expires_us > 0;
     assert(active && collect(pcm, n, NULL));
+    return true;
 }
 '''
 

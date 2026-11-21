@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PRELUDE = r'''
 #include "rf_denoise.h"
+#define audio_spectrum_tap(...) ((void)0)
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>

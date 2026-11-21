@@ -326,7 +326,8 @@ import java.util.Date
         }
         else -> Section("网络中继") {
             RelayStatusBanner(NetworkModes.relayStatus(s.status,s.activity.live(s.live),s.connected))
-            Parameter(manager,p,s,"ix_broker","服务器 / 域名与端口",s.status.value("intercom.broker"))
+            Parameter(manager,p,s,"ix_broker","服务器 / 域名与端口",s.status.value("intercom.broker"),
+                hint="例如 relay.example.net 或 relay.example.net:2883，省略端口时使用 1883")
             Parameter(manager,p,s,"ix_user","用户名",s.status.value("intercom.user"))
             Parameter(manager,p,s,"ix_pass","密码",if(s.status.value("intercom.pass")=="1")"已设置" else "",secret=true)
             TextButton(onClick={confirm("清除手台保存的中继密码？",{manager.action(p.id){set("ix_pass","")}})}){Text("清除已保存密码")}
@@ -458,8 +459,8 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
     var labelRevision by remember(p.id,peer.id){mutableLongStateOf(-1)}
     var labelError by remember(p.id,peer.id){mutableStateOf("")}
     var savingLabel by remember(p.id,peer.id){mutableStateOf(false)}
-    val dotColor=when(peer.state){"linked"->green;"knocking"->amber;else->MaterialTheme.colorScheme.outline}
-    val stateColor=when(peer.state){"linked"->green;"knocking"->amber;else->secondary}
+    val dotColor=when(peer.state){"linked"->green;"knocking","resolving","dns_error"->amber;else->MaterialTheme.colorScheme.outline}
+    val stateColor=when(peer.state){"linked"->green;"knocking","resolving","dns_error"->amber;else->secondary}
     Column(verticalArrangement=Arrangement.spacedBy(2.dp)) {
         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
             Box(Modifier.size(8.dp).background(dotColor,CircleShape))
@@ -467,7 +468,11 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
             Spacer(Modifier.weight(1f))
             Text(peer.stateText,color=stateColor,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodySmall)
         }
-        Text(peer.address,fontFamily=FontFamily.Monospace,fontSize=13.sp,color=secondary)
+        if(peer.configuredAddress.isNotBlank()) {
+            Text(peer.configuredAddress,fontFamily=FontFamily.Monospace,fontSize=13.sp,color=secondary)
+        }
+        Text(if(peer.configuredAddress.isNotBlank()) "当前 IP · ${peer.address}" else peer.address,
+            fontFamily=FontFamily.Monospace,fontSize=13.sp,color=secondary)
         Row(verticalAlignment=Alignment.CenterVertically) {
             Text("rtt ${if(peer.rttMs>=0)"${peer.rttMs} ms" else "—"} · rx ${peer.rx} / tx ${peer.tx} / 丢 ${peer.drop}",
                 color=secondary,style=MaterialTheme.typography.bodySmall,modifier=Modifier.weight(1f))
@@ -499,9 +504,10 @@ private fun copyToClipboard(context:android.content.Context,text:String) {
             Text("添加直连对端",style=MaterialTheme.typography.headlineSmall)
             OutlinedTextField(peer,{peer=it;error=""},label={Text(if(longNames)"对端名称，最多24字符" else "对端名称，最多7字节")},singleLine=true,modifier=Modifier.fillMaxWidth())
             if(!longNames&&nameBytes>7)Text("旧固件名称最多7个UTF-8字节",color=red)
-            OutlinedTextField(address,{address=it;error=""},label={Text("对端 IP:端口 / [IPv6]:端口")},singleLine=true,modifier=Modifier.fillMaxWidth(),
+            OutlinedTextField(address,{address=it;error=""},label={Text(if(np.hostnames)"对端域名或 IP，可加端口" else "对端 IP:端口 / [IPv6]:端口")},singleLine=true,modifier=Modifier.fillMaxWidth(),
                 keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
-            Text("填对方控制面板顶部显示的公网地址；端口 54321 可省略。",color=secondary,style=MaterialTheme.typography.bodySmall)
+            Text(if(np.hostnames) "例如 peer.example.net 或 peer.example.net:55000，省略端口时使用 54321"
+                else "填写对方控制面板上的公网地址，端口 54321 可省略",color=secondary,style=MaterialTheme.typography.bodySmall)
             if(error.isNotBlank())Text(error,color=red)
             Button(onClick={
                 if(longNames){try{HandsetName.normalized(peer)}catch(e:IllegalArgumentException){error=e.message ?: "名称无效";return@Button}}

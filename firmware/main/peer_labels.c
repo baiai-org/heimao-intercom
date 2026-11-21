@@ -9,6 +9,10 @@
 
 typedef struct { np_access_record_t ref; char label[PEER_LABEL_BYTES + 1]; } label_entry_t;
 typedef struct { uint32_t format, revision; label_entry_t entries[NP_PEER_LIMIT]; } label_store_t;
+/* labels1 stored the record's old native layout without the DNS key. */
+typedef struct { np_peer_record_t peer; uint8_t mac[6]; } label_ref_v1_t;
+typedef struct { label_ref_v1_t ref; char label[PEER_LABEL_BYTES + 1]; } label_entry_v1_t;
+typedef struct { uint32_t format, revision; label_entry_v1_t entries[NP_PEER_LIMIT]; } label_store_v1_t;
 static label_store_t *s_labels;
 static StaticSemaphore_t s_mutex_storage;
 static SemaphoreHandle_t s_mutex;
@@ -17,6 +21,7 @@ static bool s_dirty;
 
 static bool same_ref(const np_access_record_t *a, const np_access_record_t *b)
 {
+    if (a->dns_key || b->dns_key) { return a->dns_key && a->dns_key == b->dns_key; }
     if (np_access_has_mac(a->mac) && np_access_has_mac(b->mac)) { return !memcmp(a->mac, b->mac, 6); }
     return a->peer.port && a->peer.port == b->peer.port && a->peer.family == b->peer.family &&
         (a->peer.family == 4 || a->peer.family == 6) &&
@@ -28,7 +33,7 @@ static esp_err_t save(const label_store_t *next)
     nvs_handle_t h;
     esp_err_t err = nvs_open("hm_peers", NVS_READWRITE, &h);
     if (err == ESP_OK) {
-        err = nvs_set_blob(h, "labels1", next, sizeof(*next));
+        err = nvs_set_blob(h, "labels2", next, sizeof(*next));
         if (err == ESP_OK) { err = nvs_commit(h); }
         nvs_close(h);
     }
@@ -40,23 +45,42 @@ esp_err_t peer_labels_init(void)
     s_mutex = xSemaphoreCreateMutexStatic(&s_mutex_storage);
     s_labels = heap_caps_calloc(1, sizeof(*s_labels), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_mutex || !s_labels) { return s_error = ESP_ERR_NO_MEM; }
-    s_labels->format = 1;
+    s_labels->format = 2;
     nvs_handle_t h;
     s_error = nvs_open("hm_peers", NVS_READONLY, &h);
     if (s_error == ESP_ERR_NVS_NOT_FOUND) { return s_error = ESP_OK; }
     if (s_error != ESP_OK) { return s_error; }
     size_t n = sizeof(*s_labels);
-    s_error = nvs_get_blob(h, "labels1", s_labels, &n);
+    s_error = nvs_get_blob(h, "labels2", s_labels, &n);
+    if (s_error == ESP_ERR_NVS_NOT_FOUND) {
+        label_store_v1_t *old = heap_caps_malloc(sizeof(*old), MALLOC_CAP_SPIRAM);
+        if (!old) { nvs_close(h); return s_error = ESP_ERR_NO_MEM; }
+        size_t bytes = sizeof(*old);
+        s_error = nvs_get_blob(h, "labels1", old, &bytes);
+        if (s_error == ESP_OK) {
+            if (bytes != sizeof(*old) || old->format != 1) { s_error = ESP_ERR_INVALID_STATE; }
+            else {
+                s_labels->revision = old->revision;
+                for (unsigned i = 0; i < NP_PEER_LIMIT; ++i) {
+                    s_labels->entries[i].ref.peer = old->entries[i].ref.peer;
+                    memcpy(s_labels->entries[i].ref.mac, old->entries[i].ref.mac, 6);
+                    memcpy(s_labels->entries[i].label, old->entries[i].label, sizeof(old->entries[i].label));
+                }
+                n = sizeof(*s_labels);
+            }
+        }
+        heap_caps_free(old);
+    }
     nvs_close(h);
     if (s_error == ESP_ERR_NVS_NOT_FOUND) {
-        memset(s_labels, 0, sizeof(*s_labels)); s_labels->format = 1; return s_error = ESP_OK;
+        memset(s_labels, 0, sizeof(*s_labels)); s_labels->format = 2; return s_error = ESP_OK;
     }
     if (s_error != ESP_OK) { return s_error; }
-    if (n != sizeof(*s_labels) || s_labels->format != 1) { return s_error = ESP_ERR_INVALID_STATE; }
+    if (n != sizeof(*s_labels) || s_labels->format != 2) { return s_error = ESP_ERR_INVALID_STATE; }
     for (unsigned i = 0; i < NP_PEER_LIMIT; ++i) {
         const label_entry_t *e = &s_labels->entries[i];
         if (!memchr(e->label, 0, sizeof(e->label)) || !device_name_validate(e->label) ||
-            (e->label[0] && !np_access_has_mac(e->ref.mac) &&
+            (e->label[0] && !e->ref.dns_key && !np_access_has_mac(e->ref.mac) &&
              (!e->ref.peer.port || (e->ref.peer.family != 4 && e->ref.peer.family != 6)))) {
             return s_error = ESP_ERR_INVALID_STATE;
         }
