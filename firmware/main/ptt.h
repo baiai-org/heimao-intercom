@@ -63,6 +63,7 @@ ptt_owner_t ptt_owner(void);
 uint32_t ptt_owner_token(void);
 const char *ptt_owner_name(void);
 bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on);
+void ptt_sdr_unkey(uint32_t token);
 /* Starts the logical transmission window when the source has no RF output. */
 bool ptt_session_start(ptt_owner_t owner, uint32_t token);
 int64_t ptt_speech_deadline_us(ptt_owner_t owner, uint32_t token);

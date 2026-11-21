@@ -1534,9 +1534,10 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
         "\"connections\":{\"http_clients\":%d,\"https_clients\":%d,\"https_errors\":%u,"
         "\"https_open_events\":%u,\"https_close_events\":%u,\"last_error\":%d,\"last_tls_error\":%d},"
         "\"rf_config\":%s,\"tx_timeout_s\":%u,"
-        "\"tx_audio\":{\"sdr\":{\"token\":%u,\"received\":%u,\"rejected\":%u,\"routed\":%u,\"pending\":%u},"
+        "\"tx_audio\":{\"sdr\":{\"token\":%u,\"received\":%u,\"rejected\":%u,\"routed\":%u,\"pending\":%u,"
+        "\"rf_submitted\":%u,\"net_submitted\":%u,\"rf_abandoned\":%u,\"net_abandoned\":%u,\"rf_end\":\"%s\",\"net_end\":\"%s\"},"
         "\"sdr_rf\":{\"token\":%u,\"written\":%u,\"write_errors\":%u,\"underruns\":%u,\"resumes\":%u,\"last_resume_us\":%lld},"
-        "\"bridge\":{\"over\":%u,\"captured\":%u,\"submitted\":%u,\"rejected\":%u},"
+        "\"bridge\":{\"over\":%u,\"captured\":%u,\"submitted\":%u,\"rejected\":%u,\"end_reason\":\"%s\"},"
         "\"network\":{\"mode\":%u,\"accepted\":%u,\"rejected\":%u,\"expired_frames\":%u,\"encode_errors\":%u,\"send_errors\":%u}},"
         "\"event_sequence\":%" PRIu32 ",\"events\":[",
         device_identity_id(), esp_app_get_description()->version, (uint32_t)(esp_timer_get_time()/1000),
@@ -1549,10 +1550,14 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
         atomic_load(&s_https_error), atomic_load(&s_https_tls_error), config, tx_timeout_seconds(),
         (unsigned)sdr_audio.token, (unsigned)sdr_audio.received_samples, (unsigned)sdr_audio.rejected_samples,
         (unsigned)sdr_audio.routed_samples, (unsigned)sdr_audio.pending_samples,
+        (unsigned)sdr_audio.rf_submitted, (unsigned)sdr_audio.network_submitted,
+        (unsigned)sdr_audio.rf_abandoned, (unsigned)sdr_audio.network_abandoned,
+        sdr_audio.rf_end ? sdr_audio.rf_end : "idle", sdr_audio.network_end ? sdr_audio.network_end : "idle",
         (unsigned)sdr_rf.token, (unsigned)sdr_rf.written_samples, (unsigned)sdr_rf.write_errors,
         (unsigned)sdr_rf.underruns, (unsigned)sdr_rf.resumes, (long long)sdr_rf.last_resume_us,
         (unsigned)bridge_audio.starts, (unsigned)bridge_audio.captured_samples, (unsigned)bridge_audio.submitted_samples,
-        (unsigned)bridge_audio.rejected_samples, (unsigned)netcom_mode(), (unsigned)network_audio.accepted_samples,
+        (unsigned)bridge_audio.rejected_samples, bridge_audio.end_reason ? bridge_audio.end_reason : "none",
+        (unsigned)netcom_mode(), (unsigned)network_audio.accepted_samples,
         (unsigned)network_audio.rejected_samples, (unsigned)network_audio.expired_frames,
         (unsigned)network_audio.encode_errors, (unsigned)network_audio.send_errors, sequence);
     for (size_t i = 0; i < n && used < JSON_CAPACITY; ++i) {
@@ -2813,8 +2818,15 @@ static void sdr_reply_json(char *reply, size_t n, bool ok, uint32_t id, bool act
     } else { snprintf(reply, n, "%s", state); }
 }
 
+static void sdr_tcp_low_latency(int fd)
+{
+    const int enabled = 1;
+    if (fd >= 0) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)); }
+}
+
 static esp_err_t sdr_reply(httpd_req_t *req, bool ok, uint32_t id)
 {
+    sdr_tcp_low_latency(httpd_req_to_sockfd(req));
     char reply[256 + RADIO_ACTIVITY_JSON_SIZE];
     sdr_reply_json(reply, sizeof(reply), ok, id, query_int(req, "activity", 0, NULL) == 1);
     return send_json(req, reply);
@@ -2949,6 +2961,9 @@ typedef struct {
     bool activity;
     uint32_t activity_signature;
     int64_t activity_sent_us;
+    bool txack;
+    uint32_t ack_tx;
+    int64_t ack_us;
 } sdr_ws_context_t;
 
 static void sdr_ws_context_free(void *arg)
@@ -2967,7 +2982,9 @@ static esp_err_t h_ws_sdr(httpd_req_t *req)
         ctx->server = req->handle; ctx->fd = fd; ctx->sid = sdr_query_id(req, "sid");
         ctx->control_generation = app_control_generation();
         ctx->activity = query_int(req, "activity", 0, NULL) == 1;
+        ctx->txack = query_int(req, "txack", 0, NULL) == 1;
         if (!sdr_ws_attach(req->handle, fd, ctx->sid)) { free(ctx); return ESP_FAIL; }
+        if (ctx->txack) { sdr_tcp_low_latency(fd); }
         req->sess_ctx = ctx; req->free_ctx = sdr_ws_context_free;
         return ESP_OK;
     }
@@ -3017,7 +3034,23 @@ static esp_err_t h_ws_sdr(httpd_req_t *req)
         const uint32_t tx = (uint32_t)buf[4] | (uint32_t)buf[5]<<8 |
                             (uint32_t)buf[6]<<16 | (uint32_t)buf[7]<<24;
         if (csid != sid) { return ESP_FAIL; }
-        if (sdr_tx_push_bytes(sid, tx, buf+8, f.len-8)) { sdr_note_ws_frame(f.len-8); }
+        if (sdr_tx_push_bytes(sid, tx, buf+8, f.len-8)) {
+            sdr_note_ws_frame(f.len-8);
+            if (ctx->txack) {
+                const int64_t now = esp_timer_get_time();
+                uint32_t samples;
+                if ((ctx->ack_tx != tx || now - ctx->ack_us >= 160000) &&
+                    sdr_tx_received(sid, tx, &samples)) {
+                    char reply[80];
+                    snprintf(reply, sizeof(reply), "{\"sid\":%" PRIu32 ",\"tx\":%" PRIu32 ",\"pcm\":%" PRIu32 "}",
+                             sid, tx, samples);
+                    httpd_ws_frame_t ack = {.type=HTTPD_WS_TYPE_TEXT, .final=true,
+                                           .payload=(uint8_t *)reply, .len=strlen(reply)};
+                    if ((err = httpd_ws_send_frame(req, &ack)) != ESP_OK) { return err; }
+                    ctx->ack_tx = tx; ctx->ack_us = now;
+                }
+            }
+        }
     }
     /* Opt-in, bounded state frames on the existing heartbeat/PCM exchange.
      * Send only on change or once per second, including silent RX. Never send
@@ -3128,20 +3161,63 @@ static esp_err_t h_sdr_tx(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid PCM length"); return ESP_FAIL;
     }
     if (!sdr_session_valid(sid)) { return ESP_FAIL; }
+    const int fd = httpd_req_to_sockfd(req);
+    sdr_tcp_low_latency(fd);
+    char position[16];
+    query_str(req, "offset", position, sizeof(position));
+    uint32_t offset = SDR_TX_APPEND;
+    if (position[0]) {
+        char *end;
+        const unsigned long long parsed = strtoull(position, &end, 10);
+        if (position[0] < '0' || position[0] > '9' || *end || parsed >= UINT32_MAX - 4096) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid PCM offset"); return ESP_FAIL;
+        }
+        offset = (uint32_t)parsed;
+    }
+    /* An incomplete retryable body should release the HTTP worker quickly.
+     * Legacy clients keep the configured socket timeout. */
+    struct timeval old_timeout;
+    socklen_t timeout_len = sizeof(old_timeout);
+    const struct timeval pcm_timeout = {.tv_sec=0, .tv_usec=200000};
+    const bool restore_timeout = offset != SDR_TX_APPEND && fd >= 0 &&
+        getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, &timeout_len) == 0 &&
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &pcm_timeout, sizeof(pcm_timeout)) == 0;
+    const bool timing = query_int(req, "timing", 0, NULL) == 1;
+    int64_t recv_us = 0, enqueue_us = 0;
     uint8_t buf[513]; size_t carry = 0, left = (size_t)req->content_len;
     while (left) {
         const size_t want = left < 512 ? left : 512;
+        const int64_t before = timing ? esp_timer_get_time() : 0;
         const int r = httpd_req_recv(req, (char *)buf+carry, want);
         if (r <= 0) { return ESP_FAIL; }
         left -= (size_t)r;
         const size_t total = carry + (size_t)r, even = total & ~(size_t)1;
         /* TCP fragments can end halfway through a sample. Carry that byte
          * across reads and validate this same TX token on EVERY fragment. */
-        if (even && !sdr_tx_push_bytes(sid, tx, buf, even)) { return ESP_FAIL; }
+        const int64_t received = timing ? esp_timer_get_time() : 0;
+        if (even && !sdr_tx_push_bytes_at(sid, tx, buf, even, offset)) { return ESP_FAIL; }
+        if (offset != SDR_TX_APPEND) { offset += even / 2; }
+        if (timing) {
+            recv_us += received - before;
+            enqueue_us += esp_timer_get_time() - received;
+        }
         carry = total - even;
         if (carry) { buf[0] = buf[even]; }
     }
+    if (restore_timeout) { (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, timeout_len); }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    uint32_t samples;
+    char ack[16], phases[96];
+    if (sdr_tx_received(sid, tx, &samples)) {
+        snprintf(ack, sizeof(ack), "%" PRIu32, samples);
+        httpd_resp_set_hdr(req, "X-ORL-TX-Samples", ack);
+    }
+    if (timing) {
+        snprintf(phases, sizeof(phases), "recv;dur=%lld.%03lld, enqueue;dur=%lld.%03lld",
+                 (long long)(recv_us/1000), (long long)(recv_us%1000),
+                 (long long)(enqueue_us/1000), (long long)(enqueue_us%1000));
+        httpd_resp_set_hdr(req, "Server-Timing", phases);
+    }
     return httpd_resp_send(req, NULL, 0);
 }
 

@@ -359,6 +359,18 @@ bool ptt_source_key(ptt_owner_t owner, uint32_t token, bool on)
     return ok;
 }
 
+/* The browser may finish its RF branch while network audio is still draining. */
+void ptt_sdr_unkey(uint32_t token)
+{
+    ptt_control_lock();
+    if (ptt_owned(PTT_OWNER_SDR, token)) {
+        s_bridge_keyed = false;
+        s_bridge_until_us = 0;
+        pad_apply();
+    }
+    ptt_control_unlock();
+}
+
 void ptt_bridge_key(bool on)
 {
     (void)ptt_source_key(PTT_OWNER_NETWORK, 1, on);

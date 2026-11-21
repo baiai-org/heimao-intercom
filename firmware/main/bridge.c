@@ -73,6 +73,7 @@ static uint8_t s_rx_denoise_mode;
 static uint16_t s_rx_room;
 static int s_rx_chan;
 static bool s_rx_room_changing;
+static bool s_rx_configuring;
 static tx_timeout_window_t s_rx_window;
 static bool s_rx_limited;
 static int s_rx_tail_id;
@@ -94,12 +95,13 @@ static void rx_tx_unlock(void)
 }
 
 /* Send exactly one PTT=0 frame for the current RF -> network stream. */
-static void bridge_rx_end_locked(void)
+static void bridge_rx_end_locked(const char *reason)
 {
     if (!s_rx.open) {
         return;
     }
     s_rx.end_ms = esp_timer_get_time() / 1000;
+    if (reason) { s_rx.end_reason = reason; }
     const bool with_tail = s_rx_tail_pos != 0;
     if (netcom_mode() == s_rx_mode && netcom_room() == s_rx_room) {
         netcom_tx_end();
@@ -114,20 +116,20 @@ static void bridge_rx_end_locked(void)
     ++s_rx_generation;
     ++s_rx.ends;
     ptt_trace_note(PTT_TRACE_RFNET_OFF, netcom_mode(), s_rx.ends, with_tail ? 1 : 0);
-    ESP_LOGI(TAG, "RF->NET PTT end");
+    ESP_LOGI(TAG, "RF->NET PTT end: %s", s_rx.end_reason);
 }
 
 void bridge_rx_end(void)
 {
     rx_tx_lock();
-    bridge_rx_end_locked();
+    bridge_rx_end_locked("capture_stop");
     rx_tx_unlock();
 }
 
 void bridge_rx_inhibit(void)
 {
     rx_tx_lock();
-    bridge_rx_end_locked();
+    bridge_rx_end_locked(ptt_owner() != PTT_OWNER_NONE ? "local_ptt" : "rx_guard");
     rx_tx_unlock();
 }
 
@@ -135,7 +137,23 @@ void bridge_rx_room_change(bool changing)
 {
     rx_tx_lock();
     s_rx_room_changing = changing;
-    if (changing) { bridge_rx_end_locked(); }
+    if (changing) { bridge_rx_end_locked("room_change"); }
+    rx_tx_unlock();
+}
+
+bool bridge_rf_config_begin(void)
+{
+    rx_tx_lock();
+    const bool ok = !s_rx.open && !s_rx_configuring;
+    if (ok) { s_rx_configuring = true; }
+    rx_tx_unlock();
+    return ok;
+}
+
+void bridge_rf_config_end(void)
+{
+    rx_tx_lock();
+    s_rx_configuring = false;
     rx_tx_unlock();
 }
 
@@ -474,7 +492,7 @@ void bridge_apply(void)
         const bool was_active = s_active;
         /* Block new samples before sending the end marker or stopping capture. */
         s_active = false;
-        bridge_rx_end_locked();
+        bridge_rx_end_locked("route");
         rx_tx_unlock();
         if (was_active) {
             if (ptt_bridge_keyed()) {
@@ -526,10 +544,18 @@ esp_err_t bridge_channel_selected(int index, bool bind_bridge)
 
 static bool denoised_route_ready(void)
 {
-    return s_active && !s_rx_room_changing && s_rx_denoise_mode == netcom_mode() &&
+    return s_active && !s_rx_configuring && !s_rx_room_changing && s_rx_denoise_mode == netcom_mode() &&
            s_rx_room == netcom_room() && s_rx_chan == s_chan && netcom_engine_running() &&
            sa818_cfg_tx_ready() && ptt_owner() == PTT_OWNER_NONE &&
            !(rx_guard_blocked() & RX_GUARD_OUT_NET);
+}
+
+static const char *bridge_rx_interrupt_reason(void)
+{
+    if (s_rx_configuring || !sa818_cfg_tx_ready()) { return "rf_config"; }
+    if (rx_guard_blocked() & RX_GUARD_OUT_NET) { return "rx_guard"; }
+    if (ptt_owner() != PTT_OWNER_NONE) { return "local_ptt"; }
+    return "route";
 }
 
 static bool bridge_rx_submit_speech_locked(const int16_t *pcm, size_t n)
@@ -540,7 +566,7 @@ static bool bridge_rx_submit_speech_locked(const int16_t *pcm, size_t n)
     }
     s_rx.rejected_samples += (uint32_t)n;
     s_rx_limited = true;
-    bridge_rx_end_locked();
+    bridge_rx_end_locked("network_queue");
     ESP_LOGW(TAG, "RF->NET send queue exhausted");
     return false;
 }
@@ -553,7 +579,7 @@ static bool denoised_emit(const int16_t *pcm, size_t n, void *context)
     const bool allowed = same_stream && denoised_route_ready();
     bool submitted = false;
     if (allowed) { submitted = bridge_rx_submit_speech_locked(pcm, n); }
-    else if (same_stream) { bridge_rx_end_locked(); }
+    else if (same_stream) { bridge_rx_end_locked(bridge_rx_interrupt_reason()); }
     rx_tx_unlock();
     return submitted;
 }
@@ -564,7 +590,7 @@ static void bridge_rx_tail_step_locked(int64_t now)
 {
     const size_t total = tail_samples(s_rx_tail_id);
     if (now >= s_rx_window.release_us || s_rx_tail_pos >= total) {
-        bridge_rx_end_locked();
+        bridge_rx_end_locked(s_rx_tail_pos < total ? "tail_timeout" : NULL);
         return;
     }
     if (now < s_rx_tail_next_us) { return; }
@@ -574,7 +600,7 @@ static void bridge_rx_tail_step_locked(int64_t now)
     if (!netcom_tx_room(size, true, s_rx_window.release_us)) { return; }
     const size_t n = tail_fetch(s_rx_tail_id, s_rx_tail_pos, tail, size);
     if (!n) {
-        bridge_rx_end_locked();
+        bridge_rx_end_locked("tail_unavailable");
         return;
     }
     if (netcom_tx_sample_until(tail, n, true, s_rx_window.release_us)) {
@@ -585,13 +611,14 @@ static void bridge_rx_tail_step_locked(int64_t now)
     }
 }
 
-static void bridge_rx_begin_tail_locked(int64_t now)
+static void bridge_rx_begin_tail_locked(int64_t now, bool limit)
 {
+    s_rx.end_reason = limit ? "speech_limit" : "cos";
     s_rx_tail_id = tail_id_for_mode(s_rx_mode);
     s_rx_tail_next_us = now;
     const int64_t release_us = now + (int64_t)TX_TIMEOUT_TAIL_MS * 1000;
     if (s_rx_window.release_us > release_us) { s_rx_window.release_us = release_us; }
-    if (s_rx_tail_id == TAIL_OFF) { bridge_rx_end_locked(); }
+    if (s_rx_tail_id == TAIL_OFF) { bridge_rx_end_locked(NULL); }
     else { bridge_rx_tail_step_locked(now); }
 }
 
@@ -599,14 +626,15 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
 {
     rx_tx_lock();
     const bool inhibited = (rx_guard_blocked() & RX_GUARD_OUT_NET) != 0;
-    const bool allowed = s_active && sa818_cfg_tx_ready() && enabled &&
+    const bool allowed = s_active && !s_rx_configuring && sa818_cfg_tx_ready() && enabled &&
                          ptt_owner() == PTT_OWNER_NONE && !inhibited;
     uint32_t generation = s_rx_generation;
     const int64_t now = esp_timer_get_time();
     if (s_rx_tail_id != TAIL_OFF) {
-        if (!allowed || s_rx_mode != netcom_mode() || s_rx_room != netcom_room() ||
-            (squelch_open && !s_rx_limited)) {
-            bridge_rx_end_locked();
+        if (!allowed || s_rx_mode != netcom_mode() || s_rx_room != netcom_room()) {
+            bridge_rx_end_locked(bridge_rx_interrupt_reason());
+        } else if (squelch_open && !s_rx_limited) {
+            bridge_rx_end_locked("cos_reopen");
         } else {
             bridge_rx_tail_step_locked(now);
             rx_tx_unlock();
@@ -619,7 +647,7 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         return;
     }
     if (s_rx_denoise_mode && (!allowed || !denoised_route_ready())) {
-        bridge_rx_end_locked();
+        bridge_rx_end_locked(bridge_rx_interrupt_reason());
         rx_tx_unlock();
         return;
     }
@@ -631,8 +659,8 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
     if (!allowed || !squelch_open || limit) {
         const bool drain = allowed && s_rx_denoise_mode;
         if (!s_rx.open || !drain) {
-            if (s_rx.open && allowed) { bridge_rx_begin_tail_locked(now); }
-            else { bridge_rx_end_locked(); }
+            if (s_rx.open && allowed) { bridge_rx_begin_tail_locked(now, limit); }
+            else { bridge_rx_end_locked(bridge_rx_interrupt_reason()); }
             rx_tx_unlock();
             return;
         }
@@ -643,8 +671,8 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
         rx_tx_lock();
         if (s_rx.open && s_rx_generation == generation) {
             const bool with_tail = drained && denoised_route_ready();
-            if (with_tail) { bridge_rx_begin_tail_locked(esp_timer_get_time()); }
-            else { bridge_rx_end_locked(); }
+            if (with_tail) { bridge_rx_begin_tail_locked(esp_timer_get_time(), limit); }
+            else { bridge_rx_end_locked(bridge_rx_interrupt_reason()); }
         }
         rx_tx_unlock();
         return;
@@ -670,6 +698,7 @@ void bridge_rx_tap(const int16_t *pcm, size_t n, bool squelch_open, bool enabled
             s_rx_chan = s_chan;
         }
         s_rx.open = true;
+        s_rx.end_reason = NULL;
         s_rx.captured_samples = s_rx.submitted_samples = s_rx.rejected_samples = 0;
         s_rx_window = tx_timeout_window(now, tx_timeout_seconds());
         s_rx.start_ms = now / 1000;

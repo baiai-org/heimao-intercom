@@ -76,6 +76,8 @@ void board_sa818_power(bool);
 void board_sa818_high_power(bool);
 int64_t esp_timer_get_time(void);
 void bridge_apply(void);
+bool bridge_rf_config_begin(void);
+void bridge_rf_config_end(void);
 #define PTT_IDLE 0
 int ptt_get_state(void);
 bool voice_module_squelch_open(void);
@@ -98,6 +100,7 @@ _Static_assert(offsetof(sa818_cfg_t, tx_mhz) == 4, "legacy field moved");
 _Static_assert(offsetof(sa818_cfg_t, filter_lowpass) == 52, "legacy field moved");
 static sa818_cfg_t stored;
 static bool have_blob, have_band, fail_store;
+static bool bridge_open, bridge_reserved;
 static uint8_t stored_band;
 static unsigned blob_writes, band_writes, commands, command_step;
 static int fail_ack;
@@ -107,6 +110,12 @@ static int pin_level[64], pin_mode[64];
 static bool pull_up[64], pull_down[64];
 int64_t esp_timer_get_time(void) { return 0; }
 void bridge_apply(void) {}
+bool bridge_rf_config_begin(void) {
+    assert(!bridge_reserved);
+    if (bridge_open) return false;
+    return bridge_reserved = true;
+}
+void bridge_rf_config_end(void) { assert(bridge_reserved); bridge_reserved = false; }
 int ptt_get_state(void) { return board_ptt_is_asserted() ? 1 : PTT_IDLE; }
 bool voice_module_squelch_open(void) { return false; }
 bool voice_rf_carrier_present(void) { return false; }
@@ -262,6 +271,11 @@ int main(int argc, char **argv) {
     }
     puts("PASS: module high-pass bypass for boot/channel profiles; RF fields and other filters preserved");
     assert(sa818_cfg_update(&cfg, log, sizeof(log)) == ESP_OK && sa818_cfg_tx_ready());
+    const unsigned old_commands = commands, old_writes = blob_writes;
+    bridge_open = true;
+    assert(sa818_cfg_set_squelch(8, log, sizeof(log)) == ESP_ERR_INVALID_STATE);
+    assert(strstr(log, "模拟桥接") && commands == old_commands && blob_writes == old_writes && sa818_cfg_tx_ready());
+    bridge_open = false;
     sa818_cfg_t last = stored, invalid = cfg; invalid.rx_mhz = 145;
     unsigned writes = blob_writes, sent = commands;
     assert(sa818_cfg_update(&invalid, log, sizeof(log)) != ESP_OK);

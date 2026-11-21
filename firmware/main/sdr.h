@@ -47,6 +47,8 @@ bool sdr_client_close(uint32_t sid, bool force);
 uint32_t sdr_current_session(void);
 typedef struct {
     uint32_t token, received_samples, rejected_samples, routed_samples, pending_samples;
+    uint32_t rf_submitted, network_submitted, rf_abandoned, network_abandoned;
+    const char *rf_end, *network_end;
 } sdr_tx_audio_stats_t;
 void sdr_tx_audio_stats(sdr_tx_audio_stats_t *out);
 bool sdr_session_valid(uint32_t sid);
@@ -58,7 +60,10 @@ void sdr_state_json(char *buf, size_t n, bool accepted, uint32_t request);
 bool sdr_ws_client_attached(void);
 
 /* Browser microphone audio (raw little-endian PCM16 payload). */
+#define SDR_TX_APPEND UINT32_MAX
 bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len);
+bool sdr_tx_push_bytes_at(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len, uint32_t offset);
+bool sdr_tx_received(uint32_t sid, uint32_t tx, uint32_t *samples);
 
 /* RF-audio tap, called from the monitor task once per output block.
  * `enabled` is false for audio that must not leave the board (module squelch

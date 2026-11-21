@@ -52,7 +52,7 @@ function runtime() {
     part('async function loadBridgeChans()', 'const rxGuardViews') +
     part('const CH_MAX = 99;', '/* Filtered client-side:') +
     part('const tailModeControls', "$('ixTailSel').onchange") +
-    part('async function refresh() {', 'setInterval(refreshMeter,') +
+    part('async function refresh() {', '// The SDR state poll stays active;') +
     '\nglobalThis.api = {panelReadJson, loadPanelLists, loadChannels, loadBridgeChans, refresh,' +
     'flags: () => ({tonesReady,dcsReady,channelsReady,panelOnline,panelRefreshBusy})};', context);
   Object.assign(state, context.api); state.elements = elements; state.window = context.window;

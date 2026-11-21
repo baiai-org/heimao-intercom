@@ -55,6 +55,9 @@ static bool s_ws_dead;
  * button is held must not move an already-running stream between RF and net. */
 static bool s_net_tx;
 static bool s_rf_tx;
+static bool s_rf_tail_started;
+static size_t s_tail_samples, s_net_tail_pos;
+static int64_t s_net_tail_due_us;
 static int64_t s_release_started_us;
 static int64_t s_ptt_started_us, s_pcm_us, s_client_us, s_ws_last_us;
 static uint32_t s_session, s_client, s_tx_id;
@@ -83,7 +86,8 @@ static bool          s_inited;
 static int16_t *s_rx_ring;
 static int16_t *s_tx_ring;
 static monitor_rx_t s_monitor;
-static volatile size_t s_tx_head, s_tx_tail;
+/* s_key protects the writer, the EQ cursor, and the two destination cursors. */
+static size_t s_tx_head, s_tx_ready, s_tx_rf_read, s_tx_net_read;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 /* The RX ring and its RF/network arbitration share s_mux. Local microphone
  * TX stays muted through its release tail; NETWORK-owned RF TX is audible. */
@@ -104,6 +108,8 @@ static volatile uint32_t s_tx_pkts;
 static volatile uint32_t s_tx_dry;
 static volatile uint32_t s_tx_samples;
 static uint32_t s_tx_received_samples, s_tx_rejected_samples, s_tx_routed_samples;
+static uint32_t s_tx_rf_submitted, s_tx_net_submitted, s_tx_rf_abandoned, s_tx_net_abandoned;
+static const char *s_rf_end = "idle", *s_net_end = "idle";
 static volatile uint32_t s_ws_frames;   /* audio frames from the page */
 static volatile uint32_t s_ws_bytes;
 static volatile uint32_t s_ws_send_err; /* frames the socket refused */
@@ -136,7 +142,6 @@ void sdr_init(void)
     }
     monitor_rx_init(&s_monitor, s_rx_ring, SDR_RX_RING_SAMPLES);
     monitor_rx_mode(&s_monitor, netcom_mode());
-    s_tx_head = s_tx_tail = 0;
     s_session = esp_random();
     if (!s_session) { s_session = 1; }
     s_inited = true;
@@ -144,49 +149,24 @@ void sdr_init(void)
              (unsigned)SDR_RX_RING_SAMPLES, (unsigned)SDR_TX_RING_SAMPLES);
 }
 
-/* Append to a ring; when it is full the OLDEST audio is dropped so the
- * backlog (and therefore the latency) stays bounded. */
-static void ring_put(int16_t *ring, size_t cap, volatile size_t *head,
-                     volatile size_t *tail, const int16_t *pcm, size_t n,
-                     volatile uint32_t *drop_ctr)
+static void tx_ring_write(size_t offset, const int16_t *pcm, size_t n)
 {
-    if (!ring || !pcm || n == 0 || n > cap) {
-        return;
-    }
-    portENTER_CRITICAL(&s_mux);
-    size_t used = *head - *tail;
-    if (used + n > cap) {
-        const size_t drop = used + n - cap;
-        *tail += drop;              /* drop oldest */
-        if (drop_ctr) {
-            *drop_ctr += (uint32_t)drop;
-        }
-    }
-    for (size_t i = 0; i < n; ++i) {
-        ring[(*head) % cap] = pcm[i];
-        (*head)++;
-    }
-    portEXIT_CRITICAL(&s_mux);
+    const size_t start = offset % SDR_TX_RING_SAMPLES;
+    const size_t before_wrap = SDR_TX_RING_SAMPLES - start;
+    const size_t first = n < before_wrap ? n : before_wrap;
+    memcpy(s_tx_ring + start, pcm, first * sizeof(*pcm));
+    memcpy(s_tx_ring, pcm + first, (n - first) * sizeof(*pcm));
 }
 
-/* Take up to n samples; returns how many were copied (0 when empty). */
-static size_t ring_take(int16_t *ring, size_t cap, volatile size_t *head,
-                        volatile size_t *tail, int16_t *out, size_t n)
+static size_t tx_ring_read(size_t offset, size_t available, int16_t *pcm)
 {
-    if (!ring || !out || n == 0) {
-        return 0;
-    }
-    portENTER_CRITICAL(&s_mux);
-    size_t used = *head - *tail;
-    if (used > n) {
-        used = n;
-    }
-    for (size_t i = 0; i < used; ++i) {
-        out[i] = ring[(*tail) % cap];
-        (*tail)++;
-    }
-    portEXIT_CRITICAL(&s_mux);
-    return used;
+    const size_t n = available < SDR_PKT_SAMPLES ? available : SDR_PKT_SAMPLES;
+    const size_t start = offset % SDR_TX_RING_SAMPLES;
+    const size_t before_wrap = SDR_TX_RING_SAMPLES - start;
+    const size_t first = n < before_wrap ? n : before_wrap;
+    memcpy(pcm, s_tx_ring + start, first * sizeof(*pcm));
+    memcpy(pcm + first, s_tx_ring, (n - first) * sizeof(*pcm));
+    return n;
 }
 
 /* ------------------------------------------------------------- rx (board) */
@@ -252,11 +232,29 @@ static bool session_locked(uint32_t sid)
 
 static size_t tx_level_locked(void)
 {
-    size_t n;
-    portENTER_CRITICAL(&s_mux);
-    n = s_tx_head - s_tx_tail;
-    portEXIT_CRITICAL(&s_mux);
-    return n;
+    size_t pending = s_tx_head - s_tx_ready;
+    const size_t rf = s_tx_head - s_tx_rf_read, net = s_tx_head - s_tx_net_read;
+    if (s_rf_tx && rf > pending) { pending = rf; }
+    if (s_net_tx && net > pending) { pending = net; }
+    return pending;
+}
+
+static void stop_net_locked(const char *reason)
+{
+    if (!s_net_tx) { return; }
+    s_net_tx = false;
+    s_net_end = reason;
+    s_tx_net_abandoned = (uint32_t)(s_tx_head - s_tx_net_read);
+    netcom_tx_end();
+}
+
+static void stop_rf_locked(const char *reason)
+{
+    if (!s_rf_tx) { return; }
+    s_rf_tx = false;
+    s_rf_end = reason;
+    s_tx_rf_abandoned = (uint32_t)(s_tx_head - s_tx_rf_read);
+    voice_sdr_rf_end(s_tx_id);
 }
 
 /* Forced release used by safety paths (owner loss, disconnect, watchdog and
@@ -268,13 +266,12 @@ static void release_locked(const char *reason)
      * with had_pcm=false and tail=false is the "carrier but no tone" case. */
     const int64_t now_us = esp_timer_get_time();
     const bool was_tx = s_ptt_started_us != 0;
-    s_last_tx_ms = s_ptt_started_us
-        ? (uint32_t)((now_us - s_ptt_started_us) / 1000) : 0;
-    s_last_rel_ms = (uint32_t)(now_us / 1000);
-    s_last_had_pcm = s_pcm_ever;
-    s_last_tail = s_tail_started;
-    strlcpy(s_last_reason, reason ? reason : "?", sizeof(s_last_reason));
     if (was_tx) {
+        s_last_tx_ms = (uint32_t)((now_us - s_ptt_started_us) / 1000);
+        s_last_rel_ms = (uint32_t)(now_us / 1000);
+        s_last_had_pcm = s_pcm_ever;
+        s_last_tail = s_tail_started;
+        strlcpy(s_last_reason, reason ? reason : "?", sizeof(s_last_reason));
         ++s_rel_total;
         if (s_tail_started) { ++s_rel_tail; } else { ++s_rel_notail; }
         if (reason && !strcmp(reason, "pcm_timeout")) { ++s_rel_pcm_timeout; }
@@ -288,15 +285,8 @@ static void release_locked(const char *reason)
     /* Flush the network accumulator before dropping the SDR owner.  This is
      * also used by safety/disconnect paths, so a peer can never retain the
      * browser PTT until its timeout. */
-    if (s_net_tx) {
-        netcom_tx_end();
-    }
-    /* Browser network-only TX temporarily disables physical RF keying.  The
-     * setting is restored before the owner is released so the next source
-     * starts from the normal receive-safe default. */
-    if (s_net_tx && !s_rf_tx) {
-        ptt_set_rf_keying(true);
-    }
+    stop_rf_locked(reason);
+    stop_net_locked(reason);
     /* Release the PTT owner even if s_tx_id was left ahead of it by a
      * rejected ON: ptt_release() matches the token exactly. */
     uint32_t end_token = s_tx_id;
@@ -313,12 +303,10 @@ static void release_locked(const char *reason)
     s_tail_started = false;
     s_limit_release = false;
     s_tail_drain_us = 0;
-    s_net_tx = false;
-    s_rf_tx = false;
     s_end_reason = reason;
     s_release_cause = NULL;
+    s_tx_ready = s_tx_rf_read = s_tx_net_read = s_tx_head;
     portENTER_CRITICAL(&s_mux);
-    s_tx_tail = s_tx_head;
     monitor_rx_local_tx(&s_monitor, false);
     portEXIT_CRITICAL(&s_mux);
 }
@@ -333,8 +321,12 @@ static void request_release_locked(const char *reason)
     s_ptt_hold = false;
     s_releasing = true;
     s_tail_started = false;
+    s_rf_tail_started = false;
     s_limit_release = !strcmp(reason, "hold_limit");
     s_tail_drain_us = 0;
+    s_tail_samples = voice_sdr_tail_samples();
+    s_net_tail_pos = 0;
+    s_net_tail_due_us = 0;
     s_release_started_us = esp_timer_get_time();
     s_release_cause = s_end_reason = reason;
 }
@@ -353,6 +345,16 @@ bool sdr_session_valid(uint32_t sid)
     xSemaphoreTake(s_key, portMAX_DELAY);
     const bool ok = session_locked(sid);
     if (ok) { s_client_us = esp_timer_get_time(); }
+    xSemaphoreGive(s_key);
+    return ok;
+}
+
+bool sdr_tx_received(uint32_t sid, uint32_t tx, uint32_t *samples)
+{
+    if (!s_key || !samples) { return false; }
+    xSemaphoreTake(s_key, portMAX_DELAY);
+    const bool ok = session_locked(sid) && tx == s_tx_id;
+    if (ok) { *samples = s_tx_received_samples; }
     xSemaphoreGive(s_key);
     return ok;
 }
@@ -381,11 +383,8 @@ static bool start_tx_locked(uint32_t tx)
     }
     const bool network = netcom_mode() != NETCOM_MODE_LOCAL;
     const bool rf = !network || netcom_rf_tx();
-    bool route_ok = !network || netcom_tx_ready();
-    if (route_ok) {
-        ptt_set_rf_keying(rf);
-        route_ok = !rf || ptt_source_key(PTT_OWNER_SDR, tx, true);
-    }
+    const bool route_ok = (!network || netcom_tx_ready()) &&
+                          (!rf || ptt_source_key(PTT_OWNER_SDR, tx, true));
     if (!route_ok || !ptt_session_start(PTT_OWNER_SDR, tx)) {
         voice_sdr_end(tx);
         s_end_reason = network ? "network_not_ready" : "radio_not_ready";
@@ -394,8 +393,10 @@ static bool start_tx_locked(uint32_t tx)
     if (network) { bridge_rx_inhibit(); }
     s_net_tx = network;
     s_rf_tx = rf;
+    s_net_end = network ? "active" : "idle";
+    s_rf_end = rf ? "active" : "idle";
+    s_tx_ready = s_tx_rf_read = s_tx_net_read = s_tx_head;
     portENTER_CRITICAL(&s_mux);
-    s_tx_tail = s_tx_head;
     monitor_rx_local_tx(&s_monitor, true);
     portEXIT_CRITICAL(&s_mux);
     s_tx_id = tx;
@@ -403,6 +404,7 @@ static bool start_tx_locked(uint32_t tx)
     s_ptt_started_us = s_pcm_us = esp_timer_get_time();
     s_pcm_ever = false;
     s_tx_received_samples = s_tx_rejected_samples = s_tx_routed_samples = 0;
+    s_tx_rf_submitted = s_tx_net_submitted = s_tx_rf_abandoned = s_tx_net_abandoned = 0;
     s_end_reason = "transmitting";
     return true;
 }
@@ -441,7 +443,7 @@ bool sdr_ptt_request(uint32_t sid, uint32_t tx, bool on)
     return ok;
 }
 
-bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len)
+bool sdr_tx_push_bytes_at(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len, uint32_t offset)
 {
     if (!s_key || !bytes || len < 2 || (len & 1)) { return false; }
     xSemaphoreTake(s_key, portMAX_DELAY);
@@ -461,7 +463,22 @@ bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t l
         !ptt_owned(PTT_OWNER_SDR, tx)) {
         xSemaphoreGive(s_key); return false;
     }
+    if (offset != SDR_TX_APPEND) {
+        if (offset > s_tx_received_samples) { xSemaphoreGive(s_key); return false; }
+        /* The prior HTTP request may have queued only a prefix of its body. */
+        const size_t duplicate = s_tx_received_samples - offset;
+        if (duplicate >= len / 2) { xSemaphoreGive(s_key); return true; }
+        bytes += duplicate * 2;
+        len -= duplicate * 2;
+    }
     const size_t input = len / 2;
+    if (input > SDR_TX_RING_SAMPLES - tx_level_locked() && s_rf_tx && s_net_tx) {
+        const size_t rf = s_tx_head - s_tx_rf_read, net = s_tx_head - s_tx_net_read;
+        /* Keep the branch that can still take the complete new input. If
+         * neither can keep up, the ordinary overflow release protects both. */
+        if (rf > net && input <= SDR_TX_RING_SAMPLES - net) { stop_rf_locked("backlog"); }
+        if (net > rf && input <= SDR_TX_RING_SAMPLES - rf) { stop_net_locked("backlog"); }
+    }
     if (input > SDR_TX_RING_SAMPLES - tx_level_locked()) {
         s_tx_rejected_samples += (uint32_t)input;
         request_release_locked("pcm_overflow");
@@ -479,12 +496,18 @@ bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t l
             const uint8_t *p = bytes + done + 2 * i;
             tmp[i] = (int16_t)(uint16_t)(p[0] | (uint16_t)p[1] << 8);
         }
-        ring_put(s_tx_ring, SDR_TX_RING_SAMPLES, &s_tx_head, &s_tx_tail, tmp, n, NULL);
+        tx_ring_write(s_tx_head, tmp, n);
+        s_tx_head += n;
         done += 2 * n;
     }
     s_tx_received_samples += (uint32_t)input;
     xSemaphoreGive(s_key);
     return true;
+}
+
+bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len)
+{
+    return sdr_tx_push_bytes_at(sid, tx, bytes, len, SDR_TX_APPEND);
 }
 
 static int sdr_pcm_peak(const int16_t *pcm, size_t n)
@@ -507,11 +530,8 @@ static int sdr_pcm_peak(const int16_t *pcm, size_t n)
  * gain (ntxgain) rather than the handset's txgain.  The local RF consumer is
  * explicitly told that this buffer is already processed, so the monitor does not
  * apply the MIC EQ or network->RF bgtx a second time. */
-static bool sdr_route_tx_pcm(int16_t *pcm, size_t n)
+static void sdr_process_tx_pcm(int16_t *pcm, size_t n)
 {
-    if (!pcm || n == 0) {
-        return false;
-    }
     const int raw_peak = sdr_pcm_peak(pcm, n);
     const int processed_peak = voice_apply_net_tx_processing(pcm, n);
     if ((uint32_t)raw_peak > s_tx_raw_peak) {
@@ -525,27 +545,75 @@ static bool sdr_route_tx_pcm(int16_t *pcm, size_t n)
             ++s_tx_processed_clip;
         }
     }
-    const bool submitted = !s_net_tx ||
-        netcom_tx_sample_until(pcm, n, false, ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id));
-    if (!s_net_tx || s_rf_tx) {
-        voice_sdr_inject_processed(s_tx_id, pcm, n);
-    }
-    return submitted;
 }
 
 static void sdr_tx_drain_locked(int16_t *pcm)
 {
-    const size_t available = tx_level_locked();
-    if (!available) { if (s_ptt_hold) { ++s_tx_dry; } return; }
-    const size_t take = available < SDR_PKT_SAMPLES ? available : SDR_PKT_SAMPLES;
-    if ((s_rf_tx && voice_bridge_level() > 7000) ||
-        (s_net_tx && !netcom_tx_room(take, false, ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id)))) { return; }
-    const size_t n = ring_take(s_tx_ring, SDR_TX_RING_SAMPLES, &s_tx_head, &s_tx_tail, pcm, take);
-    if (n) {
-        if (!sdr_route_tx_pcm(pcm, n)) { request_release_locked("network_queue"); }
+    if (s_tx_head != s_tx_ready) {
+        const size_t n = tx_ring_read(s_tx_ready, s_tx_head - s_tx_ready, pcm);
+        sdr_process_tx_pcm(pcm, n);
+        tx_ring_write(s_tx_ready, pcm, n);
+        s_tx_ready += n;
         ++s_tx_pkts;
         s_tx_samples += (uint32_t)n;
         s_tx_routed_samples += (uint32_t)n;
+    } else if (s_ptt_hold && !tx_level_locked()) { ++s_tx_dry; }
+    if (s_rf_tx && s_tx_ready != s_tx_rf_read && voice_bridge_level() <= 7000) {
+        const size_t n = tx_ring_read(s_tx_rf_read, s_tx_ready - s_tx_rf_read, pcm);
+        voice_sdr_inject_processed(s_tx_id, pcm, n);
+        s_tx_rf_read += n;
+        s_tx_rf_submitted += (uint32_t)n;
+    }
+    if (s_net_tx && s_tx_ready != s_tx_net_read) {
+        const int64_t deadline = ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id);
+        const size_t pending = s_tx_ready - s_tx_net_read;
+        const size_t take = pending < SDR_PKT_SAMPLES ? pending : SDR_PKT_SAMPLES;
+        if (netcom_tx_room(take, false, deadline)) {
+            const size_t n = tx_ring_read(s_tx_net_read, pending, pcm);
+            if (netcom_tx_sample_until(pcm, n, false, deadline)) {
+                s_tx_net_read += n;
+                s_tx_net_submitted += (uint32_t)n;
+            }
+        }
+    }
+}
+
+static void mark_tail_locked(void)
+{
+    s_tail_started = true;
+    if (!strcmp(s_release_cause, "tail_pending")) { s_end_reason = "tail"; }
+}
+
+static void finish_rf_locked(int64_t now)
+{
+    if (s_tx_rf_read != s_tx_head) { return; }
+    if (s_tail_drain_us) {
+        if (now >= s_tail_drain_us) { stop_rf_locked("released"); }
+    } else if (s_rf_tail_started) {
+        if (voice_sdr_tail_done() == s_tx_id) { s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000; }
+    } else if (!voice_sdr_drain_pcm(s_tx_id)) {
+        if (voice_sdr_tail_start(s_tx_id)) {
+            s_rf_tail_started = true;
+            mark_tail_locked();
+        } else if (s_tx_rf_submitted) { s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000; }
+        else { stop_rf_locked("released"); }
+    }
+}
+
+static void finish_net_locked(int64_t now, int16_t *pcm)
+{
+    if (s_tx_net_read != s_tx_head || now < s_net_tail_due_us) { return; }
+    if (s_net_tail_pos == s_tail_samples) { stop_net_locked("released"); return; }
+    const size_t left = s_tail_samples - s_net_tail_pos;
+    const size_t take = left < SDR_PKT_SAMPLES ? left : SDR_PKT_SAMPLES;
+    const int64_t deadline = ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id);
+    if (!netcom_tx_room(take, true, deadline)) { return; }
+    const size_t n = voice_sdr_tail_read(s_net_tail_pos, pcm, take);
+    if (!n) { stop_net_locked("tail_unavailable"); return; }
+    if (netcom_tx_sample_until(pcm, n, true, deadline)) {
+        s_net_tail_pos += n;
+        s_net_tail_due_us = now + (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
+        mark_tail_locked();
     }
 }
 
@@ -583,7 +651,7 @@ static void sdr_tx_step(void)
         else { sdr_tx_drain_locked(pcm); }
     } else if (s_releasing) {
         const int64_t release_cap_us = SDR_RELEASE_AUDIO_US +
-            (voice_sdr_tail_configured() ? (int64_t)voice_sdr_tail_ms() * 1000 : 0);
+            (int64_t)s_tail_samples * 1000000 / AUDIO_SAMPLE_RATE_HZ;
         const int64_t cap = !s_limit_release && release_cap_us < SDR_RELEASE_MAX_US
             ? release_cap_us : SDR_RELEASE_MAX_US;
         if (!ptt_owned(PTT_OWNER_SDR, s_tx_id)) {
@@ -595,23 +663,9 @@ static void sdr_tx_step(void)
             finish_release_locked(s_rf_tx ? "radio_not_ready" : "owner_lost");
         } else {
             sdr_tx_drain_locked(pcm);
-            if (s_tail_drain_us) {
-                if (now >= s_tail_drain_us) { finish_release_locked("released"); }
-            } else if (s_tail_started) {
-                if (voice_sdr_tail_done() == s_tx_id) {
-                    if (s_rf_tx) { s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000; }
-                    else { finish_release_locked("released"); }
-                }
-            } else if (tx_level_locked() == 0 && (!s_rf_tx || !voice_sdr_drain_pcm(s_tx_id))) {
-                if (voice_sdr_tail_start(s_tx_id)) {
-                    s_tail_started = true;
-                    if (!strcmp(s_release_cause, "tail_pending")) { s_end_reason = "tail"; }
-                } else if (s_rf_tx && s_tx_routed_samples) {
-                    s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000;
-                } else {
-                    finish_release_locked("released");
-                }
-            }
+            if (s_rf_tx) { finish_rf_locked(now); }
+            if (s_net_tx) { finish_net_locked(now, pcm); }
+            if (!s_rf_tx && !s_net_tx) { finish_release_locked("released"); }
         }
     }
     const bool upload_pause = s_tail_upload_sid && s_tail_upload_sid == s_session &&
@@ -767,7 +821,7 @@ esp_err_t sdr_set_enabled(bool on)
         s_monitor_borrowed = true;
         xSemaphoreTake(s_key, portMAX_DELAY);
         portENTER_CRITICAL(&s_mux);
-        s_tx_head = s_tx_tail = 0;
+        s_tx_head = s_tx_ready = s_tx_rf_read = s_tx_net_read = 0;
         monitor_rx_clear(&s_monitor);
         monitor_rx_local_tx(&s_monitor, false);
         portEXIT_CRITICAL(&s_mux);
@@ -776,6 +830,9 @@ esp_err_t sdr_set_enabled(bool on)
         s_tx_processed_clip = 0;
         ++s_session; if (!s_session) { ++s_session; }
         s_client = s_tx_id = 0;
+        s_tx_received_samples = s_tx_rejected_samples = s_tx_routed_samples = 0;
+        s_tx_rf_submitted = s_tx_net_submitted = s_tx_rf_abandoned = s_tx_net_abandoned = 0;
+        s_rf_end = s_net_end = "idle";
         s_cancelled_tx = 0;
         s_tail_upload_sid = 0;
         s_tail_drain_us = 0;
@@ -900,8 +957,14 @@ void sdr_tx_audio_stats(sdr_tx_audio_stats_t *out)
     *out = (sdr_tx_audio_stats_t){0};
     if (!s_key) { return; }
     xSemaphoreTake(s_key, portMAX_DELAY);
-    *out = (sdr_tx_audio_stats_t){s_tx_id, s_tx_received_samples, s_tx_rejected_samples,
-                                 s_tx_routed_samples, (uint32_t)tx_level_locked()};
+    *out = (sdr_tx_audio_stats_t){
+        .token = s_tx_id, .received_samples = s_tx_received_samples,
+        .rejected_samples = s_tx_rejected_samples, .routed_samples = s_tx_routed_samples,
+        .pending_samples = (uint32_t)(s_tx_head - s_tx_ready),
+        .rf_submitted = s_tx_rf_submitted, .network_submitted = s_tx_net_submitted,
+        .rf_abandoned = s_tx_rf_abandoned, .network_abandoned = s_tx_net_abandoned,
+        .rf_end = s_rf_end, .network_end = s_net_end,
+    };
     xSemaphoreGive(s_key);
 }
 
@@ -913,12 +976,12 @@ void sdr_state_json(char *buf, size_t n, bool accepted, uint32_t request)
     const int64_t left = ptt_speech_deadline_us(PTT_OWNER_SDR, s_tx_id) - esp_timer_get_time();
     snprintf(buf, n,
         "{\"ok\":%s,\"sid\":%lu,\"tx\":%lu,\"id\":%lu,\"ptt\":%s,\"owner\":\"%s\",\"reason\":\"%s\",\"on\":%s,"
-        "\"rel\":%s,\"tail\":%s,\"remaining_ms\":%ld}",
+        "\"rel\":%s,\"tail\":%s,\"remaining_ms\":%ld,\"pcm\":%u}",
         accepted ? "true" : "false", (unsigned long)s_session,
         (unsigned long)s_tx_id, (unsigned long)request, s_ptt_hold ? "true" : "false",
         ptt_owner_name(), s_end_reason, s_on ? "true" : "false",
         s_releasing ? "true" : "false", s_tail_started ? "true" : "false",
-        s_ptt_hold && left > 0 ? (long)((left + 999) / 1000) : 0L);
+        s_ptt_hold && left > 0 ? (long)((left + 999) / 1000) : 0L, (unsigned)s_tx_received_samples);
     xSemaphoreGive(s_key);
 }
 

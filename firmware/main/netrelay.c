@@ -621,13 +621,12 @@ static void relay_tx_audio_stats(netcom_tx_audio_stats_t *out)
  */
 /*
  * How long a publish may wait for the rest of its batch.  Frames are 20 ms now
- * (they were 29 ms when this was tuned), so 40 ms collects two, and the cap of
- * four means a batch is 2-4 frames = 40-80 ms of audio.  Waiting longer would
- * buy nothing: the receiver plays from a 320 ms cushion either way, and every
- * extra millisecond here is latency the operator hears.
+ * (they were 29 ms when this was tuned), so 40 ms collects two. HTTP uploads
+ * can supply six frames at a time. Group ready frames in one publish while
+ * keeping the wait for new input bounded.
  */
 #define REL_BATCH_WAIT_US 40000
-#define REL_TXBATCH 4
+#define REL_TXBATCH 8
 
 static void relay_tx_task(void *arg)
 {
@@ -696,6 +695,7 @@ static void relay_tx_task(void *arg)
             if (has_end || bytes + REL_PKT_LEN > cap) {
                 break;
             }
+            if (xQueueReceive(s_txq, &item, 0) == pdTRUE) { continue; }
             const int64_t left_us = REL_BATCH_WAIT_US - (esp_timer_get_time() - t_batch);
             if (left_us <= 0) {
                 break;
@@ -1289,7 +1289,8 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
         snprintf(s_start_err, sizeof(s_start_err), "mqtt client start failed");
         (void)relay_stop(); return ESP_FAIL;
     }
-    if (xTaskCreateWithCaps(relay_tx_task, "rel_tx", 16384, NULL, 5,
+    /* Let queued voice drain ahead of repeated HTTPS requests. */
+    if (xTaskCreateWithCaps(relay_tx_task, "rel_tx", 16384, NULL, 6,
                             &s_tx_task, MALLOC_CAP_SPIRAM) != pdPASS) {
         snprintf(s_start_err, sizeof(s_start_err), "tx task create failed");
         (void)relay_stop(); return ESP_ERR_NO_MEM;

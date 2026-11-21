@@ -396,7 +396,6 @@ static void net_tail_render(int16_t *out, size_t frames);
 /* Latched when the browser transmission starts.  The tail is fetched by the
  * monitor task, so this flag tells that task whether its samples also belong
  * to the network TX stream. */
-static bool s_sdr_net_tx;
 
 /* 6-band EQ chains, used by the audio tasks; defined with the NVS layer at
  * the bottom of this file. */
@@ -2706,7 +2705,6 @@ bool voice_sdr_begin(uint32_t token)
         s_sdr_tail_token = token;
         s_sdr_tail_done_token = 0;
         const int mode = netcom_mode();
-        s_sdr_net_tx = mode != NETCOM_MODE_LOCAL;
         s_sdr_tail_config = tail_id_for_mode(mode);
         ptt_control_unlock();
     }
@@ -3003,26 +3001,21 @@ bool voice_sdr_tail_start(uint32_t token)
     return ok;
 }
 
-bool voice_sdr_tail_configured(void)
+size_t voice_sdr_tail_samples(void)
 {
     ptt_control_lock();
-    const bool configured = s_sdr_tail_config > TAIL_OFF &&
-                            s_sdr_tail_config < TAIL_COUNT &&
-                            tail_samples(s_sdr_tail_config) > 0;
+    const size_t n = tail_samples(s_sdr_tail_config);
     ptt_control_unlock();
-    return configured;
+    return n;
 }
 
-uint32_t voice_sdr_tail_ms(void)
+size_t voice_sdr_tail_read(size_t offset, int16_t *out, size_t n)
 {
     ptt_control_lock();
-    uint32_t ms = 0;
-    if (s_sdr_tail_config > TAIL_OFF && s_sdr_tail_config < TAIL_COUNT) {
-        const size_t n = tail_samples(s_sdr_tail_config);
-        ms = (uint32_t)(n * 1000u / AUDIO_SAMPLE_RATE_HZ);
-    }
+    const size_t got = tail_fetch(s_sdr_tail_config, offset, out, n);
+    (void)gain_mul(out, got, s_net_tx_gain);
     ptt_control_unlock();
-    return ms;
+    return got;
 }
 
 size_t voice_sdr_tail_fetch(int16_t *out, size_t n)
@@ -3035,26 +3028,12 @@ size_t voice_sdr_tail_fetch(int16_t *out, size_t n)
     if (s_sdr_tail_active && !s_sdr_tail_block_pending &&
         s_sdr_tail_id > TAIL_OFF && s_sdr_tail_id < TAIL_COUNT) {
         const size_t total = tail_samples(s_sdr_tail_id);
-        const size_t left = s_sdr_tail_pos < total ? total - s_sdr_tail_pos : 0;
-        const size_t next = left < n ? left : n;
-        const int64_t expires_us = ptt_release_deadline_us(PTT_OWNER_SDR, s_sdr_tail_token);
-        if (s_sdr_net_tx && next && !netcom_tx_room(next, true, expires_us)) {
-            ptt_control_unlock();
-            return 0;
-        }
         got = tail_fetch(s_sdr_tail_id, s_sdr_tail_pos, out, n);
         s_sdr_tail_pos += got;
         /* Browser tails are outgoing TX audio, so they use the same fixed
          * network TX gain as browser speech.  The receiver's bridge path
          * applies bgtx later only when it turns network audio back into RF. */
         (void)gain_mul(out, got, s_net_tx_gain);
-        if (s_sdr_net_tx && got) {
-            /* The monitor owns the tail clock.  Send exactly the samples it
-             * just fetched; sdr.c sends browser PCM, so this cannot duplicate
-             * audio.  Keep the call under the PTT lock so a timeout cannot
-             * place the end marker ahead of this final tail block. */
-            netcom_tx_sample_until(out, got, true, expires_us);
-        }
         if (!got || s_sdr_tail_pos >= total) {
             s_sdr_tail_block_pending = got != 0;
             if (!got) {
@@ -3075,9 +3054,14 @@ bool voice_sdr_tail_active(void)
     return active;
 }
 
-void voice_sdr_tail_stop(uint32_t token)
+void voice_sdr_rf_end(uint32_t token)
 {
     ptt_control_lock();
+    ptt_sdr_unkey(token);
+    if (s_inject_owner == PTT_OWNER_SDR && s_inject_token == token) {
+        voice_inject_reset();
+        s_inject_silent = true;
+    }
     if (s_sdr_tail_token == token) {
         s_sdr_tail_active = false;
         s_sdr_tail_block_pending = false;
@@ -3085,7 +3069,6 @@ void voice_sdr_tail_stop(uint32_t token)
         s_sdr_tail_pos = 0;
         s_sdr_tail_token = 0;
         s_sdr_tail_done_token = 0;
-        s_sdr_net_tx = false;
     }
     ptt_control_unlock();
 }
@@ -3124,7 +3107,6 @@ void voice_sdr_end(uint32_t token)
         s_sdr_tail_pos = 0;
         s_sdr_tail_token = 0;
         s_sdr_tail_done_token = 0;
-        s_sdr_net_tx = false;
     }
     if (ptt_owned(PTT_OWNER_SDR, token)) {
         s_inject_silent = false;

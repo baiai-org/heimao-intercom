@@ -23,8 +23,10 @@ SIMULATION = r"""
 #define SDR_WS_STALE_MS 6000
 #define SDR_NO_CLIENT_STALE_MS 30000
 #define AUDIO_I2S_BUFFER_MS 48
+#define AUDIO_SAMPLE_RATE_HZ 16000
 #define SDR_PKT_SAMPLES 320
 #define SDR_TX_RING_SAMPLES 8192
+#define SDR_TX_APPEND UINT32_MAX
 #define NETCOM_MODE_LOCAL 0
 #define PTT_OWNER_NONE 0
 #define PTT_OWNER_SDR 1
@@ -34,7 +36,7 @@ SIMULATION = r"""
 
 static int64_t clock_us = 100000;
 static int64_t s_client_us, s_release_started_us, s_ptt_started_us, s_pcm_us, s_ws_last_us;
-static int64_t s_tail_drain_us;
+static int64_t s_tail_drain_us, s_net_tail_due_us;
 static uint32_t s_tx_id, s_cancelled_tx, owner, tail_done, s_last_tx_ms, s_last_rel_ms;
 static uint32_t s_session = 7, s_tail_upload_sid;
 static bool s_on = true;
@@ -46,17 +48,20 @@ static uint32_t s_rel_tail_timeout, s_rel_released_notail, s_owner_mismatch;
 static uint32_t s_begin_busy, s_off_stale, s_off_reject, s_on_reject;
 static uint32_t s_tx_pkts, s_tx_samples, s_tx_dry;
 static uint32_t s_tx_received_samples, s_tx_rejected_samples, s_tx_routed_samples;
+static uint32_t s_tx_rf_submitted, s_tx_net_submitted, s_tx_rf_abandoned, s_tx_net_abandoned;
 static bool s_ptt_hold, s_releasing, s_tail_started, s_net_tx, s_rf_tx, s_pcm_ever;
+static bool s_rf_tail_started;
 static bool s_last_had_pcm, s_last_tail, s_ws_dead, keyed, allow_key = true;
-static bool tone_configured = true, rf_on_network, rf_pending, network_room = true;
+static bool tone_configured = true, rf_on_network, rf_pending, rf_room = true, network_room = true;
 static unsigned tone_starts, network_ends;
+static size_t network_tail_count, s_tail_samples, s_net_tail_pos;
 static uint32_t s_tx_raw_peak, s_tx_processed_peak, s_tx_processed_clip;
 static int16_t rf_pcm[SDR_TX_RING_SAMPLES], network_pcm[SDR_TX_RING_SAMPLES];
 static size_t rf_count, network_count;
 static int mode, s_key = 1, s_ws_fd = -1, s_monitor;
-static volatile size_t s_tx_head, s_tx_tail;
+static size_t s_tx_head, s_tx_ready, s_tx_rf_read, s_tx_net_read;
 static int16_t s_tx_ring[SDR_TX_RING_SAMPLES];
-static const char *s_end_reason, *s_release_cause;
+static const char *s_end_reason, *s_release_cause, *s_rf_end, *s_net_end;
 static char s_last_reason[24];
 
 static void strlcpy(char *out, const char *value, size_t n) { snprintf(out, n, "%s", value); }
@@ -74,13 +79,13 @@ static void ptt_begin_release(int source,uint32_t token){assert(ptt_owned(source
 static int ptt_owner(void) { return owner ? PTT_OWNER_SDR : PTT_OWNER_NONE; }
 static uint32_t ptt_owner_token(void) { return owner; }
 static bool voice_sdr_begin(uint32_t tx) { if (owner) return false; owner = tx; return true; }
-static void ptt_set_rf_keying(bool on) { (void)on; }
 static bool ptt_source_key(int source, uint32_t tx, bool on) {
     if (!allow_key || !ptt_owned(source, tx)) return false;
     keyed = on;
     return true;
 }
 static void voice_sdr_end(uint32_t tx) { if (owner == tx) { owner = 0; keyed = false; } }
+static void voice_sdr_rf_end(uint32_t tx) { if (owner == tx) { keyed = false; } }
 static void monitor_rx_local_tx(int *monitor, bool tx) { *monitor = tx; }
 static int netcom_mode(void) { return mode; }
 static bool netcom_rf_tx(void) { return rf_on_network; }
@@ -93,8 +98,7 @@ static int64_t ptt_release_deadline_us(int source, uint32_t token) {
 }
 static void netcom_tx_end(void) { ++network_ends; }
 static void bridge_rx_inhibit(void) {}
-static size_t voice_bridge_level(void) { return 0; }
-static size_t tx_level_locked(void) { return s_tx_head - s_tx_tail; }
+static size_t voice_bridge_level(void) { return rf_room ? 0 : 8000; }
 static int voice_apply_net_tx_processing(int16_t *pcm, size_t n) { (void)pcm; (void)n; return 0; }
 static void voice_sdr_inject_processed(uint32_t token, const int16_t *pcm, size_t n) {
     assert(ptt_owned(PTT_OWNER_SDR, token) && rf_count + n <= SDR_TX_RING_SAMPLES);
@@ -102,16 +106,22 @@ static void voice_sdr_inject_processed(uint32_t token, const int16_t *pcm, size_
     rf_count += n;
 }
 static bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires) {
-    assert(network_room && !tail && expires > clock_us && network_count + n <= SDR_TX_RING_SAMPLES);
+    assert(network_room && expires > clock_us);
+    if (tail) { network_tail_count += n; return true; }
+    assert(network_count + n <= SDR_TX_RING_SAMPLES);
     memcpy(network_pcm + network_count, pcm, n * sizeof(*pcm));
     network_count += n;
     return true;
 }
 static bool voice_sdr_drain_pcm(uint32_t tx) { assert(ptt_owned(PTT_OWNER_SDR,tx)); return rf_pending; }
-static bool voice_sdr_tail_configured(void) { return tone_configured; }
-static uint32_t voice_sdr_tail_ms(void) { return 5000; }
+static size_t voice_sdr_tail_samples(void) { return tone_configured ? 80000 : 0; }
+static size_t voice_sdr_tail_read(size_t offset, int16_t *pcm, size_t n) {
+    assert(offset + n <= voice_sdr_tail_samples());
+    memset(pcm, 0, n * sizeof(*pcm));
+    return n;
+}
 static bool voice_sdr_tail_start(uint32_t tx) {
-    assert(ptt_owned(PTT_OWNER_SDR, tx) && tx_level_locked() == 0);
+    assert(ptt_owned(PTT_OWNER_SDR, tx) && s_tx_rf_read == s_tx_head);
     if (tone_configured) ++tone_starts;
     return tone_configured;
 }
@@ -131,6 +141,13 @@ static void browser_markers(uint32_t sid, uint32_t token, size_t n, int16_t mark
         pcm[2*i+1] = (uint8_t)((uint16_t)marker >> 8);
     }
     assert(sdr_tx_push_bytes(sid, token, pcm, n * 2));
+}
+
+static void network_tail_finish(void) {
+    for (size_t n = 0; n < voice_sdr_tail_samples(); n += SDR_PKT_SAMPLES) {
+        clock_us += 20000;
+        sdr_tx_step();
+    }
 }
 
 int main(void)
@@ -177,9 +194,9 @@ int main(void)
     assert(!sdr_ptt_request(sid, 1, false) && s_ptt_hold);
     assert(sdr_ptt_request(sid, 3, false));
     sdr_tx_step();
-    assert(s_tail_started && tone_starts == 2 && !network_ends);
-    tail_done = 3;
-    sdr_tx_step();
+    assert(s_tail_started && tone_starts == 1 && !network_ends && network_tail_count == 320);
+    network_tail_finish();
+    assert(network_tail_count == 80000);
     assert(!s_tail_started && !owner && network_ends == 1 && s_rel_tail == 2);
     assert(!sdr_ptt_request(sid, 4, true));
 
@@ -187,7 +204,7 @@ int main(void)
     assert(sdr_ptt_request(sid, 5, true));
     assert(sdr_ptt_request(sid, 5, false));
     sdr_tx_step();
-    assert(!owner && !s_releasing && network_ends == 2 && tone_starts == 2);
+    assert(!owner && !s_releasing && network_ends == 2 && tone_starts == 1);
     assert(s_rel_notail == 1 && s_rel_released_notail == 1);
     tone_configured = true;
     assert(sdr_ptt_request(sid, 6, true));
@@ -195,14 +212,13 @@ int main(void)
     s_client_us = s_pcm_us = clock_us;
     s_pcm_ever = true;
     sdr_tx_step();
-    assert(s_ptt_hold && !s_releasing && tone_starts == 2);
+    assert(s_ptt_hold && !s_releasing && tone_starts == 1);
     clock_us = speech_deadline;
     sdr_tx_step();
     assert(!s_ptt_hold && s_releasing && owner == 6);
     sdr_tx_step();
-    assert(s_tail_started && tone_starts == 3 && network_ends == 2);
-    tail_done = 6;
-    sdr_tx_step();
+    assert(s_tail_started && tone_starts == 1 && network_ends == 2);
+    network_tail_finish();
     assert(!owner && !s_releasing && network_ends == 3 && !strcmp(s_last_reason, "hold_limit"));
 
     mode = 0; tone_configured = false; rf_pending = true;
@@ -219,7 +235,7 @@ int main(void)
     mode = 1;
     assert(sdr_ptt_request(sid, 8, true));
     s_tx_head += 320; network_room = false;
-    sdr_tx_step(); assert(tx_level_locked() == 320 && s_tx_routed_samples == 0);
+    sdr_tx_step(); assert(tx_level_locked() == 320 && s_tx_routed_samples == 320 && !s_tx_net_submitted);
     network_room = true; sdr_tx_step(); assert(tx_level_locked() == 0 && s_tx_routed_samples == 320);
     assert(sdr_ptt_request(sid, 8, false)); sdr_tx_step(); assert(!owner);
 
@@ -258,9 +274,53 @@ int main(void)
     assert(s_tx_routed_samples == 7680 && rf_count == 7680 && network_count == 7680);
     for (size_t i = 0; i < rf_count; ++i) { assert(rf_pcm[i] == (int16_t)(100 + i / 640)); }
     clock_us += 48000; sdr_tx_step(); assert(!keyed && !owner && !strcmp(s_last_reason, "pcm_overflow"));
+    release_locked("disabled");
+    assert(!strcmp(s_last_reason, "pcm_overflow") && s_last_had_pcm);
+
+    /* A blocked network can hold its own last speech/tail but cannot hold RF. */
+    rf_count = network_count = 0;
+    assert(sdr_ptt_request(sid, 11, true) && keyed);
+    network_room = false;
+    browser_markers(sid, 11, 320, 444);
+    assert(sdr_ptt_request(sid, 11, false));
+    sdr_tx_step();
+    clock_us += 48000; sdr_tx_step();
+    assert(!keyed && owner == 11 && rf_count == 320 && network_count == 0);
+    network_room = true; sdr_tx_step();
+    assert(!owner && network_count == 320 && !strcmp(s_rf_end, "released"));
+
+    /* Conversely, net OFF follows its full tail while RF still cannot take PCM. */
+    assert(sdr_ptt_request(sid, 12, true) && keyed);
+    rf_room = false; tone_configured = true; network_tail_count = 0;
+    browser_markers(sid, 12, 320, 555);
+    assert(sdr_ptt_request(sid, 12, false));
+    sdr_tx_step(); network_tail_finish();
+    assert(keyed && owner == 12 && !s_net_tx && network_tail_count == 80000);
+    clock_us += 1000000; sdr_tx_step();
+    assert(!owner && !keyed && s_tx_rf_abandoned == 320 && !strcmp(s_rf_end, "tail_timeout"));
+    assert(!strcmp(s_net_end, "released"));
+
+    /* A replay after a broken POST includes bytes the first attempt queued. */
+    mode = 1; rf_on_network = false; tone_configured = false;
+    network_count = 0;
+    uint8_t retry[800];
+    for (size_t i = 0; i < 400; ++i) { retry[2*i] = (uint8_t)i; retry[2*i+1] = 1; }
+    assert(sdr_ptt_request(sid, 13, true));
+    assert(sdr_tx_push_bytes_at(sid, 13, retry, 512, 0));
+    assert(s_tx_received_samples == 256);
+    assert(!sdr_tx_push_bytes_at(sid, 13, retry, 64, 320));
+    assert(sdr_tx_push_bytes_at(sid, 13, retry, sizeof(retry), 0));
+    assert(sdr_tx_push_bytes_at(sid, 13, retry, sizeof(retry), 0));
+    assert(s_tx_received_samples == 400 && !s_tx_rejected_samples);
+    assert(sdr_ptt_request(sid, 13, false));
+    sdr_tx_step(); sdr_tx_step();
+    assert(!owner && network_count == 400);
+    for (size_t i = 0; i < 400; ++i) { assert(network_pcm[i] == 256 + (uint8_t)i); }
     puts("PASS: SDR configured cutoff stops capture, sends a single tail and then closes the network over");
     puts("PASS: SDR short/long release, last DAC buffer, network end, duplicate/late OFF and blocked late ON");
     puts("PASS: 1760 browser samples route intact to RF and network on release; overflow preserves 7680 accepted samples");
+    puts("PASS: RF unkeys independently; network sends the full tail and OFF independently");
+    puts("PASS: broken request and duplicate retry preserve exactly 400 ordered samples");
     return 0;
 }
 """
@@ -268,9 +328,11 @@ int main(void)
 
 def main():
     source = (ROOT / "firmware/main/sdr.c").read_text("utf-8")
-    names = ("ring_put", "ring_take", "release_locked", "request_release_locked", "finish_release_locked",
-             "sdr_tail_upload_pause", "start_tx_locked", "sdr_ptt_request", "sdr_tx_push_bytes",
-             "sdr_pcm_peak", "sdr_route_tx_pcm", "sdr_tx_drain_locked", "sdr_tx_step")
+    names = ("tx_ring_write", "tx_ring_read", "tx_level_locked", "stop_net_locked", "stop_rf_locked",
+             "release_locked", "request_release_locked", "finish_release_locked",
+             "sdr_tail_upload_pause", "start_tx_locked", "sdr_ptt_request", "sdr_tx_push_bytes_at", "sdr_tx_push_bytes",
+             "sdr_pcm_peak", "sdr_process_tx_pcm", "sdr_tx_drain_locked", "mark_tail_locked",
+             "finish_rf_locked", "finish_net_locked", "sdr_tx_step")
     code = SIMULATION + "\n".join(function(source, name) for name in names) + TEST
     scratch = ROOT / ".tmp"
     scratch.mkdir(exist_ok=True)

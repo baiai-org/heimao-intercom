@@ -71,6 +71,9 @@ void bridge_rx_inhibit(void);
 
 /* Pause the denoised RF stream while changing the active P2P room. */
 void bridge_rx_room_change(bool changing);
+/* Reserve the idle bridge while a module profile is being applied. */
+bool bridge_rf_config_begin(void);
+void bridge_rf_config_end(void);
 /* Network selectors use their NETCOM_MODE values for r11-95 compatibility. */
 enum {
     DENOISE_SETTING_SPEAKER = 3,
@@ -114,6 +117,7 @@ typedef struct {
     uint32_t captured_samples, submitted_samples, rejected_samples;
     int64_t start_ms;
     int64_t end_ms;
+    const char *end_reason;
 } bridge_rx_stats_t;
 void bridge_rx_stats(bridge_rx_stats_t *out);
 

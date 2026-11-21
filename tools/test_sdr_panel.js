@@ -60,14 +60,18 @@ function runtime() {
   };
   state.getMic = async () => state.stream();
   state.flushCapture = (node, msg) => node.port.onmessage?.({data:{epoch:msg.epoch,flushed:true}});
-  state.response = url => {
+  state.response = (url,options) => {
     const u = new URL(url, 'https://board'), q = u.searchParams;
     const data = {ok: true, sid: +(q.get('sid') || 4000000001),
       tx: +(q.get('tx') || state.SDR?.activeTx || 0), id: +(q.get('id') || 0),
       on: q.get('on') !== '0', ptt: q.get('on') === '1', reason: 'test'};
-    return {ok: true, json: async () => data, arrayBuffer: async () => new ArrayBuffer(0)};
+    const response = {ok: true, json: async () => data, arrayBuffer: async () => new ArrayBuffer(0)};
+    if (u.pathname==='/api/sdr_tx' && options?.body) {
+      response.headers={get:()=>String(+q.get('offset') + options.body.byteLength / 2)};
+    }
+    return response;
   };
-  state.fetch = async url => state.response(url);
+  state.fetch = async (url,options) => state.response(url,options);
   const context = vm.createContext({
     window: {isSecureContext: true, AudioContext, _radio: {ready: true}, addEventListener() {}},
     document: {hidden: false, addEventListener() {}, createElement: () => ({})},
@@ -85,7 +89,7 @@ function runtime() {
     log: (...args) => state.logs.push(args),
     $: id => {assert(elements.has(id), id); return elements.get(id);},
   });
-  vm.runInContext(code + '\nglobalThis.api = {SDR, SdrPlayback, sdrWorkletSource, sdrRxStart, sdrPttDown, sdrPttUp, sdrPttFinish, sdrConnect, sdrSendAudio, sdrStop, sdrToggle, sdrHttpStart, sdrRequest, sdrApplyState};', context);
+  vm.runInContext(code + '\nglobalThis.api = {SDR, SdrPlayback, sdrWorkletSource, sdrRxStart, sdrPttDown, sdrPttUp, sdrPttFinish, sdrConnect, sdrSendAudio, sdrStop, sdrToggle, sdrHttpStart, sdrRequest, sdrApplyState, sdrStateStart};', context);
   Object.assign(state, context.api); state.elements = elements;
   state.ready = async (http = true) => {
     await state.sdrRxStart(); state.SDR.on = true; state.SDR.sid = 4000000001; state.SDR.http = http;
@@ -270,8 +274,8 @@ async function transportTests() {
     active++;max=Math.max(max,active);const v=await post.promise;active--;return v;
   };
   r.sdrSendAudio(new Int16Array(640),0);
-  for(let i=0;i<25;i++) {r.SDR.ctx.currentTime=i*0.04;r.sdrSendAudio(new Int16Array(640),r.SDR.ctx.currentTime);}
-  assert.equal(r.SDR.txQueued,0);assert.equal(r.SDR.txDrop,8320);assert.equal(r.SDR.ptt,false);assert.equal(max,1);
+  for(let i=0;i<38;i++) {r.SDR.ctx.currentTime=i*0.04;r.sdrSendAudio(new Int16Array(640),r.SDR.ctx.currentTime);}
+  assert.equal(r.SDR.txQueued,0);assert.equal(r.SDR.txDrop,17920);assert.equal(r.SDR.ptt,false);assert.equal(max,1);
   assert.match(r.SDR.txReason,/HTTP/);
   r.SDR.ctx.currentTime+=1;post.resolve(r.response(r.requests[0].url));await r.SDR.txIdle;
   assert.equal(r.requests.filter(q=>q.url.startsWith('/api/sdr_tx?')).length,1);
@@ -280,7 +284,7 @@ async function transportTests() {
   assert(r.requests.some(q=>q.url.startsWith('/api/sdr_ptt?on=0')));
   r=runtime();await r.ready();r.SDR.ptt=r.SDR.keyed=true;r.SDR.activeTx=2;
   r.SDR.ctx.currentTime=2;
-  const batch=deferred();r.fetch=()=>batch.promise;
+  const batch=deferred();r.fetch=async(url,options)=>{await batch.promise;return r.response(url,options);};
   r.sdrSendAudio(new Int16Array(640),2);
   for(let i=0;i<10;i++)r.sdrSendAudio(new Int16Array(640),2);
   batch.resolve(r.response(r.requests[0].url));await r.SDR.txIdle;
@@ -321,6 +325,13 @@ async function finalCaptureTests() {
     assert.equal(emitted[1].first,640);
     assert.equal(emitted[2].flushed,true);
   }
+  const capture=new (processors.get('radio-recorder'))({processorOptions:{wire:16000}});
+  emitted.length=0;
+  capture.port.onmessage({data:{on:true,epoch:9,batch:3}});
+  capture.process([[new Float32Array(2720).fill(0.2)]], [[new Float32Array(2720)]]);
+  capture.port.onmessage({data:{on:false,flush:true,epoch:9}});
+  assert.deepEqual(emitted.slice(0,3).map(m=>[m.first,m.samples.length]), [[0,640],[640,1920],[2560,160]]);
+  assert.equal(emitted[3].flushed,true);
   for (const http of [true,false]) {
     const r=runtime();await r.ready(http);
     const down=r.sdrPttDown();await flush();
@@ -334,7 +345,7 @@ async function finalCaptureTests() {
         await post.promise;
         delivered.push(...new Int16Array(options.body));
       }
-      return r.response(url);
+      return r.response(url,options);
     };
     const send=(first,length,value)=>node.port.onmessage({data:{epoch,first,samples:new Int16Array(length).fill(value),stamp:0,peak:value}});
     send(0,640,111);send(640,640,222);
@@ -356,7 +367,86 @@ async function finalCaptureTests() {
   }
   console.log('PASS: 1–639 sample worklet tail, HTTP backlog drain and ordered WebSocket PCM before OFF');
 }
+
+async function stateRetryTests() {
+  for (const http of [true,false]) {
+    const r=runtime(); await r.ready(http);
+    const down=r.sdrPttDown(); await flush();
+    const ws=r.SDR.ws;
+    if (!http) ws.ack(1,true);
+    await down;
+    const {sid,activeTx:tx,txEpoch:epoch}=r.SDR;
+    let stateFails=true;
+    r.fetch=async (url)=>{
+      if (url.startsWith('/api/sdr_state?')) {
+        if (stateFails) throw new Error('one lost read');
+        return {ok:true, json:async()=>({sid,tx,on:true,ptt:true,pcm:1280})};
+      }
+      const response=r.response(url);
+      if (url.startsWith('/api/sdr_tx?')) response.headers={get:()=>String(r.SDR.txCaptured)};
+      return response;
+    };
+    const capture=(first)=>r.SDR.micSp.port.onmessage({data:{epoch,first,
+      samples:new Int16Array(640),stamp:0,peak:0}});
+    capture(0); await flush();
+    if (!http) {
+      ws.onmessage({data:JSON.stringify({sid,tx:tx+1,pcm:640})});
+      assert.equal(r.SDR.txConfirmed,0);
+      ws.onmessage({data:JSON.stringify({sid,tx,pcm:640})});
+    }
+    assert.equal(r.SDR.txConfirmed,640);
+    r.sdrStateStart(); await flush();
+    if (http) {
+      assert(r.SDR.keyed && r.SDR.stateDeadline===null);
+      assert(!r.requests.some(row=>row.url.startsWith('/api/sdr_state?')));
+      capture(640); await flush();
+      assert.equal(r.SDR.txConfirmed,1280);
+      await r.sdrPttUp(); await r.SDR.releasePending;
+      continue;
+    }
+    assert(r.SDR.keyed && r.SDR.stateDeadline !== null);
+    const invoke=async ms=>{
+      const [id,timer]=[...r.timers].find(([,t])=>!t.interval && t.ms===ms);
+      r.timers.delete(id); r.now+=ms; timer.fn(); await flush();
+    };
+    stateFails=false; capture(640); await flush(); await invoke(100);
+    assert(r.SDR.keyed && r.SDR.stateDeadline===null);
+    assert.equal(r.SDR.txConfirmed,1280);
+    stateFails=true;
+    await invoke(500);
+    assert(!r.SDR.keyed && r.SDR.txReason==='无法确认手台端发射状态');
+    if (!http) ws.ack(2,false);
+    await r.SDR.releasePending;
+  }
+  console.log('PASS: WSS retries a single failed state read; HTTP uploads carry confirmation with no concurrent state read');
+}
+
+async function partialHttpRetryTest() {
+  const r=runtime(); await r.ready(); await r.sdrPttDown();
+  const {txEpoch:epoch}=r.SDR, delivered=[];
+  let tries=0;
+  r.fetch=async (url,options)=>{
+    if (!url.startsWith('/api/sdr_tx?')) return r.response(url,options);
+    const offset=+new URL(url,'https://board').searchParams.get('offset');
+    const samples=new Int16Array(options.body);
+    assert(offset <= delivered.length);
+    if (++tries === 1) {
+      delivered.push(...samples.slice(0,256));
+      throw Error('connection closed after a partial body');
+    }
+    delivered.push(...samples.slice(delivered.length-offset));
+    return r.response(url,options);
+  };
+  const samples=Int16Array.from({length:640},(_,i)=>i+1);
+  r.SDR.micSp.port.onmessage({data:{epoch,first:0,samples,stamp:0,peak:640}});
+  await r.SDR.txIdle;
+  assert.equal(tries,2); assert.deepEqual(delivered,Array.from(samples));
+  assert(r.SDR.keyed && r.SDR.txConfirmed===640 && r.SDR.txSent===640 && r.SDR.txDrop===0);
+  assert(await r.sdrPttFinish());
+  console.log('PASS: HTTP partial request is retried at the same offset and released after exact confirmation');
+}
 (async()=>{
-  await audioTests();await lifecycleTests();await clickTests();await transportTests();await finalCaptureTests();
+  await audioTests();await lifecycleTests();await clickTests();await transportTests();await finalCaptureTests();await stateRetryTests();
+  await partialHttpRetryTest();
   console.log('PASS: production worklets, sid/TX ACK, PCM framing, PTT button click/manual stop/board timeout, cancellation and HTTP queues');
 })().catch(e=>{console.error(e);process.exitCode=1;});

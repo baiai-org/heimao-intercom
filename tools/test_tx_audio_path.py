@@ -146,6 +146,7 @@ static void *s_pub_mux, *s_client = &s_connected;
 static char s_my_topic[48];
 static uint8_t s_mac[6];
 static const char *s_topic_root = "fixture";
+static size_t largest_publish;
 static const char *device_id(void) { return "tx"; }
 static void xSemaphoreTake(void *mux, int wait) { (void)mux; (void)wait; }
 static void xSemaphoreGive(void *mux) { (void)mux; }
@@ -154,6 +155,7 @@ static int esp_mqtt_client_publish(void *client, const char *topic, const char *
                                    int size, int qos, int retain) {
     assert(client && !strcmp(topic, "fixture/tx/tx") && !qos && !retain);
     assert(size % REL_PKT_LEN == 0 && size <= REL_TXBATCH * REL_PKT_LEN);
+    if ((size_t)size > largest_publish) { largest_publish = (size_t)size; }
     if (fail_send) { return -1; }
     for (int off = 0; off < size; off += REL_PKT_LEN) {
         rel_header_t h;
@@ -175,7 +177,7 @@ static uint16_t s_rx_room;
 static int s_rx_chan, s_chan = 1, s_rx_tail_id;
 static size_t s_rx_tail_pos;
 static int64_t s_rx_tail_next_us;
-static bool s_rx_limited, s_rx_room_changing;
+static bool s_rx_limited, s_rx_room_changing, s_rx_configuring;
 static tx_timeout_window_t s_rx_window;
 
 static const netcom_engine_t engine = {.tx_sample=TX_SAMPLE, .tx_room=TX_ROOM, .tx_end=TX_END};
@@ -239,6 +241,9 @@ static void queue_capacity(void) {
     netcom_tx_end(); netcom_tx_end();
     assert(backing.count == TX_DEPTH);
     worker();
+#ifdef REL_TXBATCH
+    assert(largest_publish == REL_TXBATCH * REL_PKT_LEN && largest_publish >= 6 * REL_PKT_LEN);
+#endif
     for (int i = 0; i < TX_DEPTH - NET_TX_PCM_CLOSE_SLOTS; ++i) {
         assert(wire[i].pcm[0] == i + 1 && wire[i].ptt && !wire[i].tail);
     }
@@ -386,7 +391,7 @@ typedef {prefix}_tx_item_t tx_item_t;
         extracts(netcom, "netcom_tx_sample_until netcom_tx_room netcom_tx_end"),
         "#define DENOISE_LEVEL_FIELD ((1u << DENOISE_LEVEL_BITS) - 1u)",
         extracts(bridge, "bridge_denoise_route denoise_level_shift bridge_denoise_level bridge_rx_end_locked "
-                         "denoised_route_ready bridge_rx_submit_speech_locked denoised_emit "
+                         "denoised_route_ready bridge_rx_interrupt_reason bridge_rx_submit_speech_locked denoised_emit "
                          "bridge_rx_tail_step_locked bridge_rx_begin_tail_locked bridge_rx_tap"), CASES))
 
 

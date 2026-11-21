@@ -45,11 +45,13 @@ static int64_t esp_timer_get_time(void){return INT64_C(4294967295)*1000;}
 static const char *device_identity_id(void){return "orl-test";}
 static const app_desc_t *esp_app_get_description(void){static app_desc_t a={"r11-93"};return &a;}
 static unsigned tx_timeout_seconds(void){return 600;}
-void sdr_tx_audio_stats(sdr_tx_audio_stats_t *s){*s=(sdr_tx_audio_stats_t){47,1760,0,1760,0};}
+void sdr_tx_audio_stats(sdr_tx_audio_stats_t *s){*s=(sdr_tx_audio_stats_t){.token=47,.received_samples=1760,
+ .routed_samples=1760,.rf_submitted=1760,.network_submitted=320,.network_abandoned=1440,
+ .rf_end="released",.network_end="backlog"};}
 void voice_sdr_playout(voice_sdr_playout_t *s){
  *s=(voice_sdr_playout_t){.token=47,.written_samples=1760,.last_resume_us=INT64_MAX};
 }
-void bridge_rx_stats(bridge_rx_stats_t *s){*s=(bridge_rx_stats_t){.captured_samples=2560,.submitted_samples=2560};}
+void bridge_rx_stats(bridge_rx_stats_t *s){*s=(bridge_rx_stats_t){.captured_samples=2560,.submitted_samples=2560,.end_reason="cos"};}
 void netcom_tx_audio_stats(netcom_tx_audio_stats_t *s){
  *s=(netcom_tx_audio_stats_t){.accepted_samples=UINT32_MAX,.expired_frames=2,.encode_errors=3,.send_errors=4};
 }
@@ -85,9 +87,12 @@ def main():
         assert set(data)=={'version','device_id','firmware','uptime_ms','memory','connections','rf_config',
                            'tx_timeout_s','tx_audio','event_sequence','events'}
         audio = data['tx_audio']
-        assert audio['sdr']=={'token':47,'received':1760,'rejected':0,'routed':1760,'pending':0}
+        assert audio['sdr']=={'token':47,'received':1760,'rejected':0,'routed':1760,'pending':0,
+                              'rf_submitted':1760,'net_submitted':320,'rf_abandoned':0,'net_abandoned':1440,
+                              'rf_end':'released','net_end':'backlog'}
         assert audio['sdr_rf']['written']==1760 and audio['sdr_rf']['last_resume_us']==(1<<63)-1
         assert audio['bridge']['captured']==audio['bridge']['submitted']==2560
+        assert audio['bridge']['end_reason']=='cos'
         assert audio['network']=={'mode':1,'accepted':4294967295,'rejected':0,'expired_frames':2,
                                   'encode_errors':3,'send_errors':4}
         assert len(raw)<12288

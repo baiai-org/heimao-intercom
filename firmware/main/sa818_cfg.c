@@ -312,6 +312,10 @@ static esp_err_t apply_profile_locked(const sa818_cfg_t *cfg, bool persist, char
             return ESP_ERR_INVALID_STATE;
         }
     }
+    if (!bridge_rf_config_begin()) {
+        if (log && log_len) { snprintf(log, log_len, "模拟桥接正在转发，请等待话段和尾音结束后重试"); }
+        return ESP_ERR_INVALID_STATE;
+    }
     atomic_fetch_add(&s_apply_attempts, 1);
     atomic_store(&s_apply_error, 0);
     atomic_store(&s_apply_stage, SA818_APPLY_BUSY);
@@ -329,6 +333,7 @@ static esp_err_t apply_profile_locked(const sa818_cfg_t *cfg, bool persist, char
 #ifdef ESP_PLATFORM
         ptt_control_unlock();
 #endif
+        bridge_rf_config_end();
         return ESP_ERR_INVALID_STATE;
     }
 #ifdef ESP_PLATFORM
@@ -399,6 +404,7 @@ static esp_err_t apply_profile_locked(const sa818_cfg_t *cfg, bool persist, char
                    atomic_load(&s_apply_stage), atomic_load(&s_cfg_revision));
 #endif
     atomic_store(&s_configuring, false);
+    bridge_rf_config_end();
     return failed ? ESP_FAIL : ESP_OK;
 }
 

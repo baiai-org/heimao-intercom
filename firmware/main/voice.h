@@ -91,10 +91,10 @@ void voice_sdr_inject(uint32_t token, const int16_t *pcm, size_t n);
 void voice_sdr_inject_processed(uint32_t token, const int16_t *pcm, size_t n);
 void voice_sdr_end(uint32_t token);
 /* Keep the SDR owner keyed while the monitor emits a fixed tail tone. */
-bool voice_sdr_tail_configured(void);
-uint32_t voice_sdr_tail_ms(void);
 bool voice_sdr_tail_start(uint32_t token);
-void voice_sdr_tail_stop(uint32_t token);
+void voice_sdr_rf_end(uint32_t token);
+size_t voice_sdr_tail_samples(void);
+size_t voice_sdr_tail_read(size_t offset, int16_t *out, size_t n);
 
 /* Courtesy tone for a network over that keys the radio (bridge / P2P / relay):
  * called when the stream ends, keeps the carrier up until the tone is done. */

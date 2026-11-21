@@ -270,9 +270,14 @@ int main(void) {
     bridge_rx_stats(&stats);
     assert(!stats.open && stats.starts == 1 && stats.ends == 1);
     assert(stats.end_ms >= stats.start_ms);
+    assert(!strcmp(stats.end_reason, "cos"));
+    assert(bridge_rf_config_begin());
+    tap(true, true); assert(samples == 2 && ends == 1);
+    bridge_rf_config_end();
 
     /* Missing/empty blocks must not flap a still-open stream. */
     tap(true, true);
+    assert(!bridge_rf_config_begin());
     bridge_rx_tap(NULL, 0, true, true);
     bridge_rx_tap(NULL, 5, true, true);
     assert(ends == 1);
