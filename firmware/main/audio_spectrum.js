@@ -69,7 +69,7 @@
     let fill = 0;
     let session = null;
 
-    function rows(pcm, startAt) {
+    function rows(pcm, startAt, first) {
       const result = [];
       for (let pos = 0; pos < pcm.length;) {
         const take = Math.min(fftSize - fill, pcm.length - pos);
@@ -77,7 +77,8 @@
         fill += take;
         pos += take;
         if (fill === fftSize) {
-          result.push({at: startAt + pos / (sampleRate / 1000), buffer: spectrum(window).buffer});
+          result.push({at: startAt + pos / (sampleRate / 1000), sampleEnd: first + pos,
+            buffer: spectrum(window).buffer});
           window.copyWithin(0, hop);
           fill -= hop;
         }
@@ -139,7 +140,7 @@
       }
       const pcm = new Int16Array(buffer, headerBytes, count);
       const started = performance.now();
-      const output = count ? rows(pcm, current.anchor + first / (sampleRate / 1000)) : [];
+      const output = count ? rows(pcm, current.anchor + first / (sampleRate / 1000), first) : [];
       const fftMs = output.length ? (performance.now() - started) / output.length : 0;
       const reset = reboot || (current.path && path && current.path !== path);
       current.boot = boot;
@@ -147,7 +148,7 @@
       if (path) current.path = path;
       current.after = first + count;
       current.selection = null;
-      reply(current, output, {mask, path, reset, gap: clockGap || gap || (restart && !reset && !!count),
+      reply(current, output, {boot, generation, mask, path, gap: clockGap || gap || (restart && !reset && !!count),
         samples: count, rtt, fftMs, contention,
         sourceLag: count ? ((now - stamp) >>> 0) + (latest - first - count) / (sampleRate / 1000) : 0});
       return {mask, behind: latest - current.after};
@@ -199,7 +200,8 @@
           session.anchor = data.at - (data.first + pcm.length) / (sampleRate / 1000);
         }
         session.after = data.first + pcm.length;
-        reply(session, rows(pcm, session.anchor + data.first / (sampleRate / 1000)), {samples: pcm.length});
+        reply(session, rows(pcm, session.anchor + data.first / (sampleRate / 1000), data.first),
+          {samples: pcm.length});
         return;
       }
       session?.controller?.abort();
@@ -218,8 +220,10 @@
   const root = document.getElementById('audioSpectrum');
   if (!root) return;
   const canvas = root.querySelector('[data-spectrum-axes]');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  const output = canvas.getContext('2d');
+  const frame = document.createElement('canvas');
+  const ctx = frame.getContext('2d');
+  if (!output || !ctx) return;
   const buttons = [...root.querySelectorAll('[data-view]')];
   const sourceLabel = root.querySelector('[data-spectrum-source]');
   const pathSelect = root.querySelector('[data-spectrum-path]');
@@ -297,21 +301,25 @@
       heatRow.data[offset + 3] = 255;
     }
     bitmapContext.putImageData(heatRow, 0, index);
+    row.prepared = true;
   }
 
-  function addRow(bins, at) {
-    const step = Math.round(at / rowMs);
+  let lastRow = null;
+
+  function addRow(bins, at, sampleEnd, stream) {
+    let step = Math.round(at / rowMs);
+    if (lastRow?.stream === stream) {
+      if (sampleEnd <= lastRow.sampleEnd) return false;
+      step = Math.max(step, lastRow.step + Math.ceil((sampleEnd - lastRow.sampleEnd) / hop));
+    }
     const index = slot(step);
-    if (history[index]?.step >= step) return false;
-    const row = {bins, step, at};
+    if (history[index]?.step >= step || (lastRow && step <= lastRow.step)) return false;
+    let peak = 0;
+    for (const value of bins) peak = Math.max(peak, value);
+    const row = {bins, step, at: step * rowMs, sampleEnd, stream, peak, index};
     history[index] = row;
-    if (columns) prepareRow(row, index);
+    lastRow = row;
     return true;
-  }
-
-  function clearRows() {
-    occupied.fill(null);
-    // Rows are validated by step during each paint, including after a clear.
   }
 
   function prepare(now, count) {
@@ -319,7 +327,7 @@
       columns = count;
       bitmap.width = columns;
       heatRow = bitmapContext.createImageData(columns, 1);
-      history.forEach((row, i) => { if (row) prepareRow(row, i); });
+      for (const row of history) { if (row) row.prepared = false; }
     }
     slotNow = Math.floor(now / rowMs);
     head = slot(slotNow);
@@ -327,15 +335,49 @@
     for (let age = 0; age < historyCount; ++age) {
       const row = history[(head + age) % ringSize];
       occupied[age] = row?.step === slotNow - age ? row : null;
+      if (occupied[age] && !row.prepared) prepareRow(row, row.index);
     }
   }
 
   const historyAge = row => (row + phase) / (historyCount - 1);
 
+  function surfaceRows(recent, spacing) {
+    const spans = [];
+    const ridges = [];
+    for (let age = 0; age < historyCount;) {
+      if (!occupied[age]) { ++age; continue; }
+      const start = age++;
+      while (occupied[age] && occupied[age].stream === occupied[age - 1].stream &&
+          occupied[age].sampleEnd === occupied[age - 1].sampleEnd - hop) ++age;
+      const stop = age;
+      const selected = [];
+      for (let first = start; first < stop;) {
+        const key = Math.floor(occupied[first].sampleEnd / hop / spacing);
+        let end = first + 1;
+        let peak = first;
+        while (end < stop && Math.floor(occupied[end].sampleEnd / hop / spacing) === key) {
+          if (occupied[end].peak > occupied[peak].peak) peak = end;
+          ++end;
+        }
+        // Choose by absolute sample sequence. All rows of a near group leave
+        // the near region together, so a crest doesn't swap at every tick.
+        for (let i = first; i < end; ++i) {
+          if (first < recent || stop - start <= 6 || i === peak || i === start || i === stop - 1) {
+            selected.push(i);
+          }
+        }
+        first = end;
+      }
+      if (selected.length === 1) ridges.push(selected[0]);
+      for (let i = 1; i < selected.length; ++i) spans.push([selected[i - 1], selected[i]]);
+    }
+    return {spans, ridges};
+  }
+
   layer.addEventListener('webglcontextlost', event => {
     event.preventDefault();
     mesh = false;
-    layer.hidden = true;
+    ++stats.contextLosses;
     redraw();
   });
   layer.addEventListener('webglcontextrestored', () => {
@@ -350,9 +392,9 @@
     const scale = Math.min(2, devicePixelRatio || 1);
     const w = Math.round(width * scale);
     const h = Math.round(height * scale);
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+    if (frame.width !== w || frame.height !== h) {
+      frame.width = w;
+      frame.height = h;
     }
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.clearRect(0, 0, width, height);
@@ -374,18 +416,17 @@
   }
 
   function makeMesh() {
-    const gl = layer.getContext('webgl2', { alpha: true, antialias: false });
+    const gl = layer.getContext('webgl2', { alpha: true, antialias: false, preserveDrawingBuffer: true });
     if (!gl) return null;
     const info = gl.getExtension('WEBGL_debug_renderer_info');
     const software = info && /SwiftShader|llvmpipe|software/i.test(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
     const recent = software ? 12 : 50;
     const spacing = software ? 16 : 4;
-    const ages = Array.from({length: historyCount}, (_, i) => i)
-      .filter(i => i < recent || (i - recent) % spacing === 0 || i === historyCount - 1);
     const vertex = [
       '#version 300 es',
       'precision highp float;',
       'uniform sampler2D levels;',
+      'uniform highp usampler2D pairs;',
       'uniform int bins;',
       'uniform int rows;',
       'uniform int head;',
@@ -397,14 +438,16 @@
       'out float level;',
       'out vec3 surface;',
       'void main() {',
-      '  ivec2 cell = ivec2(gl_VertexID % bins, gl_VertexID / bins);',
-      '  level = texelFetch(levels, ivec2(cell.x, (head + cell.y) % slots), 0).r;',
-      '  float f = float(cell.x) / float(bins - 1);',
-      '  float t = (float(cell.y) + phase) / float(rows - 1);',
+      '  uvec2 pair = texelFetch(pairs, ivec2(gl_InstanceID, 0), 0).rg;',
+      '  int slot = int(gl_VertexID % 2 == 0 ? pair.x : pair.y);',
+      '  int bin = gl_VertexID / 2;',
+      '  level = texelFetch(levels, ivec2(bin, slot), 0).r;',
+      '  float f = float(bin) / float(bins - 1);',
+      '  float t = (float((slot - head + slots) % slots) + phase) / float(rows - 1);',
       '  float x = projection.x + projection.y * (f * (1.0 - 0.28 * t) + 0.15 * t);',
       '  float y = projection.z - projection.w * t - amplitude * level;',
       '  gl_Position = vec4(x * 2.0 / viewSize.x - 1.0, 1.0 - y * 2.0 / viewSize.y,',
-      '                     1.40 * t - 0.80 - 0.25 * level, 1.0);',
+      '                     1.45 * t - 0.67 - 0.23 * level, 1.0);',
       '  surface = vec3(f, t * 0.70, level * 0.34);',
       '}'
     ].join('\n');
@@ -441,12 +484,11 @@
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
     gl.useProgram(program);
     gl.bindVertexArray(gl.createVertexArray());
-    const indexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    const uniforms = Object.fromEntries(['viewSize','projection','amplitude','bins','rows','head','slots','phase','levels','colorMap']
+    const uniforms = Object.fromEntries(['viewSize','projection','amplitude','bins','rows','head','slots','phase','levels','colorMap','pairs']
       .map(name => [name, gl.getUniformLocation(program, name)]));
     gl.uniform1i(uniforms.levels, 0);
     gl.uniform1i(uniforms.colorMap, 1);
+    gl.uniform1i(uniforms.pairs, 2);
     gl.uniform1i(uniforms.rows, historyCount);
     gl.uniform1i(uniforms.slots, ringSize);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -463,46 +505,67 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.enable(gl.DEPTH_TEST);
+    const pairs = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, pairs);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG16UI, historyCount - 1, 1);
+
+    const target = gl.createFramebuffer();
+    const color = gl.createRenderbuffer();
+    const depth = gl.createRenderbuffer();
     let lastWidth = 0;
+    let targetWidth = 0;
+    let targetHeight = 0;
+    let spanCount = 0;
+    const pairData = new Uint16Array((historyCount - 1) * 2);
     const uploaded = Array(ringSize).fill(null);
 
     return {
-      draw(plot) {
+      draw(plot, spans) {
         if (gl.isContextLost()) return false;
-        if (layer.width !== canvas.width || layer.height !== canvas.height) {
-          layer.width = canvas.width;
-          layer.height = canvas.height;
-          gl.viewport(0, 0, layer.width, layer.height);
-        }
-        if (columns !== lastWidth) {
-          const indices = new Uint32Array((columns - 1) * (ages.length - 1) * 6);
-          let i = 0;
-          for (let row = 0; row < ages.length - 1; row++) {
-            for (let x = 0; x < columns - 1; x++) {
-              const p = ages[row] * columns + x;
-              const q = ages[row + 1] * columns + x;
-              indices[i++] = p;
-              indices[i++] = p + 1;
-              indices[i++] = q;
-              indices[i++] = p + 1;
-              indices[i++] = q + 1;
-              indices[i++] = q;
-            }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+        if (frame.width !== targetWidth || frame.height !== targetHeight) {
+          targetWidth = frame.width;
+          targetHeight = frame.height;
+          gl.bindRenderbuffer(gl.RENDERBUFFER, color);
+          gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, targetWidth, targetHeight);
+          gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+          gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+          gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, targetWidth, targetHeight);
+          gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            throw new Error('spectrum framebuffer incomplete');
           }
-          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+          gl.viewport(0, 0, targetWidth, targetHeight);
+        }
+        gl.activeTexture(gl.TEXTURE0);
+        if (columns !== lastWidth) {
           gl.uniform1i(uniforms.bins, columns);
           lastWidth = columns;
           uploaded.fill(null);
-          gl.activeTexture(gl.TEXTURE0);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, columns, ringSize, 0, gl.RED, gl.UNSIGNED_BYTE, null);
         }
-        gl.activeTexture(gl.TEXTURE0);
-        for (let age = 0; age < historyCount; ++age) {
-          const index = (head + age) % ringSize;
-          const row = occupied[age];
-          if (!row || uploaded[index] === row) continue;
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, index, columns, 1, gl.RED, gl.UNSIGNED_BYTE, row.pixels);
-          uploaded[index] = row;
+        let changed = spanCount !== spans.length;
+        spanCount = spans.length;
+        for (let i = 0; i < spanCount; ++i) {
+          for (let j = 0; j < 2; ++j) {
+            const row = occupied[spans[i][j]];
+            const index = row.index;
+            if (uploaded[index] !== row) {
+              gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, index, columns, 1, gl.RED, gl.UNSIGNED_BYTE, row.pixels);
+              uploaded[index] = row;
+            }
+            const pairIndex = 2 * i + j;
+            changed ||= pairData[pairIndex] !== index;
+            pairData[pairIndex] = index;
+          }
+        }
+        if (changed && spanCount) {
+          gl.activeTexture(gl.TEXTURE2);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, spanCount, 1,
+            gl.RG_INTEGER, gl.UNSIGNED_SHORT, pairData.subarray(0, 2 * spanCount));
         }
         gl.uniform1i(uniforms.head, head);
         gl.uniform1f(uniforms.phase, phase);
@@ -511,21 +574,20 @@
         gl.uniform1f(uniforms.amplitude, plot.amplitude);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        // Coalesce only consecutive strips with valid audio across the full span.
-        const strip = (columns - 1) * 6;
-        let first = -1;
-        for (let row = 0; row < ages.length - 1; ++row) {
-          let valid = true;
-          for (let age = ages[row]; age <= ages[row + 1]; ++age) valid &&= !!occupied[age];
-          if (valid && first < 0) first = row;
-          if (first >= 0 && (!valid || row === ages.length - 2)) {
-            const end = valid ? row + 1 : row;
-            gl.drawElements(gl.TRIANGLES, (end - first) * strip, gl.UNSIGNED_INT, first * strip * 4);
-            first = -1;
-          }
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, columns * 2, spanCount);
+        return !gl.isContextLost();
+      },
+      present() {
+        if (layer.width !== targetWidth || layer.height !== targetHeight) {
+          layer.width = targetWidth;
+          layer.height = targetHeight;
         }
-        return true;
-      }
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+        gl.blitFramebuffer(0, 0, targetWidth, targetHeight, 0, 0, targetWidth, targetHeight,
+          gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      },
+      select() { return surfaceRows(recent, spacing); }
     };
   }
 
@@ -547,10 +609,12 @@
     for (let x = 1; x < columns; ++x) ctx.lineTo(left + x * dx, y - db * data[x]);
   }
 
-  function drawRidges(plot, isolated) {
+  function drawRidges(plot, selected = null) {
     for (let row = historyCount - 1; row >= 0; row--) {
       const item = occupied[row];
-      if (!item || (isolated ? (occupied[row - 1] || occupied[row + 1]) : row >= 10 && row % 9)) continue;
+      if (!item || (selected ? !selected.has(row) :
+          row >= 10 && Math.floor(item.sampleEnd / hop) % 9 &&
+          occupied[row - 1]?.stream === item.stream && occupied[row + 1]?.stream === item.stream)) continue;
       const age = historyAge(row);
       const [left] = project(plot, 0, age);
       const [right] = project(plot, 1, age);
@@ -580,33 +644,51 @@
     }
   }
 
+  function timeLines(draw) {
+    const offset = ((playhead % 500) + 500) % 500;
+    ctx.strokeStyle = 'rgba(117, 166, 200, 0.21)';
+    ctx.lineWidth = 1;
+    for (let ms = offset; ms < historyCount * rowMs; ms += 500) {
+      const age = ms / (historyCount * rowMs);
+      draw(age, !!occupied[Math.floor(ms / rowMs)]);
+    }
+  }
+
   function drawSurface(plot) {
-    if (mesh === null) {
+    const front = occupied.findIndex(Boolean);
+    if (front >= 0 && mesh === null) {
       try { mesh = makeMesh() || false; }
       catch { mesh = false; }
     }
-    let rendered = false;
-    if (mesh) {
-      try { rendered = mesh.draw(plot); }
-      catch { mesh = false; }
+    let prepared = false;
+    let geometry = null;
+    if (front >= 0 && mesh) {
+      geometry = mesh.select();
+      if (geometry.spans.length) {
+        try { prepared = mesh.draw(plot, geometry.spans); }
+        catch (error) { mesh = false; throw error; }
+      }
     }
-    layer.hidden = !rendered;
 
     const corners = [project(plot, 0, 0), project(plot, 1, 0), project(plot, 1, 1), project(plot, 0, 1)];
     ctx.beginPath();
     ctx.moveTo(...corners[0]);
     for (const corner of corners.slice(1)) ctx.lineTo(...corner);
     ctx.closePath();
-    if (!rendered) {
+    if (!prepared) {
       ctx.fillStyle = '#101f3b';
       ctx.fill();
     }
     ctx.strokeStyle = gridColor;
     ctx.stroke();
-    drawRidges(plot, rendered);
-    root.dataset.rendering = rendered ? 'mesh' : 'ridges';
+    timeLines((age, hasData) => {
+      const left = project(plot, 0, age);
+      const right = project(plot, 1, age);
+      if (!hasData) segment(...left, ...right);
+      segment(...right, right[0] + 3, right[1]);
+    });
+    if (front >= 0) drawRidges(plot, prepared ? new Set(geometry.ridges) : null);
 
-    const front = occupied.findIndex(Boolean);
     if (front >= 0 && front < 3) {
       ctx.beginPath();
       traceRow(plot, front);
@@ -630,18 +712,19 @@
       ctx.fillText(label, x + 7, y);
     }
     labels(plot, plot.front);
+    return {kind: prepared ? 'mesh' : front < 0 ? 'idle' : 'ridges', prepared};
   }
 
   function drawWaterfall(plot) {
     const top = 16;
     const depth = plot.front - top;
-    layer.hidden = true;
     ctx.imageSmoothingEnabled = false;
     const height = depth / historyCount;
     ctx.save();
     ctx.beginPath();
     ctx.rect(plot.left, top, plot.span, depth);
     ctx.clip();
+    timeLines(age => segment(plot.left, top + age * depth, plot.left + plot.span, top + age * depth));
     for (let age = 0; age < historyCount;) {
       if (!occupied[age]) { ++age; continue; }
       const start = age;
@@ -652,6 +735,8 @@
         plot.left, top + (start + phase) * height, plot.span, (age - start) * height);
     }
     ctx.restore();
+    timeLines(age => segment(plot.left + plot.span, top + age * depth,
+      plot.left + plot.span + 3, top + age * depth));
     ctx.strokeStyle = gridColor;
     ctx.strokeRect(plot.left, top, plot.span, depth);
     ctx.fillStyle = textColor;
@@ -660,14 +745,23 @@
       ctx.fillText(label, plot.left + plot.span + 7, top + depth * age);
     }
     labels(plot, plot.front, top);
-    root.dataset.rendering = 'waterfall';
+    return {kind:'waterfall', prepared:false};
   }
 
   function render(now) {
     const plot = begin(now);
-    if (!plot) return;
-    if (active === 'surface') drawSurface(plot);
-    else drawWaterfall(plot);
+    if (!plot) return false;
+    const {kind, prepared} = active === 'surface' ? drawSurface(plot) : drawWaterfall(plot);
+    if (prepared) mesh.present();
+    if (canvas.width !== frame.width || canvas.height !== frame.height) {
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+    }
+    output.globalCompositeOperation = 'copy';
+    output.drawImage(frame, 0, 0);
+    layer.hidden = !prepared;
+    root.dataset.rendering = kind;
+    return true;
   }
 
   for (const button of buttons) {
@@ -689,20 +783,27 @@
   let available = -1;
   let selection = null;
   let animation = 0;
+  let idleTimer = 0;
   let lastDraw = 0;
-  let latestAt = -Infinity;
+  let playhead = -Infinity;
+  let boardBoot = null;
+  let boardPath = 0;
   let lead = 185;
   let forceDraw = true;
   let retries = 0;
   let workerRetry = 0;
   const errorLabel = root.querySelector('[data-spectrum-problem]');
-  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0, sourceLag:0};
+  let streamProblem = '';
+  let drawProblem = false;
+  const stats = {samples:0, rows:0, drawn:0, idleDrawn:0, gaps:0, contention:0, fftMs:0, rtt:0, sourceLag:0,
+    networkErrors:0, busyErrors:0, formatErrors:0, drawErrors:0, contextLosses:0, workerErrors:0};
 
   function visible() {
     return onScreen && !document.hidden && root.getClientRects().length > 0;
   }
 
-  function problem(message) {
+  function updateProblem() {
+    const message = streamProblem || (drawProblem ? '频谱绘制异常' : '');
     errorLabel.textContent = message;
     errorLabel.hidden = !message;
   }
@@ -726,31 +827,42 @@
     animation = 0;
     if (!visible()) return;
     const now = performance.now();
-    const scrolling = now - latestAt < rowMs * historyCount + lead;
+    const live = lastRow && now - lastRow.at < lead + 350;
     const interval = canvas.clientWidth < 600 || mesh === false ? 32 : 15;
-    if (forceDraw || (scrolling && now - lastDraw >= interval)) {
+    if (forceDraw || now - lastDraw >= (live ? interval : 44)) {
       forceDraw = false;
       lastDraw = now;
+      playhead = Math.max(playhead, now - lead);
       try {
-        render(now - lead);
-        ++stats.drawn;
+        if (render(playhead)) {
+          ++stats.drawn;
+          if (!live) ++stats.idleDrawn;
+          if (drawProblem) { drawProblem = false; updateProblem(); }
+        }
       } catch (error) {
-        problem('频谱绘制异常');
-        console.warn('频谱绘制异常', error);
+        if (!drawProblem) console.warn('频谱绘制异常', error);
+        drawProblem = true;
+        ++stats.drawErrors;
+        updateProblem();
       }
     }
-    if (scrolling) animation = requestAnimationFrame(paint);
+    if (live) animation = requestAnimationFrame(paint);
+    else idleTimer = setTimeout(() => {
+      idleTimer = 0;
+      redraw(false);
+    }, Math.max(1, 45 - (performance.now() - lastDraw)));
   }
 
   function redraw(force = true) {
     forceDraw ||= force;
+    clearTimeout(idleTimer);
+    idleTimer = 0;
     if (!animation && visible()) animation = requestAnimationFrame(paint);
   }
 
   function clearHistory() {
     history.fill(null);
-    latestAt = -Infinity;
-    clearRows();
+    lastRow = null;
     redraw();
   }
 
@@ -758,11 +870,20 @@
     if (data.epoch !== epoch || !watching || !visible()) return;
     retries = 0;
     if (data.problem) {
-      problem({network:'频谱取流超时', busy:'板端频谱暂忙', format:'频谱帧格式异常'}[data.problem]);
+      ++stats[data.problem + 'Errors'];
+      streamProblem = {network:'频谱取流超时', busy:'板端频谱暂忙', format:'频谱帧格式异常'}[data.problem];
+      updateProblem();
       return;
     }
-    if (data.reset) clearHistory();
-    if (data.mask !== undefined) source(data.mask, data.mask ? data.path : 0);
+    if (data.boot !== undefined) {
+      if ((boardBoot !== null && boardBoot !== data.boot) || (boardPath && data.path && boardPath !== data.path)) {
+        clearHistory();
+        boardPath = 0;
+      }
+      boardBoot = data.boot;
+      if (data.path) boardPath = data.path;
+      source(data.mask, data.mask ? data.path : 0, data.mask ? '' : '守听中 · 暂无语音');
+    }
     if (data.rtt !== undefined) {
       stats.rtt = data.rtt;
       stats.contention = data.contention;
@@ -776,15 +897,15 @@
     }
     if (data.gap) ++stats.gaps;
     if (data.samples) stats.samples += data.samples;
-    problem('');
+    if (streamProblem) { streamProblem = ''; updateProblem(); }
+    const stream = data.boot === undefined ? 'microphone' : [data.boot, data.path, data.generation].join('/');
     for (const row of data.rows) {
       const at = row.at - performance.timeOrigin;
-      if (addRow(new Uint8Array(row.buffer), at)) {
+      if (addRow(new Uint8Array(row.buffer), at, row.sampleEnd, stream)) {
         ++stats.rows;
-        latestAt = Math.max(latestAt, at);
       }
     }
-    if (data.rows.length || data.reset) redraw(false);
+    if (data.rows.length) redraw(false);
   }
 
   function ensureWorker() {
@@ -796,12 +917,16 @@
         worker.terminate();
         worker = null;
         watching = false;
-        problem('频谱计算异常');
+        ++stats.workerErrors;
+        streamProblem = '频谱计算异常';
+        updateProblem();
         if (visible() && retries++ < 3) workerRetry = setTimeout(sync, 400);
       };
       return true;
     } catch {
-      problem('浏览器无法启动频谱计算');
+      ++stats.workerErrors;
+      streamProblem = '浏览器无法启动频谱计算';
+      updateProblem();
       return false;
     }
   }
@@ -814,7 +939,14 @@
   }
 
   function sync() {
-    if (!visible() || mode === 'releasing') { stop(); return; }
+    if (!visible()) {
+      stop();
+      clearTimeout(idleTimer);
+      cancelAnimationFrame(animation);
+      idleTimer = animation = 0;
+      return;
+    }
+    if (mode === 'releasing') { stop(); redraw(); return; }
     if (!watching && ensureWorker()) {
       watching = true;
       worker.postMessage({type: mode, epoch: ++epoch, selection});

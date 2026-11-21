@@ -1625,7 +1625,17 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
   background: radial-gradient(ellipse at 51% 82%, #121e3b 0%, #080e1c 68%);
 }
 #audioSpectrum canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
-#audioSpectrum [data-spectrum-problem] { color: #ffc785; }
+#audioSpectrum [data-spectrum-problem] {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #0d1525;
+  color: #ffc785;
+  pointer-events: none;
+}
 #audioSpectrum .spectrum-legend {
   display: flex;
   align-items: center;
@@ -1744,7 +1754,6 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         <header>
           <h2 id="audioSpectrumTitle">实时音频频谱</h2>
           <span data-spectrum-source>等待语音</span>
-          <span data-spectrum-problem role="status" hidden></span>
           <select data-spectrum-path aria-label="频谱音频路径" hidden></select>
         </header>
         <div class="spectrum-switch" role="group" aria-label="频谱视图">
@@ -1752,6 +1761,7 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
           <button type="button" data-view="waterfall" aria-pressed="false">彩色瀑布</button>
         </div>
         <div class="spectrum-plot">
+          <span data-spectrum-problem role="status" hidden></span>
           <canvas data-spectrum-gl aria-hidden="true" hidden></canvas>
           <canvas data-spectrum-axes role="img" aria-label="3D 彩色音频频谱，125 Hz 至 8 kHz">音频频谱，125 Hz 至 8 kHz。</canvas>
         </div>

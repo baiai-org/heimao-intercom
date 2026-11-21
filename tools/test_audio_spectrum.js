@@ -65,9 +65,11 @@ async function poll(buffer) {
   for (let i = 1; i < 11; i++) await poll(packet(i * 1600, 1600));
   const rows = replies.flatMap(item => item.rows);
   assert.equal(rows.length, 25);
+  assert(replies.every(item => item.boot === 1 && item.generation === 1));
   for (let i = 0; i < rows.length; i++) {
     const bins = new Uint8Array(rows[i].buffer);
     assert.equal(bins.length, 1009);
+    assert.equal(rows[i].sampleEnd, 2048 + 640 * i);
     if (i) assert.equal(rows[i].at - rows[i-1].at, 40);
     for (const peak of [112,118]) assert(bins[peak] > Math.max(bins[peak-1], bins[peak+1]));
   }
@@ -81,7 +83,8 @@ async function poll(buffer) {
   assert(replies.at(-1).gap);
   assert.equal(replies.at(-1).rows.length, 0);
   await poll(packet(0, 1000, 2, 2));
-  assert(replies.at(-1).reset);
+  assert.equal(replies.at(-1).path, 2);
+  assert.equal(replies.at(-1).generation, 2);
   assert.equal(replies.at(-1).rows.length, 0);
   worker.onmessage({data:{type:'stop', epoch:8}});
   assert.equal(timers.size, 0);
