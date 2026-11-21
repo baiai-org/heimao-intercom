@@ -87,16 +87,15 @@ import java.util.Date
         DropdownMenu(expanded=open,onDismissRequest={open=false}){options.forEach{(key,text)->DropdownMenuItem(text={Text(text)},onClick={open=false;changed(key)})}}}
 }
 
-@Composable internal fun RadioFields(manager:DeviceManager,p:DeviceProfile,s:SessionView,editTimeout:()->Unit) {
+@Composable internal fun RadioFields(manager:DeviceManager,p:DeviceProfile,s:SessionView,txTimeoutDrafts:MutableMap<String,String>) {
     Section("射频参数") {
         Parameter(manager,p,s,"rf_band","模块频段",s.radio.value("band"),listOf("UHF" to "UHF","VHF" to "VHF"))
         FrequencyEditor(manager,p,s)
+        TxTimeoutSetting(manager,p,s,txTimeoutDrafts)
         Parameter(manager,p,s,"bw","带宽",s.status.value("freq.bw"),listOf("0" to "12.5 kHz 窄带","1" to "25 kHz 宽带"))
         Parameter(manager,p,s,"sq","模块静噪",s.status.value("freq.sq"),hint="0–8；0 为开放静噪")
         Parameter(manager,p,s,"vol","电台模块音量",s.status.value("freq.vol"),hint="1–8")
         Parameter(manager,p,s,"power","发射功率",s.status.value("freq.power"),listOf("0" to "低功率","1" to "高功率"))
-        val timeout = RadioUiRules.txTimeoutSeconds(s.radio)?.takeIf { s.connected && !s.txTimeoutReadFailed }
-        SettingRow("发射超时", timeout?.let { "$it 秒" }.orEmpty(), "在通联页修改", click=editTimeout)
         if(s.radio.optBoolean("power_pending"))Text("功率将在发话结束后生效",color=amber)
     }
     Section("亚音设置") {

@@ -633,21 +633,6 @@ body::before {
   align-items: stretch;
   gap: 8px;
 }
-.ptt-timeout {
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: 10px 14px;
-}
-.ptt-timeout-controls, .ptt-timeout-value {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.ptt-timeout-value { flex-wrap: nowrap; }
-.ptt-timeout-value input { width: 5em; min-height: 40px; }
-.ptt-timeout p { margin: 5px 0 0; font-size: 12px; color: var(--fg-2); }
 button.tx {
   flex: 1;
   background: linear-gradient(135deg, #881337 0%, #be123c 100%);
@@ -870,6 +855,14 @@ button.tx.live {
   color: var(--cyan);
   font-variant-numeric: tabular-nums;
 }
+.rf-timeout { border-block: 1px solid var(--line); margin-bottom: 12px; }
+.rf-timeout > .row { flex-wrap: wrap; }
+.rf-timeout-controls { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+#txTimeout { flex: 0 1 72px; width: 72px; min-height: 40px; font-size: 16px; font-variant-numeric: tabular-nums; }
+#txTimeoutSet { min-height: 40px; }
+#txTimeoutSet:disabled { background: var(--bg-2); color: var(--dim); border-color: var(--line); }
+.rf-timeout p { margin: 0 0 8px; font-size: 12px; color: var(--fg-2); }
+#txTimeoutRetry { margin-bottom: 8px; }
 
 input[type=number],
 input[type=text],
@@ -1703,20 +1696,6 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
         </div>
       </div>
 
-      <form id="txTimeoutForm" class="ptt-timeout">
-        <div class="ptt-timeout-controls">
-          <label for="txTimeout">发射超时</label>
-          <div class="ptt-timeout-value">
-            <input type="text" id="txTimeout" inputmode="numeric" autocomplete="off"
-              aria-describedby="txTimeoutStatus txTimeoutHint" disabled><span>秒</span>
-          </div>
-          <button id="txTimeoutSet" type="submit" class="pri" disabled>保存</button>
-          <button id="txTimeoutRetry" type="button" hidden>重试读取</button>
-        </div>
-        <p id="txTimeoutStatus" role="status">正在读取发射超时设置…</p>
-        <p id="txTimeoutHint">可输入 5–600 的整数，默认 180 秒</p>
-      </form>
-
       <!-- Master PTT Trigger & Monitor Controls -->
       <div class="ptt-console">
         <div class="ptt-main-row">
@@ -1940,6 +1919,20 @@ body[data-panel-layout="detail"] .panel-nav{display:none}
       <div class="row" style="margin-bottom:12px">
         <button id="fset" class="pri" style="flex:1;padding:8px 12px">立即下发收发频率至电台模块</button>
       </div>
+
+      <form id="txTimeoutForm" class="rf-timeout">
+        <div class="row">
+          <label for="txTimeout">发射超时</label>
+          <div class="rf-timeout-controls">
+            <input type="text" id="txTimeout" inputmode="numeric" autocomplete="off"
+              aria-describedby="txTimeoutStatus txTimeoutHint" disabled><span>秒</span>
+            <button id="txTimeoutSet" type="submit" class="pri" disabled>保存</button>
+          </div>
+        </div>
+        <p id="txTimeoutStatus" role="status">正在读取发射超时设置…</p>
+        <p id="txTimeoutHint" hidden>5–600 秒整数，默认 180 秒</p>
+        <button id="txTimeoutRetry" type="button" hidden>重试读取</button>
+      </form>
 
       <div class="sec-label"><span>信道带宽 · 静噪 · 发射功率</span></div>
       <div class="row">
@@ -3760,11 +3753,14 @@ function renderTxTimeout() {
     unsupported: '当前手台固件不支持修改',
     changed: '设备身份已变化，请重新打开面板',
   };
-  const current = ready ? '当前生效 ' + txTimeoutSeconds + ' 秒' : '';
+  const current = ready && dirty ? '当前生效 ' + txTimeoutSeconds + ' 秒' : '';
   const notice = txTimeoutSaving ? '正在保存…' : !ready ? status[txTimeoutReadState]
     : txTimeoutMaintenance ? '请结束维护后保存' : busy ? '请结束发射或转发后保存' : txTimeoutFeedback;
   const text = [notice, dirty ? '未保存' : '', current].filter(Boolean).join(' · ');
-  if ($('txTimeoutStatus').textContent !== text) $('txTimeoutStatus').textContent = text;
+  const feedback = $('txTimeoutStatus');
+  if (feedback.textContent !== text) feedback.textContent = text;
+  feedback.hidden = !text;
+  $('txTimeoutHint').hidden = !ready || !!text || document.activeElement !== txTimeoutInput;
 }
 
 async function syncTxTimeout(status, radio, failed, epoch) {
@@ -3794,6 +3790,11 @@ txTimeoutInput.addEventListener('input', () => {
   // The common draft handler runs as the event bubbles to document.
   queueMicrotask(renderTxTimeout);
 });
+txTimeoutInput.addEventListener('focus', () => {
+  if (!panelDirty.has(txTimeoutInput.id)) txTimeoutFeedback = '';
+  renderTxTimeout();
+});
+txTimeoutInput.addEventListener('blur', () => queueMicrotask(renderTxTimeout));
 $('txTimeoutRetry').onclick = () => { panelRadioAt = 0; refresh(); };
 $('txTimeoutForm').onsubmit = async event => {
   event.preventDefault();
@@ -3831,7 +3832,7 @@ $('txTimeoutForm').onsubmit = async event => {
     if (txTimeoutSeconds !== value) throw Error('手台回读与输入不一致');
     panelDirty.delete(txTimeoutInput.id);
     txTimeoutInput.removeAttribute('aria-description');
-    txTimeoutFeedback = '已保存，下一次发射生效';
+    txTimeoutFeedback = '已保存 ' + txTimeoutSeconds + ' 秒，下一次发射生效';
   } catch (error) {
     txTimeoutFeedback = '保存未确认，请核对后重试';
   } finally {
@@ -4865,15 +4866,13 @@ refresh();
   move(document.querySelector('.name-plate'),'device');
   const lcd=document.querySelector('.lcd-cockpit');
   const telemetry=document.createElement('details');telemetry.innerHTML='<summary>详细运行状态</summary>';
-  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);
+  telemetry.append(document.querySelector('.meters-box'),document.getElementById('stat'));lcd.append(telemetry);move(lcd,'talk');
   move(document.getElementById('ixSeg').parentElement,'network');
   const handheld=card('手台麦克风');handheld.append(document.querySelector('.ptt-console'));pages.talk.append(handheld);
+  move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
   const browser=document.getElementById('sdrBtn').closest('.card');browser.querySelector('h2').textContent='浏览器麦克风与收听';move(browser,'talk');
   const source=document.createElement('div');source.className='panel-subnav';source.innerHTML='<button data-source="handheld" class="on">手台麦克风</button><button data-source="browser">浏览器麦克风</button>';
   pages.talk.insertBefore(source,handheld);browser.hidden=true;
-  pages.talk.insertBefore(document.getElementById('txTimeoutForm'),handheld);
-  move(document.getElementById('rfSeg').closest('[data-modes]'),'talk');
-  move(lcd,'talk');
   for(const mode of [1,2]) {
     const stage=document.querySelector('.mode-stage[data-modes="'+mode+'"]');
     const bridge=card(mode===1?'公网直连桥接':'网络中继桥接');bridge.dataset.modes=String(mode);

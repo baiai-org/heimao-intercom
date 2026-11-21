@@ -37,7 +37,6 @@ import kotlinx.coroutines.launch
     var tab by rememberSaveable{mutableIntStateOf(0)}
     var detail by rememberSaveable{mutableStateOf<String?>(null)}
     val txTimeoutDrafts = remember { mutableStateMapOf<String, String>() }
-    var revealTxTimeout by remember(state.deviceId) { mutableStateOf(false) }
     var devicePicker by remember{mutableStateOf(false)}
     var editor by remember{mutableStateOf<Pair<DeviceProfile?,AccessPoint?>?>(null)}
     var newEditor by remember{mutableStateOf(false)}
@@ -111,7 +110,7 @@ import kotlinx.coroutines.launch
             else if(detail!=null && profile!=null)Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(20.dp)) {
                 when(detail){
                     "手台名称"->HandsetNameFields(manager,profile,state)
-                    "射频参数"->RadioFields(manager,profile,state) { tab=0; detail=null; revealTxTimeout=true }
+                    "射频参数"->RadioFields(manager,profile,state,txTimeoutDrafts)
                     "音频与尾音"->AudioFields(manager,profile,state,file,ask)
                     "手台端 Wi-Fi"->WifiFields(manager,profile,state,wirelessSettings,ask)
                     "网络语音"->VoiceNetworkFields(manager,profile,state,ask)
@@ -119,9 +118,7 @@ import kotlinx.coroutines.launch
                 }
             }
             else when(tab){
-                0->if(profile==null)EmptySession(state){tab=2} else RadioHome(manager,profile,state,pttDown,::open,{tab=1},ask,{devicePicker=true}) {
-                    TxTimeoutEditor(manager,profile,state,txTimeoutDrafts,revealTxTimeout) { revealTxTimeout=false }
-                }
+                0->if(profile==null)EmptySession(state){tab=2} else RadioHome(manager,profile,state,pttDown,::open,{tab=1},ask,{devicePicker=true})
                 1->if(profile==null)EmptySession(state){tab=2} else ChannelPage(manager,profile,state,ask)
                 2->DevicePage(profiles,state,discovered,discoveryEnabled,::select,{newEditor=true},{rename=it},{endpoints=it},
                     {p->ask("只移除手机中的“${p.displayName}”档案？手台自身配置保留。",{manager.remove(p.id)})},
