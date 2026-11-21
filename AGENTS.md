@@ -1,6 +1,6 @@
 # 黑猫互联开发入口
 
-当前 GitHub 正式下载为固件 r11-117、APP 1.2.29（versionCode 41）和独立刷机工具 1.1.5。
+当前 GitHub 正式下载为固件 r11-120、APP 1.2.29（versionCode 41）和独立刷机工具 1.1.5。
 用户当前指令优先；上层工作区如提供接手主本，应先完整阅读。公开仓库不保存内部交接主本、实机快照或个人绝对路径。
 
 - 先读README、docs/build及docs/release.md；实现说明为docs/resource-profile-panel-r11-93.md。

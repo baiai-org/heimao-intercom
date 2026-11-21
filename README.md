@@ -175,13 +175,13 @@ A 地对讲机发出的语音，由黑猫 A 接收并送入网络；黑猫 B 收
 
 ## 下载
 
-固件 **r11-117**、Android APP **1.2.29** 和 Windows 刷机工具 **1.1.5** 可在 GitHub 分别下载。 [Releases](../../releases/latest)
+固件 **r11-120**、Android APP **1.2.29** 和 Windows 刷机工具 **1.1.5** 可在 GitHub 分别下载。 [Releases](../../releases/latest)
 
 | 文件 | 用途 |
 |---|---|
 | `heimao-android-1.2.29-heimao.apk` | Android APP（Android 7.0+） |
-| `heimao-app-OTA-r11-117.bin` | OTA 升级镜像，可在网页或 APP 上传 |
-| `heimao-full-r11-117.bin` | USB 刷机用的完整固件，含引导程序 |
+| `heimao-app-OTA-r11-120.bin` | OTA 升级镜像，可在网页或 APP 上传 |
+| `heimao-full-r11-120.bin` | USB 刷机用的完整固件，含引导程序 |
 | `heimao-flasher-1.1.5.exe` | Windows 刷机工具，需选择独立的 full BIN |
 | `SHA256SUMS.txt` | 下载文件的 SHA-256 校验值 |
 | `update.json` | 供手台和 APP 读取的签名更新清单 |
@@ -194,11 +194,11 @@ A 地对讲机发出的语音，由黑猫 A 接收并送入网络；黑猫 B 收
 
 ### 1. 安装或升级固件
 
-已联网的手台可在网页上传 `heimao-app-OTA-r11-117.bin`。首次安装，或需要更新为带回滚能力的引导程序时，使用以下 USB 流程。
+已联网的手台可在网页上传 `heimao-app-OTA-r11-120.bin`。首次安装，或需要更新为带回滚能力的引导程序时，使用以下 USB 流程。
 
-1. 下载 `heimao-full-r11-117.bin` 与 `heimao-flasher-1.1.5.exe`。
+1. 下载 `heimao-full-r11-120.bin` 与 `heimao-flasher-1.1.5.exe`。
 2. 用 USB 数据线连接手台，打开工具，勾选对应的 COM 口。
-3. 点击「选择 BIN」，选中 `heimao-full-r11-117.bin`。
+3. 点击「选择 BIN」，选中 `heimao-full-r11-120.bin`。
 4. 选择刷机模式。常规升级选 **保留配置**，首次安装或清空设备时选 **全新刷机**。
 5. 点击开始，等待写入与校验完成。
 

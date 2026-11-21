@@ -19,13 +19,14 @@ An ESP32-S3 handheld that is simultaneously an **SA818S analog radio**, a **netw
 
 ## Downloads
 
-From [Releases](../../releases):
+The [latest release](../../releases/latest) includes the following files.
 
-- `heimao-android-<version>.apk` — Android app (Android 7.0+)
-- `heimao-full-r11-83.bin` — complete image for USB flashing
-- `heimao-app-OTA-r11-83.bin` — OTA application image
-- `heimao-flasher-<version>.exe` — Windows flasher (**no embedded firmware**; select the full image)
-- `SHA256SUMS.txt`
+- `heimao-android-1.2.29-heimao.apk` for Android 7.0 and later
+- `heimao-full-r11-120.bin` for USB flashing
+- `heimao-app-OTA-r11-120.bin` for OTA updates
+- `heimao-flasher-1.1.5.exe` for flashing the external full image on Windows
+- `SHA256SUMS.txt` for checking the downloads
+- `update.json` for signed online updates
 
 The public flasher does not bundle firmware because it is GPL-3.0 while the firmware is licensed separately.
 
