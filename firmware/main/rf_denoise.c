@@ -519,6 +519,19 @@ bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n)
     return rf_denoise_play_take(route, pcm, n) == n;
 }
 
+bool rf_denoise_play_needs_lead(rf_denoise_route_t route)
+{
+    const stream_t *s = &s_streams[route];
+    return s->work && !s->finished && !s->lead && s->dry_n < s->play_delay;
+}
+
+/* Only the audio owner calls this, after confirming room for one more block. */
+void rf_denoise_play_add_lead(rf_denoise_route_t route, const int16_t *pcm)
+{
+    stream_t *s = &s_streams[route];
+    if (rf_denoise_play_needs_lead(route)) { append_pcm(s, pcm, RF_DENOISE_MAX_BLOCK); }
+}
+
 bool rf_denoise_play_finish(rf_denoise_route_t route)
 {
     stream_t *s = &s_streams[route];

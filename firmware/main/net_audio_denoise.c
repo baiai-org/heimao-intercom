@@ -52,6 +52,13 @@ bool net_audio_denoise_pending(net_audio_denoise_t *dn, int64_t now)
     return dn->pending;
 }
 
+void net_audio_denoise_add_lead(net_audio_denoise_t *dn, const int16_t *block, int64_t now)
+{
+    rf_denoise_play_add_lead(dn->route, block);
+    dn->pending = rf_denoise_play_pending(dn->route) != 0;
+    dn->last_pcm_ms = now;
+}
+
 bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
                               net_audio_source_t source, bool have, bool output_ready,
                               int16_t *block, int64_t now)
@@ -104,26 +111,32 @@ bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
         dn->last_pcm_ms = now;
         dn->close_ms = 0;
         if (!dn->active) { return true; }
-        dn->pending = rf_denoise_play_block(dn->route, block, RF_DENOISE_MAX_BLOCK);
-        if (!dn->pending) { net_audio_denoise_reset(dn); }
-        return dn->pending;
+        if (!rf_denoise_play_block(dn->route, block, RF_DENOISE_MAX_BLOCK)) {
+            net_audio_denoise_reset(dn);
+            return false;
+        }
+        dn->pending = rf_denoise_play_pending(dn->route) != 0;
+        return true;
     }
-    if (source.feeding) { dn->close_ms = 0; return false; }
+    if (source.feeding) { dn->close_ms = 0; }
     if (!dn->pending) {
-        net_audio_denoise_reset(dn);
+        if (!source.feeding) { net_audio_denoise_reset(dn); }
         return false;
     }
-    if (!dn->close_ms) { dn->close_ms = now; }
+    if (!source.feeding && !dn->close_ms) { dn->close_ms = now; }
     if (!output_ready) { return false; }
-    if (!dn->finished) {
+    if (!source.feeding && !dn->finished) {
         if (!rf_denoise_play_finish(dn->route)) {
             net_audio_denoise_reset(dn);
             return false;
         }
         dn->finished = true;
     }
+    /* A live jitter-buffer miss can spend the audio already queued for DSP.
+     * Missing DSP results fall back to the corresponding dry PCM. */
     const size_t n = rf_denoise_play_take(dn->route, block, RF_DENOISE_MAX_BLOCK);
     memset(block + n, 0, (RF_DENOISE_MAX_BLOCK - n) * sizeof(*block));
-    if (!rf_denoise_play_pending(dn->route)) { net_audio_denoise_reset(dn); }
+    dn->pending = rf_denoise_play_pending(dn->route) != 0;
+    if (!source.feeding && !dn->pending) { net_audio_denoise_reset(dn); }
     return n != 0;
 }

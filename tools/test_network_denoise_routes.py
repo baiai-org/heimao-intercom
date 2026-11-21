@@ -89,7 +89,7 @@ static void test_rx(uint8_t mode) {
             assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 10));
             assert(net_audio_denoise_pending(&dn, 10) == enabled);
             assert(!memcmp(block, enabled ? zero : input, sizeof(block)));
-            assert(!net_audio_denoise_render(&dn, mode, over, false, true, block, 100));
+            assert(!net_audio_denoise_render(&dn, mode, over, false, false, block, 100));
             assert(net_audio_denoise_pending(&dn, 100) == enabled);
             fill_block(block, 320);
             assert(net_audio_denoise_render(&dn, mode, ended, true, true, block, 110));
@@ -215,6 +215,60 @@ static void test_completed_over(uint8_t mode, bool rf, bool split_drain) {
     net_audio_denoise_reset(&dn);
 }
 
+static void test_live_gap(uint8_t mode, rf_denoise_level_t level) {
+    current_mode = mode;
+    keyed = false;
+    owner = PTT_OWNER_NONE;
+    const uint8_t first = bridge_denoise_network_setting(mode, DENOISE_NET_SPEAKER);
+    const rf_denoise_route_t route = bridge_denoise_route(first);
+    levels = (uint32_t)level << ((first - 1) * 3);
+    const uint8_t mac[6] = {2, 0, 0, 0, 0, 27};
+    net_audio_source_t over = net_audio_source(mac, 999, 100, true);
+    net_audio_denoise_t dn = {0};
+    int16_t block[320], zero[320] = {0};
+    rf_denoise_stats_t stats;
+    rf_denoise_stats(route, &stats);
+    const uint32_t prior_discarded = stats.discarded_samples;
+    const unsigned prior_ring_clear = discarded;
+
+    rf_denoise_test_autorun = false;
+    for (unsigned i = 0; i < 2; ++i) {
+        fill_block(block, 320 * i);
+        assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 20 * i));
+    }
+    assert(rf_denoise_play_pending(route) == 480);
+    assert(!net_audio_denoise_render(&dn, mode, over, false, false, block, 35));
+    assert(rf_denoise_play_pending(route) == 480);
+    assert(net_audio_denoise_render(&dn, mode, over, false, true, block, 40));
+    assert(!memcmp(block, input + 160, sizeof(block)));
+    assert(net_audio_denoise_render(&dn, mode, over, false, true, block, 60));
+    assert(!memcmp(block, input + 480, sizeof(block) / 2));
+    assert(!memcmp(block + 160, zero, sizeof(block) / 2));
+    assert(!net_audio_denoise_render(&dn, mode, over, false, true, block, 80));
+    while (rf_denoise_test_service()) { }
+
+    fill_block(block, 640);
+    assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 640));
+    assert(!memcmp(block, input + 640, sizeof(block)));
+    assert(net_audio_denoise_needs_lead(&dn));
+    net_audio_denoise_add_lead(&dn, input + 960, 640);
+    assert(dn.pending && net_audio_denoise_needs_lead(&dn));
+    net_audio_denoise_add_lead(&dn, input + 1280, 660);
+    assert(!net_audio_denoise_needs_lead(&dn) && rf_denoise_play_pending(route) == 640);
+    while (rf_denoise_test_service()) { }
+    rf_denoise_test_autorun = true;
+    fill_block(block, 1600);
+    assert(net_audio_denoise_render(&dn, mode, over, true, true, block, 680));
+    over.feeding = false;
+    assert(net_audio_denoise_render(&dn, mode, over, false, true, block, 700));
+    assert(net_audio_denoise_render(&dn, mode, over, false, true, block, 720));
+    assert(!dn.pending && !dn.latched);
+    rf_denoise_stats(route, &stats);
+    assert(stats.input_frames == 12 && stats.input_frames == stats.wet_frames + stats.dry_frames);
+    assert(stats.wet_frames && !stats.queue_full && stats.discarded_samples == prior_discarded);
+    assert(discarded == prior_ring_clear);
+}
+
 int main(void) {
     uint32_t rand_state = 42;
     for (size_t i = 0; i < sizeof(input) / sizeof(*input); ++i) {
@@ -224,6 +278,8 @@ int main(void) {
     for (unsigned route = 0; route < RF_DENOISE_ROUTE_COUNT; ++route) rf_denoise_prepare(route);
     for (uint8_t mode = 1; mode <= 2; ++mode) {
         test_rx(mode);
+        test_live_gap(mode, RF_DENOISE_LEVEL_LIGHT);
+        test_live_gap(mode, RF_DENOISE_LEVEL_STANDARD);
         for (unsigned repeat = 0; repeat < 1000; ++repeat) {
             test_completed_over(mode, repeat & 1, repeat & 2);
         }
@@ -256,6 +312,7 @@ int main(void) {
     }
     puts("PASS: P2P/MQTT four-way RX routing, exact tail PCM, RF priority, timeout and sender/owner changes");
     puts("PASS: 1000 completed-over transitions per mode retain all 480 samples through prefill and backpressure");
+    puts("PASS: live gaps consume queued PCM in order, aligned dry fallback, and spare input restores DSP lead");
     puts("PASS: real network TX denoise output enters mic shaping once, short drain and PTT/mode/room fences");
     return 0;
 }

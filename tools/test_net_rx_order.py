@@ -69,7 +69,7 @@ static int tail_id_for_mode(int mode){(void)mode;return 0;}
 static size_t tail_fetch(int id,size_t pos,int16_t *out,size_t count){(void)id;(void)pos;(void)out;(void)count;return 0;}
 /* This suite isolates receive order/PTT; real PCM drain is exercised by
  * test_bridge_speech_prefix.py with the actual voice buffer functions. */
-static void voice_bridge_network_state(bool feeding,bool rf){(void)feeding;(void)rf;}
+static void voice_bridge_network_state(bool feeding,bool rf,uint64_t id,uint16_t first){(void)feeding;(void)rf;(void)id;(void)first;}
 static bool voice_bridge_network_pending(void){return false;}
 static void voice_bridge_network_keyed(bool keyed){(void)keyed;}
 static void radio_led_note_net_rx(int mode){(void)mode;}
@@ -137,7 +137,7 @@ static void reset_engine(void){
 }
 static void seed_stream(unsigned peer,uint16_t head,uint16_t latest){
  rt_peer_t *p=&s_peer[peer];p->head_valid=p->have_latest=p->have_first=true;p->head=head;p->latest=latest;p->stream_first=latest-10;p->last_rx_ms=now_ms();
- p->order=(net_rx_order_t){.seen=true,.ptt=true,.audio=true,.epoch=wire_epoch,.latest=latest,.last_ms=now_ms()};
+ p->order=(net_rx_order_t){.seen=true,.ptt=true,.audio=true,.epoch=wire_epoch,.latest=latest,.first_seq=p->stream_first,.last_ms=now_ms()};
 }
 static unsigned late_count(void){return s_peer[0].rx_late;}
 static void receive(unsigned peer,uint16_t seq,bool on){
@@ -177,7 +177,7 @@ static void reset_engine(void){
 static void seed_stream(unsigned peer,uint16_t head,uint16_t latest){
  s_stream_mac[5]=peer+1;s_play_head_valid=s_have_latest=s_have_first=true;s_play_head=head;s_latest=latest;s_stream_first=latest-10;s_last_pkt_ms=now_ms();
  uint8_t mac[6]={0};mac[5]=peer+1;s_stream_source=relay_source(mac);
- s_stream_source->order=(net_rx_order_t){.seen=true,.ptt=true,.audio=true,.epoch=wire_epoch,.latest=latest,.last_ms=now_ms()};
+ s_stream_source->order=(net_rx_order_t){.seen=true,.ptt=true,.audio=true,.epoch=wire_epoch,.latest=latest,.first_seq=s_stream_first,.last_ms=now_ms()};
 }
 static unsigned late_count(void){return s_late;}
 static void receive(unsigned peer,uint16_t seq,bool on){

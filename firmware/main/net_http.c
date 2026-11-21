@@ -619,12 +619,15 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
     local_denoise_stats(RF_DENOISE_HANDSET_TX, handset_on, &handset);
     audio_i2s_diag_t i2s;
     audio_i2s_diag_get(&i2s);
-    char reply[2700];
+    voice_network_playout_t playout;
+    voice_bridge_network_playout(&playout);
+    char reply[2850];
     const int root = snprintf(reply, sizeof(reply),
         "{\"ok\":true,\"device_id\":\"%s\",\"p2p\":%s,\"mqtt\":%s,\"active_mode\":%u,"
         "\"state\":%u,\"frames\":%lu,\"max_us\":%lu,\"overruns\":%lu,\"psram_bytes\":%lu,"
         "\"mode\":%u,\"flags\":%lu,\"levels\":%lu,\"selection_level\":%u,\"rf_tx\":%s,\"bridge_active\":%s,\"bridge_keyed\":%s,"
         "\"speaker\":%s,\"handset\":%s,\"network_ring_discarded_samples\":%lu,"
+        "\"network_playout\":{\"underruns\":%lu,\"resumes\":%lu,\"last_underrun_us\":%lld,\"last_resume_us\":%lld},"
         "\"i2s\":{\"receive_stalls\":%lu,\"short_writes\":%lu,\"errors\":%lu}",
         device_identity_id(), flags & (1u << NETCOM_MODE_NETP2P) ? "true" : "false",
         flags & (1u << NETCOM_MODE_RELAY) ? "true" : "false", (unsigned)active_mode,
@@ -635,6 +638,8 @@ static esp_err_t h_rf_denoise(httpd_req_t *req)
         bridge_active() ? "true" : "false", ptt_owned(PTT_OWNER_NETWORK, 1) && ptt_bridge_keyed() ? "true" : "false",
         speaker_on ? "true" : "false", handset_on ? "true" : "false",
         (unsigned long)voice_bridge_network_discarded_samples(),
+        (unsigned long)playout.underruns, (unsigned long)playout.resumes,
+        (long long)playout.last_underrun_us, (long long)playout.last_resume_us,
         (unsigned long)i2s.receive_queue_stalls, (unsigned long)i2s.short_writes, (unsigned long)i2s.errors);
     if (root < 0 || (size_t)root >= sizeof(reply)) { return httpd_resp_send_500(req); }
     size_t used = (size_t)root;

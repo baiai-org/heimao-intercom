@@ -25,6 +25,7 @@ static bool ptt_local_audio_active(void){return false;}
 #define NETCOM_MODE_RELAY 2
 #define PTT_OWNER_NETWORK 2
 #define PTT_OWNER_NONE 0
+#define ESP_OK 0
 #define pdMS_TO_TICKS(n) (n)
 static bool s_play_stop,s_amp_on;
 static void *s_play_task;
@@ -41,11 +42,13 @@ static unsigned injections,writes,packet_reads;
 static size_t available_room=8192;
 static bool ready_for_direct=true,pre_key_seen;
 static bool packet(int16_t *out){++packet_reads;memcpy(out,expected,sizeof(expected));return true;}
-static bool network_audio_read(bool pull,int16_t *pcm,net_audio_source_t *source,const net_audio_denoise_t *dn){
+static bool network_audio_read(bool pull,int16_t *pcm,net_audio_source_t *source,const net_audio_denoise_t *dn,bool refill){
+ assert(!refill);
  (void)dn;
  *source=(net_audio_source_t){.present=true,.feeding=true};
  return pull && packet(pcm);
 }
+static void network_audio_refill(net_audio_denoise_t *dn,int16_t *pcm,int64_t now){(void)dn;(void)pcm;(void)now;}
 bool net_audio_denoise_pending(net_audio_denoise_t *dn,int64_t now){(void)now;return dn->pending;}
 void net_audio_denoise_reset(net_audio_denoise_t *dn){(void)dn;}
 bool net_audio_denoise_render(net_audio_denoise_t *dn,uint8_t mode,net_audio_source_t src,

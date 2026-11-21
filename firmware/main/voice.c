@@ -361,8 +361,14 @@ static volatile bool s_inject_tx_processed;
 static uint32_t s_inject_token;
 static ptt_owner_t s_inject_owner;
 static bool s_net_feeding, s_net_rf_required, s_net_rf_keyed, s_net_write_pending;
+static bool s_net_short_cushion, s_net_resume_pending;
+static uint64_t s_net_sender_epoch;
+static uint16_t s_net_first_seq;
+static voice_network_playout_t s_net_playout;
 static int64_t s_net_ready_us, s_net_close_us;
 static _Atomic uint32_t s_net_ring_discarded_samples;
+#define BRIDGE_PREFILL_SAMPLES 4800u
+#define NET_REFILL_SAMPLES 1920u
 #define NET_TX_LEAD_US 300000LL
 #define NET_DRAIN_LIMIT_US 2000000LL
 /* Set by voice_bridge_play() for the block it just returned. */
@@ -1707,7 +1713,7 @@ static void monitor_task(void *arg)
                 (write_err != ESP_OK && denoise.active)) {
                 speaker_denoise_end(&denoise);
             }
-            voice_bridge_network_written();
+            voice_bridge_network_written(write_err == ESP_OK);
             if (write_err == ESP_OK) {
                 ++s_stats.blocks;
                 voice_sdr_tail_block_commit();
@@ -2771,14 +2777,20 @@ void voice_inject_reset(void)
     s_inject_tx_processed = false;
     s_last_bridge_tx_processed = false;
     s_net_feeding = s_net_rf_required = s_net_rf_keyed = s_net_write_pending = false;
+    s_net_short_cushion = s_net_resume_pending = false;
     s_net_ready_us = s_net_close_us = 0;
     portEXIT_CRITICAL(&s_bridge_inj_mux);
     ptt_control_unlock();
 }
 
-void voice_bridge_network_state(bool feeding, bool rf_required)
+void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_epoch, uint16_t first_seq)
 {
     ptt_control_lock();
+    if (!feeding || !s_net_feeding || s_net_sender_epoch != sender_epoch || s_net_first_seq != first_seq) {
+        s_net_short_cushion = s_net_resume_pending = false;
+    }
+    s_net_sender_epoch = sender_epoch;
+    s_net_first_seq = first_seq;
     s_net_rf_required = rf_required;
     if (feeding) { s_net_close_us = 0; }
     else if (!s_net_close_us && s_inject_owner == PTT_OWNER_NETWORK) {
@@ -2844,10 +2856,22 @@ bool voice_bridge_network_ready(void)
     return ready;
 }
 
-void voice_bridge_network_written(void)
+void voice_bridge_network_written(bool written)
 {
     ptt_control_lock();
+    if (written && s_net_write_pending && s_net_resume_pending) {
+        s_net_resume_pending = false;
+        ++s_net_playout.resumes;
+        s_net_playout.last_resume_us = esp_timer_get_time();
+    }
     s_net_write_pending = false;
+    ptt_control_unlock();
+}
+
+void voice_bridge_network_playout(voice_network_playout_t *out)
+{
+    ptt_control_lock();
+    *out = s_net_playout;
     ptt_control_unlock();
 }
 
@@ -3147,6 +3171,8 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     if (network && !voice_bridge_network_ready()) {
         ptt_control_unlock(); return 0;
     }
+    const bool live_network = network && s_net_feeding;
+    const bool was_primed = s_inj_primed;
     if (network && lvl < 2) { s_inj_primed = false; }
     /* The last interpolation point is real audio, not disposable padding.
      * Drain it exactly once after input ends, then the next over must prefill. */
@@ -3156,24 +3182,36 @@ size_t voice_bridge_play(int16_t *out, size_t n)
         ptt_control_unlock(); return got;
     }
     if (network && !s_net_feeding && lvl >= 2) { s_inj_primed = true; }
-    if (!s_inj_primed && lvl >= 4800) {
+    /* A depleted ring needs a shorter cushion within the same over. Keep
+     * first audio and RF key-up on their existing timing. */
+    const size_t target = live_network && s_net_short_cushion ? NET_REFILL_SAMPLES : BRIDGE_PREFILL_SAMPLES;
+    if (!s_inj_primed && lvl >= target) {
         s_inj_primed = true;
+        s_net_resume_pending = live_network && s_net_short_cushion;
     } else if (s_inj_primed && (browser ? lvl < 2 : lvl == 0)) {
         s_inj_primed = false;
         ++s_bridge_starve;
     }
     size_t got = 0;
     if (s_inj_primed) {
-        const float ratio = 1.0f + ((float)lvl - 4800.0f) / 24000.0f;
+        const float ratio = 1.0f + ((float)lvl - (float)target) / 24000.0f;
         got = voice_bridge_take_resampled(out, n, ratio);
         if (got > 0) {
             s_last_bridge_tx_processed = browser && s_inject_tx_processed;
             if (network) { s_net_write_pending = true; }
         }
-        if (lvl > 7400 || lvl < 3600) { ++s_bridge_trim; }
+        if (lvl > target + 2600 || lvl + 1200 < target) { ++s_bridge_trim; }
         if (got < n && browser) {
             s_inj_primed = false; ++s_bridge_starve;
         }
+    }
+    if (live_network && was_primed && got < n) {
+        s_inj_primed = false;
+        s_net_short_cushion = true;
+        s_net_resume_pending = false;
+        ++s_bridge_starve;
+        ++s_net_playout.underruns;
+        s_net_playout.last_underrun_us = esp_timer_get_time();
     }
     ptt_control_unlock();
     return got;

@@ -12,6 +12,7 @@
 #define NET_RX_FLAG_HUB_CUTOFF 0x80u
 #define NET_RX_RETIRED 16
 #define NET_RX_COMPLETED 4
+#define NET_RX_LEGACY_RESTART_MS 2000
 typedef struct {
     uint16_t epoch, latest, first_seq, retired[NET_RX_RETIRED];
     uint16_t completed_epoch[NET_RX_COMPLETED], completed_first[NET_RX_COMPLETED];
@@ -47,7 +48,7 @@ static inline int net_rx_order_accept(net_rx_order_t *s, uint16_t epoch,
             /* A legacy sender has no reboot identity. After genuine silence,
              * require three sequential low counters before accepting restart.
              * One delayed old ON/OFF never changes an established over. */
-            if (!epoch && now - s->last_ms > 2000 && seq < 16 && ptt) {
+            if (!epoch && now - s->last_ms > NET_RX_LEGACY_RESTART_MS && seq < 16 && ptt) {
                 if (s->probe_count && seq == (uint16_t)(s->probe_seq + 1) &&
                     now - s->probe_ms <= 200) { ++s->probe_count; }
                 else { s->probe_count = 1; }
@@ -60,19 +61,23 @@ static inline int net_rx_order_accept(net_rx_order_t *s, uint16_t epoch,
             }
         }
     }
-    const bool start = fresh || (!s->ptt && ptt) || now - s->last_ms > 500;
+    /* Re-priming the decoder after packet starvation does not start an over.
+     * An unmarked sender can start again after the legacy PTT timeout. */
+    const bool start = fresh || (ptt && (!s->ptt ||
+        (!epoch && now - s->last_ms > NET_RX_LEGACY_RESTART_MS)));
     if (fresh) {
         if (s->seen && s->epoch && epoch != s->epoch) {
             s->retired[s->retired_next++ % NET_RX_RETIRED] = s->epoch;
         }
         s->epoch = epoch; s->seen = true;
     }
-    if (fresh || (!s->ptt && ptt) || (!epoch && now - s->last_ms > 2000)) {
+    if (start) {
         s->tail_seen = false;
         s->rf_blocked = false;
         s->hub_cutoff = false;
+        s->audio = false;
+        s->first_seq = seq;
     }
-    if (start) { s->audio = false; s->first_seq = seq; }
     if (!ptt && s->audio && s->ptt) {
         const unsigned i = s->completed_next++ % NET_RX_COMPLETED;
         s->completed_epoch[i] = epoch;
@@ -116,6 +121,16 @@ static inline bool net_rx_order_keyed(const net_rx_order_t *s, int64_t now,
                                      int timeout_ms)
 {
     return s->seen && s->audio && s->ptt && now - s->last_ms <= timeout_ms;
+}
+
+static inline bool net_rx_jitter_buffered(const bool *valid, const uint16_t *sequence,
+                                          unsigned slots, uint16_t head, unsigned packets)
+{
+    for (unsigned i = 0; i < packets; ++i, ++head) {
+        const unsigned slot = head % slots;
+        if (!valid[slot] || sequence[slot] != head) { return false; }
+    }
+    return true;
 }
 
 /* Seed once per engine start, advance once per outgoing over. Old receivers

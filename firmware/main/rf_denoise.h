@@ -67,6 +67,8 @@ void rf_denoise_stats(rf_denoise_route_t route, rf_denoise_stats_t *out);
 /* Fixed-size DAC playback includes the input route's startup lead.
  * Call finish once, then take the remaining PCM before releasing playback. */
 bool rf_denoise_play_block(rf_denoise_route_t route, int16_t *pcm, size_t n);
+bool rf_denoise_play_needs_lead(rf_denoise_route_t route);
+void rf_denoise_play_add_lead(rf_denoise_route_t route, const int16_t *pcm);
 bool rf_denoise_play_finish(rf_denoise_route_t route);
 size_t rf_denoise_play_take(rf_denoise_route_t route, int16_t *pcm, size_t n);
 size_t rf_denoise_play_pending(rf_denoise_route_t route);

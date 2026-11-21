@@ -5,7 +5,7 @@
 
 typedef struct {
     uint64_t sender_epoch;
-    uint16_t first_seq;
+    uint16_t first_seq; /* logical PTT start, independent of jitter-buffer priming */
     bool present;
     bool feeding;
     bool previous_completed;
@@ -68,10 +68,16 @@ static inline bool net_audio_source_changed(const net_audio_denoise_t *dn, net_a
 /* The new packet stays in its jitter buffer while the old decoded tail is played. */
 static inline bool net_audio_denoise_defer(const net_audio_denoise_t *dn, net_audio_source_t next)
 {
-    return dn->pending && net_audio_source_changed(dn, next) && (next.previous_completed || dn->finished);
+    return dn->pending && next.present &&
+        (dn->finished || (next.previous_completed && net_audio_source_changed(dn, next)));
 }
 
 bool net_audio_denoise_pending(net_audio_denoise_t *dn, int64_t now);
+static inline bool net_audio_denoise_needs_lead(const net_audio_denoise_t *dn)
+{
+    return dn->active && !dn->finished && rf_denoise_play_needs_lead(dn->route);
+}
+void net_audio_denoise_add_lead(net_audio_denoise_t *dn, const int16_t *block, int64_t now);
 bool net_audio_denoise_render(net_audio_denoise_t *dn, uint8_t mode,
                               net_audio_source_t source, bool have, bool output_ready,
                               int16_t *block, int64_t now);

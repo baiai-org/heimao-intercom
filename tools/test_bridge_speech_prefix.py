@@ -10,6 +10,8 @@ ROOT=Path(__file__).resolve().parents[1]
 
 VOICE=r'''
 #define BRIDGE_INJ_SAMPLES 8192
+#define BRIDGE_PREFILL_SAMPLES 4800u
+#define NET_REFILL_SAMPLES 1920u
 #define NET_TX_LEAD_US 300000LL
 #define NET_DRAIN_LIMIT_US 2000000LL
 static int16_t s_bridge_inj[BRIDGE_INJ_SAMPLES];
@@ -18,13 +20,18 @@ static int s_bridge_inj_mux,s_bgtx=16;
 static float s_inj_frac;
 static bool s_inj_primed,s_inject_tx_processed,s_last_bridge_tx_processed,s_inject_silent;
 static bool s_net_feeding,s_net_rf_required,s_net_rf_keyed,s_net_write_pending;
+static bool s_net_short_cushion,s_net_resume_pending;
+static uint64_t s_net_sender_epoch;
+static uint16_t s_net_first_seq;
+typedef struct {uint32_t underruns,resumes;int64_t last_underrun_us,last_resume_us;} voice_network_playout_t;
+static voice_network_playout_t s_net_playout;
 static int64_t s_net_ready_us,s_net_close_us;
 static uint32_t s_inject_token,s_bridge_starve,s_bridge_trim;
 static ptt_owner_t s_inject_owner;
 void voice_inject_reset(void);size_t voice_bridge_level(void);size_t voice_bridge_take(int16_t*,size_t);
-void voice_bridge_network_state(bool,bool);void voice_bridge_network_keyed(bool);
+void voice_bridge_network_state(bool,bool,uint64_t,uint16_t);void voice_bridge_network_keyed(bool);
 bool voice_bridge_network_pending(void);bool voice_bridge_network_ready(void);
-void voice_bridge_network_written(void);void voice_bridge_network_cancel(void);
+void voice_bridge_network_written(bool);void voice_bridge_network_cancel(void);
 static uint16_t wire_pcm;
 '''
 
@@ -58,7 +65,7 @@ static void clip(int frames,int gap){
     assert(rf_pin && first_key>=0 && t-first_key>=300);
     if(first<0){first=pcm[0];first_play=t;}last=pcm[n-1];count+=n;
    }
-   voice_bridge_network_written();
+   voice_bridge_network_written(n != 0);
   }
   if(ended && first>=0 && !rf_pin && !voice_bridge_level() && !voice_bridge_network_pending()){
    assert(first==1000 && last==9000 && count>320);
@@ -82,7 +89,7 @@ static void burst(int frames,int end_at){
    if(t%20==0 && voice_bridge_room()>=320){int16_t pcm[320];have=engine_take(pcm);if(have)voice_bridge_inject(pcm,320);}
    bridge_key_update(have,false);
   }
-  if(t%16==0){int16_t pcm[256];size_t n=voice_bridge_play(pcm,256);if(n){assert(rf_pin);if(first<0)first=pcm[0];last=pcm[n-1];}voice_bridge_network_written();}
+  if(t%16==0){int16_t pcm[256];size_t n=voice_bridge_play(pcm,256);if(n){assert(rf_pin);if(first<0)first=pcm[0];last=pcm[n-1];}voice_bridge_network_written(n != 0);}
   if(saw_key && !rf_pin && !voice_bridge_level()){assert(first==1000 && last==9000);return;}
   advance(1);
  }
@@ -96,22 +103,91 @@ static void completed_handoff(unsigned next_peer, bool completed) {
  wire_epoch++;
  for (unsigned i=0;i<12;i++) { wire_pcm=1000+i;receive(0,tx_seq++,true); }
  if (completed) { wire_pcm=9000;receive(0,tx_seq++,false); }
- assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==1000);
+ assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1000);
  dn.latched=true;dn.pending=true;dn.source=source;
  if (completed) {
-  for (int i=1;i<12;i++) { assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==1000+i); }
-  assert(network_audio_read(true,pcm,&source,&dn) && pcm[0]==9000);
+  for (int i=1;i<12;i++) { assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1000+i); }
+  assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==9000);
  }
  advance(20);wire_epoch++;
  for (unsigned i=0;i<12;i++) { wire_pcm=2000+i;receive(next_peer,tx_seq++,true); }
- assert(network_audio_read(true,pcm,&source,&dn)==!completed);
+ assert(network_audio_read(true,pcm,&source,&dn,false)==!completed);
  assert(source.previous_completed==completed);
  if (completed) {
   assert(net_audio_denoise_defer(&dn,source));
   dn.pending=false;
-  assert(network_audio_read(true,pcm,&source,&dn));
+  assert(network_audio_read(true,pcm,&source,&dn,false));
  }
  assert(pcm[0]==2000);
+}
+static void resumed_jitter(uint16_t epoch, unsigned pause_ms) {
+ fixture();wire_epoch=epoch;tx_seq=65530;
+ net_audio_denoise_t dn={0};
+ net_audio_source_t source;
+ int16_t pcm[320];
+ for (int i=0;i<12;i++) { wire_pcm=1000+i;receive(0,tx_seq++,true); }
+ assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1000);
+ assert(source.first_seq==65530);
+ dn.latched=true;dn.pending=true;dn.source=source;
+ for (int i=1;i<12;i++) { assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1000+i); }
+ advance(pause_ms);
+ assert(!network_audio_read(true,pcm,&source,&dn,false));
+ unsigned late=late_count();
+ wire_pcm=1010;receive(0,(uint16_t)(tx_seq-2),true);
+ assert(late_count()==late+1);
+ for (int i=0;i<7;i++) { wire_pcm=1012+i;receive(0,tx_seq++,true); }
+ assert(!network_audio_read(true,pcm,&source,&dn,true));
+ assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1012);
+ assert(source.feeding && !net_audio_source_changed(&dn,source));
+ assert(network_audio_read(true,pcm,&source,&dn,true) && pcm[0]==1013);
+ assert(network_audio_read(true,pcm,&source,&dn,true) && pcm[0]==1014);
+ assert(!network_audio_read(true,pcm,&source,&dn,true));
+ for (int i=15;i<19;i++) { assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==1000+i); }
+ advance(pause_ms);
+ assert(!network_audio_read(true,pcm,&source,&dn,false));
+ wire_pcm=9000;receive(0,tx_seq++,false);
+ assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==9000 && !source.feeding);
+ assert(!net_audio_source_changed(&dn,source));
+ if (epoch) { wire_epoch++; }
+ for (int i=0;i<7;i++) { wire_pcm=2000+i;receive(0,tx_seq++,true); }
+ assert(!network_audio_read(true,pcm,&source,&dn,false) && source.previous_completed);
+ dn.pending=false;
+ assert(network_audio_read(true,pcm,&source,&dn,false) && pcm[0]==2000);
+}
+static void ring_recovery(void) {
+ fixture();
+ int16_t packet[320],pcm[256];
+ for (size_t i=0;i<320;i++) { packet[i]=1000; }
+ voice_bridge_network_state(true,false,1,123);
+ for (size_t i=0;i<14;i++) { voice_bridge_inject(packet,320); }
+ assert(voice_bridge_play(pcm,256)==0);
+ voice_bridge_inject(packet,320);
+ assert(voice_bridge_play(pcm,256)==256 && pcm[0]==1000);
+ voice_bridge_network_written(true);
+ unsigned underruns=s_net_playout.underruns,resumes=s_net_playout.resumes;
+ for (size_t i=0;i<30 && s_net_playout.underruns==underruns;i++) {
+  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_network_written(n!=0);
+ }
+ assert(s_net_playout.underruns==underruns+1);
+ for (size_t i=0;i<5;i++) {
+  voice_bridge_network_state(true,false,1,123);voice_bridge_inject(packet,320);
+  assert(voice_bridge_play(pcm,256)==0);advance(20);
+ }
+ voice_bridge_inject(packet,320);
+ assert(voice_bridge_play(pcm,256)==256 && pcm[0]==1000);
+ voice_bridge_network_written(false);
+ assert(s_net_playout.resumes==resumes);
+ advance(16);
+ assert(voice_bridge_play(pcm,256)!=0);
+ voice_bridge_network_written(true);
+ assert(s_net_playout.resumes==resumes+1 && s_net_playout.last_resume_us==clock_us);
+
+ for (size_t i=0;i<20 && s_inj_primed;i++) {
+  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_network_written(n!=0);
+ }
+ voice_bridge_network_state(true,false,1,999);
+ for (size_t i=0;i<6;i++) { voice_bridge_inject(packet,320); }
+ assert(voice_bridge_play(pcm,256)==0 && s_net_playout.resumes==resumes+1);
 }
 int main(void){
  setvbuf(stdout,NULL,_IONBF,0);rx_guard_init();ptt_init();fixture();
@@ -124,6 +200,10 @@ int main(void){
  printf("PASS %s 1000 consecutive short overs: no residue, no head/tail loss\n",ENGINE);
  for (unsigned peer=0;peer<2;peer++) { completed_handoff(peer,true);completed_handoff(peer,false); }
  printf("PASS %s completed sender defers new jitter pull; live preemption still pulls first new block\n",ENGINE);
+ for (unsigned ms=520;ms<=1020;ms+=250) { resumed_jitter(123,ms);resumed_jitter(0,ms); }
+ printf("PASS %s marked and legacy same-over re-prime, wrap, stale packet, spare input and delayed OFF\n",ENGINE);
+ ring_recovery();
+ printf("PASS %s network underrun uses 120ms same-over refill; new over and I2S confirmation use separate state\n",ENGINE);
 
  // A short over can finish the network jitter buffer before the DSP emits speech.
  fixture();int16_t delayed=321,filtered[256];
@@ -132,7 +212,7 @@ int main(void){
  voice_bridge_inject(&delayed,1);bridge_key_update(true,false);
  assert(voice_bridge_play(filtered,256)==1 && filtered[0]==321);
  advance(300);bridge_key_update(false,false);assert(rf_pin);
- voice_bridge_network_written();bridge_key_update(false,false);
+ voice_bridge_network_written(true);bridge_key_update(false,false);
  advance(251);bridge_key_update(false,false);assert(!rf_pin);
 
  // The final sample and final I2S block both keep the transmitter reserved.
@@ -140,7 +220,7 @@ int main(void){
  bridge_key_update(false,false);assert(rf_pin);advance(300);
  assert(voice_bridge_play(out,256)==1 && out[0]==777 && voice_bridge_level()==0);
  assert(voice_bridge_network_pending());advance(300);bridge_key_update(false,false);assert(rf_pin);
- voice_bridge_network_written();bridge_key_update(false,false);advance(251);bridge_key_update(false,false);
+ voice_bridge_network_written(true);bridge_key_update(false,false);advance(251);bridge_key_update(false,false);
  assert(!rf_pin && !voice_bridge_network_pending());
  printf("PASS %s last interpolation sample and I2S completion hold RF\n",ENGINE);
 
@@ -222,7 +302,7 @@ def run(out):
     voice=(ROOT/'firmware/main/voice.c').read_text(encoding='utf-8')
     common=order.COMMON+order.rf_close_support()
     for stub in (
-        'static void voice_bridge_network_state(bool feeding,bool rf){(void)feeding;(void)rf;}\n',
+        'static void voice_bridge_network_state(bool feeding,bool rf,uint64_t id,uint16_t first){(void)feeding;(void)rf;(void)id;(void)first;}\n',
         'static bool voice_bridge_network_pending(void){return false;}\n',
         'static void voice_bridge_network_keyed(bool keyed){(void)keyed;}\n'):
         assert stub in common;common=common.replace(stub,'')

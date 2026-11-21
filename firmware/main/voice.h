@@ -114,13 +114,18 @@ void   voice_bridge_inject(const int16_t *pcm, size_t n);
 /* Network producers report whether input/decoder data is still pending.
  * Physical-key notification starts a separate 300ms TX lead; no audio is
  * consumed during that lead. Pending includes the final I2S write. */
-void voice_bridge_network_state(bool feeding, bool rf_required);
+void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_epoch, uint16_t first_seq);
 void voice_bridge_network_keyed(bool keyed);
 bool voice_bridge_network_ready(void);
 bool voice_bridge_network_pending(void);
 void voice_bridge_network_discard(void);
 uint32_t voice_bridge_network_discarded_samples(void);
-void voice_bridge_network_written(void);
+void voice_bridge_network_written(bool written);
+typedef struct {
+    uint32_t underruns, resumes;
+    int64_t last_underrun_us, last_resume_us;
+} voice_network_playout_t;
+void voice_bridge_network_playout(voice_network_playout_t *out);
 void voice_bridge_network_cancel(void);
 size_t voice_bridge_room(void);
 size_t voice_bridge_take(int16_t *out, size_t cap);
