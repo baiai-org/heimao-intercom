@@ -2683,6 +2683,7 @@ const SDR = {
   ptt: false, keyed: false, keyPending: false, txEpoch: 0, rxRun: 0,
   micCtx: null, micStream: null, micSp: null, micPeak: 0, micFrames: 0,
   tick: null, txQueue: [], txQueued: 0, txBusy: false, txDrop: 0,
+  txCaptured: 0, txSent: 0, txInFlight: 0, txReason: 'idle', txFlush: null,
   rxStats: {ms: 0, underruns: 0, dropped: 0}, httpMs: 0,
   control: Promise.resolve(), session: Promise.resolve(), releasePending: Promise.resolve(true),
   txIdle: Promise.resolve(), keyId: 0, keyAck: null,
@@ -2795,11 +2796,27 @@ function sdrRegisterAudio() {
       this.size = Math.min(1024, Math.round(this.wire * 0.040));
       this.active = false;
       this.port.onmessage = e => {
+        if (!e.data.on) {
+          if (e.data.flush && this.active && e.data.epoch === this.epoch) {
+            this.sendAudio();
+            this.port.postMessage({epoch: this.epoch, flushed: true});
+          }
+          this.active = false; this.fill = 0;
+          return;
+        }
         this.active = !!e.data.on; this.epoch = e.data.epoch;
         this.buf = new Int16Array(this.size); this.fill = 0;
-        this.phase = 0; this.sum = 0; this.count = 0; this.peak = 0;
+        this.phase = 0; this.sum = 0; this.count = 0; this.peak = 0; this.sent = 0;
         this.lp = sdrLowPass4(sampleRate);
       };
+    }
+    sendAudio() {
+      if (!this.fill) return;
+      const samples = this.fill === this.size ? this.buf : this.buf.slice(0, this.fill);
+      this.port.postMessage({epoch: this.epoch, samples, first: this.sent,
+        stamp: currentTime, peak: this.peak}, [samples.buffer]);
+      this.sent += this.fill;
+      this.buf = new Int16Array(this.size); this.fill = 0; this.peak = 0;
     }
     process(inputs, outputs) {
       if (outputs[0]) outputs[0].forEach(out => out.fill(0));
@@ -2813,11 +2830,7 @@ function sdrRegisterAudio() {
           const v = Math.max(-32768, Math.min(32767, Math.round(this.sum/this.count*32767)));
           this.sum = 0; this.count = 0; this.buf[this.fill++] = v;
           this.peak = Math.max(this.peak, Math.abs(v));
-          if (this.fill === this.size) {
-            this.port.postMessage({epoch: this.epoch, samples: this.buf,
-              stamp: currentTime, peak: this.peak}, [this.buf.buffer]);
-            this.buf = new Int16Array(this.size); this.fill = 0; this.peak = 0;
-          }
+          if (this.fill === this.size) this.sendAudio();
         }
       }
       return true;
@@ -2838,7 +2851,8 @@ function sdrReport(tag) {
     ctx: SDR.ctx ? SDR.ctx.state : 'none', sr: SDR.ctx ? SDR.ctx.sampleRate : 0,
     wire: SDR.wire, pl: SDR.player, fr: SDR.frames, mfr: SDR.micFrames,
     rq: SDR.rxStats.ms, ru: SDR.rxStats.underruns, rd: SDR.rxStats.dropped,
-    tq: Math.round(SDR.txQueued*1000/SDR.wire), td: SDR.txDrop,
+    tq: Math.round(SDR.txQueued*1000/SDR.wire), td: SDR.txDrop, tx: SDR.activeTx,
+    tc: SDR.txCaptured, ts: SDR.txSent, ti: SDR.txInFlight, why: SDR.txReason,
     wb: SDR.ws ? SDR.ws.bufferedAmount : 0, hm: SDR.httpMs});
   fetch('/api/sdr_report?' + q, {cache: 'no-store'}).catch(() => {});
 }
@@ -2859,9 +2873,9 @@ async function sdrMicList() {
 }
 
 /* Keep the timeout in force while consuming the body, not just its headers. */
-async function sdrRequest(path, options = {}, type = 'json') {
+async function sdrRequest(path, options = {}, type = 'json', timeoutMs = 3000) {
   const controller = new AbortController(), start = performance.now();
-  const timer = setTimeout(() => controller.abort(), 3000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(path, {...options, cache: 'no-store', signal: controller.signal});
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2902,21 +2916,29 @@ function sdrPttMsg(on, tx = SDR.activeTx, sid = SDR.sid, epoch = SDR.txEpoch) {
     catch (e) { sdrFinishAck(e); }
   });
 }
+function sdrAbortAudio(reason, lost = 0, switchToHttp = false) {
+  SDR.txReason = reason; SDR.txDrop += lost;
+  if (switchToHttp && !SDR.http && SDR.on) sdrHttpStart();
+  else sdrPttUp();
+  log('语音发送已停止（' + reason + '），请重新发话', 'err');
+}
 function sdrSendAudio(pcm, stamp) {
-  if (!SDR.on || !SDR.ptt || !SDR.keyed) return;
-  if (SDR.ctx && SDR.ctx.currentTime - stamp > 0.5) { SDR.txDrop += pcm.length; return; }
+  if (!SDR.on || !SDR.ptt || !SDR.keyed || !pcm.length) return;
+  if (SDR.ctx && SDR.ctx.currentTime - stamp > 0.5) {
+    sdrAbortAudio('采集帧超时', pcm.length); return;
+  }
   if (SDR.http) {
+    if (SDR.txQueued + pcm.length > SDR.wire * 0.5) {
+      sdrAbortAudio('HTTP 语音积压', pcm.length); return;
+    }
     SDR.txQueue.push({pcm, stamp}); SDR.txQueued += pcm.length;
-    while (SDR.txQueued > SDR.wire * 0.5) SDR.txDrop += sdrDropTxFrame();
     if (!SDR.txBusy) SDR.txIdle = sdrHttpTxPump();
     return;
   }
   const ws = SDR.ws;
-  if (!ws || ws.readyState !== 1) { sdrPttUp(); return; }
+  if (!ws || ws.readyState !== 1) { sdrAbortAudio('音频连接断开', pcm.length, true); return; }
   if (ws.bufferedAmount > SDR.wire * 2 * 0.25) {
-    SDR.txDrop += pcm.length;
-    ws.close(); sdrHttpStart();
-    log('音频发送持续积压，已停止本次发射，请检查网络后重试', 'err'); return;
+    sdrAbortAudio('WebSocket 语音积压', pcm.length, true); return;
   }
   const max = Math.floor((SDR.maxFrame - 8) / 2);
   for (let i = 0; i < pcm.length; i += max) {
@@ -2924,12 +2946,10 @@ function sdrSendAudio(pcm, stamp) {
       const part = pcm.subarray(i, i+max), frame = new ArrayBuffer(8+part.byteLength), view = new DataView(frame);
       view.setUint32(0, SDR.sid, true); view.setUint32(4, SDR.activeTx, true);
       new Int16Array(frame, 8).set(part); ws.send(frame);
+      SDR.txSent += part.length;
     }
-    catch (e) { sdrPttUp(); log('音频发送失败: ' + e, 'err'); break; }
+    catch (e) { sdrAbortAudio('WebSocket 语音发送失败', pcm.length - i, true); break; }
   }
-}
-function sdrDropTxFrame() {
-  const frame = SDR.txQueue.shift(); SDR.txQueued -= frame.pcm.length; return frame.pcm.length;
 }
 async function sdrHttpTxPump() {
   if (SDR.txBusy) return;
@@ -2937,9 +2957,9 @@ async function sdrHttpTxPump() {
   const epoch = SDR.txEpoch, sid = SDR.sid, tx = SDR.activeTx;
   try {
     while (SDR.http && SDR.ptt && SDR.keyed && SDR.txEpoch === epoch && SDR.txQueue.length) {
-      while (SDR.txQueue.length && SDR.ctx.currentTime-SDR.txQueue[0].stamp > 0.5)
-        SDR.txDrop += sdrDropTxFrame();
-      if (!SDR.txQueue.length) break;
+      if (SDR.ctx.currentTime - SDR.txQueue[0].stamp > 0.5) {
+        sdrAbortAudio('HTTP 待发语音超时'); break;
+      }
       const frames = []; let count = 0;
       while (SDR.txQueue.length && count+SDR.txQueue[0].pcm.length <= 4096) {
         const f = SDR.txQueue.shift(); frames.push(f.pcm); count += f.pcm.length;
@@ -2947,12 +2967,15 @@ async function sdrHttpTxPump() {
       SDR.txQueued -= count;
       const body = new Int16Array(count); let off = 0;
       frames.forEach(f => {body.set(f, off); off += f.length;});
-      await sdrRequest('/api/sdr_tx?sid=' + sid + '&tx=' + tx, {method: 'POST', body: body.buffer}, 'empty');
+      SDR.txInFlight = count;
+      await sdrRequest('/api/sdr_tx?sid=' + sid + '&tx=' + tx, {method: 'POST', body: body.buffer}, 'empty', 750);
+      if (SDR.txEpoch === epoch) SDR.txSent += count;
+      SDR.txInFlight = 0;
     }
   } catch (e) {
-    if (SDR.txEpoch === epoch) { sdrPttUp(); log('HTTP 音频发送失败: ' + e, 'err'); }
+    if (SDR.txEpoch === epoch) sdrAbortAudio('HTTP 语音发送失败');
   } finally {
-    SDR.txBusy = false;
+    SDR.txInFlight = 0; SDR.txBusy = false;
   }
 }
 
@@ -3115,7 +3138,7 @@ function sdrApplyState(reply, sid = SDR.sid) {
     sdrPttUp(false);
     if (reply.reason === 'hold_limit') log('已达发射超时', 'good');
     else log('手台端已停止发射: ' + (reply.reason || 'released'), 'err');
-  } else if (SDR.keyed && reply.tx === SDR.activeTx && Number.isFinite(reply.remaining_ms)) {
+  } else if (SDR.keyed && !SDR.txFlush && reply.tx === SDR.activeTx && Number.isFinite(reply.remaining_ms)) {
     setPttLabel($('sdrPtt'), '■ 发射中 · 剩余 ' + Math.ceil(reply.remaining_ms / 1000) + ' 秒');
   }
 }
@@ -3160,6 +3183,7 @@ async function sdrPttDown(ev) {
   }
   SDR.ptt = true; const epoch = ++SDR.txEpoch, tx = ++SDR.txId, sid = SDR.sid;
   SDR.activeTx = tx;
+  SDR.txCaptured = SDR.txSent = SDR.txDrop = 0; SDR.txReason = 'transmitting';
   setPttLabel($('sdrPtt'), '正在打开麦克风 · 点击取消');
   const active = () => SDR.on && SDR.ptt && SDR.txEpoch === epoch;
   try {
@@ -3186,6 +3210,14 @@ async function sdrPttDown(ev) {
     SDR.micLabel = stream.getAudioTracks()[0].label || '麦克风';
     node.port.onmessage = e => {
       if (!active() || !SDR.keyed || e.data.epoch !== epoch) return;
+      if (e.data.flushed) {
+        if (SDR.txFlush) { SDR.txFlush(true); }
+        return;
+      }
+      if (e.data.first !== SDR.txCaptured) {
+        sdrAbortAudio('采集序号不连续', e.data.samples.length); return;
+      }
+      SDR.txCaptured += e.data.samples.length;
       SDR.micFrames++; SDR.micPeak = Math.max(SDR.micPeak, e.data.peak);
       sdrSendAudio(e.data.samples, e.data.stamp);
     };
@@ -3207,9 +3239,37 @@ async function sdrPttDown(ev) {
     if (active()) { sdrPttUp(); log('麦克风发射失败: ' + e, 'err'); }
   }
 }
+function sdrPttFinish() {
+  if (!SDR.keyed || !SDR.micSp || SDR.txFlush) return sdrPttUp();
+  const epoch = SDR.txEpoch;
+  setPttLabel($('sdrPtt'), '正在发送余音 · 点击立即停止');
+  const flushed = new Promise(resolve => { SDR.txFlush = resolve; });
+  SDR.micSp.port.postMessage({on: false, flush: true, epoch});
+  let timer;
+  const expired = new Promise(resolve => { timer = setTimeout(() => resolve(false), 600); });
+  const drained = flushed.then(async ok => {
+    if (ok && SDR.http) await SDR.txIdle;
+    return ok;
+  });
+  const released = Promise.race([drained, expired]).then(ok => {
+    if (SDR.txEpoch !== epoch) return false;
+    SDR.txReason = ok ? 'released' : '排空语音超时';
+    if (!ok) log('语音排空超时，已松开 PTT', 'err');
+    return sdrPttUp();
+  }).finally(() => clearTimeout(timer));
+  SDR.releasePending = released;
+  return released;
+}
 function sdrPttUp(notify = true) {
   const release = notify && (SDR.keyed || SDR.keyPending);
   const tx = SDR.activeTx, sid = SDR.sid;
+  const transmitting = SDR.ptt || SDR.keyed || SDR.keyPending;
+  if (SDR.txFlush) { SDR.txFlush(false); SDR.txFlush = null; }
+  if (transmitting) {
+    SDR.txDrop += SDR.txQueued;
+    if (SDR.txReason === 'transmitting') SDR.txReason = 'aborted';
+    if (notify && SDR.keyed) sdrReport('tx-end');
+  }
   SDR.ptt = SDR.keyed = SDR.keyPending = false; SDR.txEpoch++;
   SDR.txQueue = []; SDR.txQueued = 0;
   if (SDR.micSp) {
@@ -3239,6 +3299,7 @@ function sdrPttUp(notify = true) {
   }
   if (SDR.rxGain) SDR.rxGain.gain.value = 1;
   $('sdrPtt').className = 'tx'; setPttLabel($('sdrPtt'), '● 点击发射 (PTT)');
+  return release ? SDR.releasePending : Promise.resolve(true);
 }
 async function sdrBeepTest() {
   try {
@@ -3253,7 +3314,7 @@ $('sdrBtn').onclick = sdrToggle; $('sdrBeep').onclick = sdrBeepTest;
 $('sdrMicScan').onclick = sdrMicList;
 function sdrPttToggle(ev) {
   if (ev) ev.preventDefault();
-  return SDR.ptt ? sdrPttUp() : sdrPttDown();
+  return SDR.ptt ? sdrPttFinish() : sdrPttDown();
 }
 $('sdrPtt').addEventListener('click', sdrPttToggle);
 window.addEventListener('blur', () => sdrPttUp());

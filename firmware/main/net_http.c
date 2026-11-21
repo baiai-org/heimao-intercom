@@ -137,7 +137,7 @@ static void radio_config_json(char *out, size_t size)
 
 /* The panel reports its own view of the SDR link (see h_sdr_report);
  * /api/status mirrors it so the link can be diagnosed remotely. */
-#define SDR_REP_LEN 320   /* the panel's report query outgrew 160 (it carries code= and host= at the end) */
+#define SDR_REP_LEN 384   /* Browser counters and the URL-encoded end reason. */
 static char s_sdr_rep[SDR_REP_LEN];
 
 /* ------------------------------------------------------------------ log tail
@@ -1519,13 +1519,26 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
     uint32_t sequence = 0;
     const size_t n = ptt_trace_snapshot(events, CAPACITY, &sequence);
     char config[320]; radio_config_json(config, sizeof(config));
+    sdr_tx_audio_stats_t sdr_audio;
+    voice_sdr_playout_t sdr_rf;
+    bridge_rx_stats_t bridge_audio;
+    netcom_tx_audio_stats_t network_audio;
+    sdr_tx_audio_stats(&sdr_audio);
+    voice_sdr_playout(&sdr_rf);
+    bridge_rx_stats(&bridge_audio);
+    netcom_tx_audio_stats(&network_audio);
     size_t used = (size_t)snprintf(buf, JSON_CAPACITY,
         "{\"version\":1,\"device_id\":\"%s\",\"firmware\":\"%s\",\"uptime_ms\":%" PRIu32 ","
         "\"memory\":{\"internal_free\":%u,\"internal_min\":%u,\"internal_largest\":%u,\"psram_free\":%u,"
         "\"alloc_failures\":%u,\"last_alloc_bytes\":%u,\"last_alloc_caps\":%u},"
         "\"connections\":{\"http_clients\":%d,\"https_clients\":%d,\"https_errors\":%u,"
         "\"https_open_events\":%u,\"https_close_events\":%u,\"last_error\":%d,\"last_tls_error\":%d},"
-        "\"rf_config\":%s,\"tx_timeout_s\":%u,\"event_sequence\":%" PRIu32 ",\"events\":[",
+        "\"rf_config\":%s,\"tx_timeout_s\":%u,"
+        "\"tx_audio\":{\"sdr\":{\"token\":%u,\"received\":%u,\"rejected\":%u,\"routed\":%u,\"pending\":%u},"
+        "\"sdr_rf\":{\"token\":%u,\"written\":%u,\"write_errors\":%u,\"underruns\":%u,\"resumes\":%u,\"last_resume_us\":%lld},"
+        "\"bridge\":{\"over\":%u,\"captured\":%u,\"submitted\":%u,\"rejected\":%u},"
+        "\"network\":{\"mode\":%u,\"accepted\":%u,\"rejected\":%u,\"expired_frames\":%u,\"encode_errors\":%u,\"send_errors\":%u}},"
+        "\"event_sequence\":%" PRIu32 ",\"events\":[",
         device_identity_id(), esp_app_get_description()->version, (uint32_t)(esp_timer_get_time()/1000),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
@@ -1533,7 +1546,15 @@ static esp_err_t h_diagnostics(httpd_req_t *req)
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), atomic_load(&s_alloc_failures),
         atomic_load(&s_alloc_size), atomic_load(&s_alloc_caps), http_clients(s_plain_handle), http_clients(s_tls_handle),
         atomic_load(&s_https_errors), atomic_load(&s_https_opens), atomic_load(&s_https_closes),
-        atomic_load(&s_https_error), atomic_load(&s_https_tls_error), config, tx_timeout_seconds(), sequence);
+        atomic_load(&s_https_error), atomic_load(&s_https_tls_error), config, tx_timeout_seconds(),
+        (unsigned)sdr_audio.token, (unsigned)sdr_audio.received_samples, (unsigned)sdr_audio.rejected_samples,
+        (unsigned)sdr_audio.routed_samples, (unsigned)sdr_audio.pending_samples,
+        (unsigned)sdr_rf.token, (unsigned)sdr_rf.written_samples, (unsigned)sdr_rf.write_errors,
+        (unsigned)sdr_rf.underruns, (unsigned)sdr_rf.resumes, (long long)sdr_rf.last_resume_us,
+        (unsigned)bridge_audio.starts, (unsigned)bridge_audio.captured_samples, (unsigned)bridge_audio.submitted_samples,
+        (unsigned)bridge_audio.rejected_samples, (unsigned)netcom_mode(), (unsigned)network_audio.accepted_samples,
+        (unsigned)network_audio.rejected_samples, (unsigned)network_audio.expired_frames,
+        (unsigned)network_audio.encode_errors, (unsigned)network_audio.send_errors, sequence);
     for (size_t i = 0; i < n && used < JSON_CAPACITY; ++i) {
         const ptt_trace_event_t *event = &events[i];
         const int written = snprintf(buf + used, JSON_CAPACITY - used,
@@ -2829,7 +2850,7 @@ static esp_err_t h_sdr_state(httpd_req_t *req)
  */
 static esp_err_t h_sdr_report(httpd_req_t *req)
 {
-    char buf[256];
+    char buf[SDR_REP_LEN];
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK) {
         buf[0] = '\0';
     }

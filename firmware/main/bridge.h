@@ -111,6 +111,7 @@ typedef struct {
     bool open;
     uint32_t starts;
     uint32_t ends;
+    uint32_t captured_samples, submitted_samples, rejected_samples;
     int64_t start_ms;
     int64_t end_ms;
 } bridge_rx_stats_t;

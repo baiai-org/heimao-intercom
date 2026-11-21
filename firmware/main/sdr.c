@@ -38,7 +38,7 @@ static const char *TAG = "sdr";
  * up to 5 s, so the old 1.2 s cap cut .198's 1.35 s clip mid-tone and left
  * tail_timeout; the cap is now a safety net, not the tone length. */
 #define SDR_RELEASE_MAX_US  6000000
-#define SDR_RELEASE_NOTONE_US 600000
+#define SDR_RELEASE_AUDIO_US 1100000 /* ingress ring, RF ring and final DAC drain */
 /* A session with no live client at all (no WebSocket, no HTTP poll, no
  * control traffic) for this long is orphaned: its listener process is gone
  * and only it could release the engine.  Heartbeats and polls refresh
@@ -62,6 +62,7 @@ static uint32_t s_cancelled_tx;
 static uint32_t s_tail_upload_sid;
 static int64_t s_tail_drain_us;
 static const char *s_end_reason = "idle";
+static const char *s_release_cause;
 /* Short-press diagnosis: remember how the last over ended. */
 static bool s_pcm_ever;
 static char s_last_reason[24] = "none";
@@ -102,6 +103,7 @@ static volatile uint64_t s_rx_smp;     /* exact samples delivered */
 static volatile uint32_t s_tx_pkts;
 static volatile uint32_t s_tx_dry;
 static volatile uint32_t s_tx_samples;
+static uint32_t s_tx_received_samples, s_tx_rejected_samples, s_tx_routed_samples;
 static volatile uint32_t s_ws_frames;   /* audio frames from the page */
 static volatile uint32_t s_ws_bytes;
 static volatile uint32_t s_ws_send_err; /* frames the socket refused */
@@ -314,6 +316,7 @@ static void release_locked(const char *reason)
     s_net_tx = false;
     s_rf_tx = false;
     s_end_reason = reason;
+    s_release_cause = NULL;
     portENTER_CRITICAL(&s_mux);
     s_tx_tail = s_tx_head;
     monitor_rx_local_tx(&s_monitor, false);
@@ -333,12 +336,15 @@ static void request_release_locked(const char *reason)
     s_limit_release = !strcmp(reason, "hold_limit");
     s_tail_drain_us = 0;
     s_release_started_us = esp_timer_get_time();
-    s_end_reason = reason;
+    s_release_cause = s_end_reason = reason;
 }
 
 static void finish_release_locked(const char *reason)
 {
-    release_locked(s_limit_release && !strcmp(reason, "released") ? "hold_limit" : reason);
+    if (!strcmp(reason, "released") && s_release_cause && strcmp(s_release_cause, "tail_pending")) {
+        reason = s_release_cause;
+    }
+    release_locked(reason);
 }
 
 bool sdr_session_valid(uint32_t sid)
@@ -396,6 +402,7 @@ static bool start_tx_locked(uint32_t tx)
     s_ptt_hold = true;
     s_ptt_started_us = s_pcm_us = esp_timer_get_time();
     s_pcm_ever = false;
+    s_tx_received_samples = s_tx_rejected_samples = s_tx_routed_samples = 0;
     s_end_reason = "transmitting";
     return true;
 }
@@ -454,6 +461,13 @@ bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t l
         !ptt_owned(PTT_OWNER_SDR, tx)) {
         xSemaphoreGive(s_key); return false;
     }
+    const size_t input = len / 2;
+    if (input > SDR_TX_RING_SAMPLES - tx_level_locked()) {
+        s_tx_rejected_samples += (uint32_t)input;
+        request_release_locked("pcm_overflow");
+        xSemaphoreGive(s_key);
+        return false;
+    }
     /* Digital silence counts as arriving PCM. No signal-level gate. */
     s_pcm_us = s_client_us = esp_timer_get_time();
     s_pcm_ever = true;
@@ -468,6 +482,7 @@ bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t l
         ring_put(s_tx_ring, SDR_TX_RING_SAMPLES, &s_tx_head, &s_tx_tail, tmp, n, NULL);
         done += 2 * n;
     }
+    s_tx_received_samples += (uint32_t)input;
     xSemaphoreGive(s_key);
     return true;
 }
@@ -492,10 +507,10 @@ static int sdr_pcm_peak(const int16_t *pcm, size_t n)
  * gain (ntxgain) rather than the handset's txgain.  The local RF consumer is
  * explicitly told that this buffer is already processed, so the monitor does not
  * apply the MIC EQ or network->RF bgtx a second time. */
-static void sdr_route_tx_pcm(int16_t *pcm, size_t n)
+static bool sdr_route_tx_pcm(int16_t *pcm, size_t n)
 {
     if (!pcm || n == 0) {
-        return;
+        return false;
     }
     const int raw_peak = sdr_pcm_peak(pcm, n);
     const int processed_peak = voice_apply_net_tx_processing(pcm, n);
@@ -510,11 +525,27 @@ static void sdr_route_tx_pcm(int16_t *pcm, size_t n)
             ++s_tx_processed_clip;
         }
     }
-    if (s_net_tx) {
+    const bool submitted = !s_net_tx ||
         netcom_tx_sample_until(pcm, n, false, ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id));
-    }
     if (!s_net_tx || s_rf_tx) {
         voice_sdr_inject_processed(s_tx_id, pcm, n);
+    }
+    return submitted;
+}
+
+static void sdr_tx_drain_locked(int16_t *pcm)
+{
+    const size_t available = tx_level_locked();
+    if (!available) { if (s_ptt_hold) { ++s_tx_dry; } return; }
+    const size_t take = available < SDR_PKT_SAMPLES ? available : SDR_PKT_SAMPLES;
+    if ((s_rf_tx && voice_bridge_level() > 7000) ||
+        (s_net_tx && !netcom_tx_room(take, false, ptt_release_deadline_us(PTT_OWNER_SDR, s_tx_id)))) { return; }
+    const size_t n = ring_take(s_tx_ring, SDR_TX_RING_SAMPLES, &s_tx_head, &s_tx_tail, pcm, take);
+    if (n) {
+        if (!sdr_route_tx_pcm(pcm, n)) { request_release_locked("network_queue"); }
+        ++s_tx_pkts;
+        s_tx_samples += (uint32_t)n;
+        s_tx_routed_samples += (uint32_t)n;
     }
 }
 
@@ -549,17 +580,10 @@ static void sdr_tx_step(void)
                  (s_rf_tx && !ptt_source_key(PTT_OWNER_SDR, s_tx_id, true))) {
             release_locked(s_rf_tx ? "radio_not_ready" : "owner_lost");
         }
-        else if (voice_bridge_level() <= 7000) {
-            const size_t n = ring_take(s_tx_ring, SDR_TX_RING_SAMPLES,
-                                       &s_tx_head, &s_tx_tail, pcm, SDR_PKT_SAMPLES);
-            if (n) {
-                sdr_route_tx_pcm(pcm, n);
-                ++s_tx_pkts; s_tx_samples += (uint32_t)n;
-            } else { ++s_tx_dry; }
-        }
+        else { sdr_tx_drain_locked(pcm); }
     } else if (s_releasing) {
-        const int64_t release_cap_us = voice_sdr_tail_configured()
-            ? ((int64_t)voice_sdr_tail_ms() + 600) * 1000 : SDR_RELEASE_NOTONE_US;
+        const int64_t release_cap_us = SDR_RELEASE_AUDIO_US +
+            (voice_sdr_tail_configured() ? (int64_t)voice_sdr_tail_ms() * 1000 : 0);
         const int64_t cap = !s_limit_release && release_cap_us < SDR_RELEASE_MAX_US
             ? release_cap_us : SDR_RELEASE_MAX_US;
         if (!ptt_owned(PTT_OWNER_SDR, s_tx_id)) {
@@ -570,29 +594,21 @@ static void sdr_tx_step(void)
                    (s_rf_tx && !ptt_source_key(PTT_OWNER_SDR, s_tx_id, true))) {
             finish_release_locked(s_rf_tx ? "radio_not_ready" : "owner_lost");
         } else {
-            if (voice_bridge_level() <= 7000) {
-                const size_t n = ring_take(s_tx_ring, SDR_TX_RING_SAMPLES,
-                                           &s_tx_head, &s_tx_tail, pcm,
-                                           SDR_PKT_SAMPLES);
-                if (n) {
-                    sdr_route_tx_pcm(pcm, n);
-                    ++s_tx_pkts; s_tx_samples += (uint32_t)n;
-                }
-            }
-            if (!s_tail_started && tx_level_locked() == 0) {
-                if (voice_sdr_tail_start(s_tx_id)) {
-                    s_tail_started = true;
-                    s_end_reason = s_limit_release ? "hold_limit" : "tail";
-                } else {
-                    finish_release_locked("released");
-                }
+            sdr_tx_drain_locked(pcm);
+            if (s_tail_drain_us) {
+                if (now >= s_tail_drain_us) { finish_release_locked("released"); }
             } else if (s_tail_started) {
                 if (voice_sdr_tail_done() == s_tx_id) {
-                    /* I2S accepted the last samples; allow the RF DAC buffer
-                     * to play them before releasing the carrier. */
-                    s_tail_drain_us = now + (s_rf_tx ? AUDIO_I2S_BUFFER_MS * 1000 : 0);
+                    if (s_rf_tx) { s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000; }
+                    else { finish_release_locked("released"); }
                 }
-                if (s_tail_drain_us && now >= s_tail_drain_us) {
+            } else if (tx_level_locked() == 0 && (!s_rf_tx || !voice_sdr_drain_pcm(s_tx_id))) {
+                if (voice_sdr_tail_start(s_tx_id)) {
+                    s_tail_started = true;
+                    if (!strcmp(s_release_cause, "tail_pending")) { s_end_reason = "tail"; }
+                } else if (s_rf_tx && s_tx_routed_samples) {
+                    s_tail_drain_us = now + AUDIO_I2S_BUFFER_MS * 1000;
+                } else {
                     finish_release_locked("released");
                 }
             }
@@ -877,6 +893,16 @@ uint32_t sdr_current_session(void)
     const uint32_t sid = s_on ? s_session : 0;
     xSemaphoreGive(s_key);
     return sid;
+}
+
+void sdr_tx_audio_stats(sdr_tx_audio_stats_t *out)
+{
+    *out = (sdr_tx_audio_stats_t){0};
+    if (!s_key) { return; }
+    xSemaphoreTake(s_key, portMAX_DELAY);
+    *out = (sdr_tx_audio_stats_t){s_tx_id, s_tx_received_samples, s_tx_rejected_samples,
+                                 s_tx_routed_samples, (uint32_t)tx_level_locked()};
+    xSemaphoreGive(s_key);
 }
 
 /* ACK/state replies are sent only by the requesting HTTPD task. The browser

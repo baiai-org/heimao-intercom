@@ -32,6 +32,7 @@
 #include "netrelay.h"
 #include "radio_led.h"
 #include "net_rx_order.h"
+#include "net_tx_pcm.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -529,12 +530,10 @@ static void tx_unlock(void) { if (s_tx_mux) { xSemaphoreGive(s_tx_mux); } }
  * frame every 29 ms does not -- the capture ring overruns (ovf climbs) and the
  * forwarded audio comes out with holes that sound like stutter.
  *
- * So the audio task only formats the frame and drops it in a queue; a dedicated
- * task owns the socket.  Twelve frames is ~350 ms: if the link stalls longer
- * than that the oldest frame is dropped, because audio older than that is
- * worthless anyway.
+ * A dedicated task owns the socket. The producer checks capacity before
+ * adding PCM and preserves older frames already waiting for the socket.
  */
-#define REL_TXQ_DEPTH 96   /* 1.9 s of slack at 20 ms frames.  Measured: a 48-deep
+#define REL_TXQ_DEPTH (96u + NET_TX_PCM_CLOSE_SLOTS) /* 1.9 s of speech at 20 ms frames. A 48-deep
                             * queue (960 ms) still dropped 20 frames in six
                             * minutes of relay traffic on the public broker, so
                             * a publish can stall for close to a second.  The
@@ -551,6 +550,8 @@ static volatile bool s_tx_stop;
  * a steady 34.5, heard as stutter. */
 static SemaphoreHandle_t s_pub_mux;
 static uint32_t      s_tx_qdrop;
+static bool          s_tx_open;
+static net_tx_pcm_counters_t s_tx_audio;
 static int16_t       s_tx_acc[REL_PKT_SAMPLES];
 static bool s_tx_acc_tail;
 static int64_t s_tx_acc_expiry;
@@ -582,15 +583,29 @@ static void rel_enqueue_pcm(const int16_t *pcm, bool ptt)
     item.expires_us = ptt ? s_tx_acc_expiry : 0;
     item.end_ms = ptt ? 0 : now_ms();
 
-    if (xQueueSend(s_txq, &item, 0) == pdTRUE) {
-        return;
-    }
-    rel_tx_item_t dump;
-    (void)xQueueReceive(s_txq, &dump, 0);
-    ++s_tx_qdrop;                  /* the newest frame wins, the oldest is lost */
     if (xQueueSend(s_txq, &item, 0) != pdTRUE) {
         ++s_tx_qdrop;
     }
+}
+
+static bool relay_tx_fits(size_t n, bool tail, int64_t expires_us)
+{
+    return s_started && s_txq && net_tx_pcm_fits(uxQueueSpacesAvailable(s_txq), REL_PKT_SAMPLES,
+        s_tx_acc_n, n, tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry);
+}
+
+static bool relay_tx_room(size_t n, bool tail, int64_t expires_us)
+{
+    tx_lock();
+    const bool fits = relay_tx_fits(n, tail, expires_us) &&
+                      (!tail || uxQueueMessagesWaiting(s_txq) < NET_TX_TAIL_BACKLOG_FRAMES);
+    tx_unlock();
+    return fits;
+}
+
+static void relay_tx_audio_stats(netcom_tx_audio_stats_t *out)
+{
+    net_tx_pcm_counters_read(&s_tx_audio, out);
 }
 
 /*
@@ -648,7 +663,10 @@ static void relay_tx_task(void *arg)
         int64_t expirations[REL_TXBATCH];
         const int64_t t_batch = esp_timer_get_time();
         for (;;) {
-            if (item.expires_us && esp_timer_get_time() >= item.expires_us) { break; }
+            if (item.expires_us && esp_timer_get_time() >= item.expires_us) {
+                atomic_fetch_add(&s_tx_audio.expired_frames, 1);
+                break;
+            }
             rel_header_t *h = (rel_header_t *)(pkt + bytes);
             h->magic = REL_MAGIC;
             h->reserved = net_tx_epoch(&s_tx_epoch, &s_tx_epoch_open, item.ptt != 0);
@@ -663,6 +681,7 @@ static void relay_tx_task(void *arg)
                               : -1;
             if (n != REL_AUDIO_OPUS) {
                 ++s_tx_errs;
+                atomic_fetch_add(&s_tx_audio.encode_errors, 1);
                 if (!item.ptt) { netcom_note_end_sent(item.end_ms, false); }
                 break; /* Never publish stale bytes as an Opus frame. */
             }
@@ -696,7 +715,10 @@ static void relay_tx_task(void *arg)
         size_t ready = 0;
         for (size_t offset = 0; offset < bytes; offset += REL_PKT_LEN) {
             const int64_t expiry = expirations[offset / REL_PKT_LEN];
-            if (expiry && publish_us >= expiry) { continue; }
+            if (expiry && publish_us >= expiry) {
+                atomic_fetch_add(&s_tx_audio.expired_frames, 1);
+                continue;
+            }
             if (((const rel_header_t *)(pkt + offset))->flags & 1) { has_audio = true; }
             if (ready != offset) { memmove(pkt + ready, pkt + offset, REL_PKT_LEN); }
             ready += REL_PKT_LEN;
@@ -713,9 +735,11 @@ static void relay_tx_task(void *arg)
                 s_tx_msgs += (uint32_t)(bytes / REL_PKT_LEN);   /* count frames */
                 s_last_tx_ms = now_ms();
                 if (has_audio) { radio_led_note_net_tx(NETCOM_MODE_RELAY); }
-            } else {
-                s_tx_errs += (uint32_t)(bytes / REL_PKT_LEN);
             }
+        }
+        if (bytes && !published) {
+            s_tx_errs += (uint32_t)(bytes / REL_PKT_LEN);
+            atomic_fetch_add(&s_tx_audio.send_errors, bytes / REL_PKT_LEN);
         }
         if (s_pub_mux) { xSemaphoreGive(s_pub_mux); }
         if (has_end) { netcom_note_end_sent(end_ms, published); }
@@ -727,13 +751,14 @@ static void relay_tx_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-static void relay_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
+static bool relay_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     tx_lock();
-    if (!s_started) {
-        s_tx_acc_n = 0;
+    if (!relay_tx_fits(n, tail, expires_us)) {
+        ++s_tx_qdrop;
+        atomic_fetch_add(&s_tx_audio.rejected_samples, n);
         tx_unlock();
-        return;
+        return false;
     }
     if (s_tx_acc_n && (tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry)) {
         while (s_tx_acc_n < REL_PKT_SAMPLES) { s_tx_acc[s_tx_acc_n++] = 0; }
@@ -749,18 +774,20 @@ static void relay_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t exp
             rel_enqueue_pcm(s_tx_acc, true);
         }
     }
+    s_tx_open |= n != 0;
+    atomic_fetch_add(&s_tx_audio.accepted_samples, n);
     tx_unlock();
+    return true;
 }
 
 /*
- * End of transmission: publish the final partial packet (silence-padded) with
- * the PTT flag cleared, so the room stops forwarding the moment our tail tone
- * ends (see netp2pnet_tx_end in netp2pnet.c for the reasoning).
+ * Forward any final partial PCM with PTT asserted, then send a separate end
+ * marker so receivers can drain that audio before releasing PTT.
  */
 static void relay_tx_end(void)
 {
     tx_lock();
-    if (!s_started) {
+    if (!s_started || !s_tx_open) {
         tx_unlock();
         return;
     }
@@ -770,6 +797,7 @@ static void relay_tx_end(void)
     }
     memset(s_tx_acc, 0, sizeof(s_tx_acc));
     s_tx_acc_n = 0;
+    s_tx_open = false;
     rel_enqueue_pcm(s_tx_acc, false);   /* explicit end-of-transmission */
     tx_unlock();
 }
@@ -1227,6 +1255,7 @@ static esp_err_t relay_start(const netcom_cfg_t *cfg)
     }
     tx_lock();
     s_tx_acc_n = 0;
+    s_tx_open = false;
     s_tx_seq = 0;
     s_tx_epoch = (uint16_t)esp_random(); if (!s_tx_epoch) { s_tx_epoch = 1; }
     s_tx_epoch_open = false;
@@ -1372,6 +1401,8 @@ static const netcom_engine_t s_engine = {
     .start            = relay_start_reported,
     .stop             = relay_stop,
     .tx_sample        = relay_tx_sample,
+    .tx_room          = relay_tx_room,
+    .tx_audio_stats   = relay_tx_audio_stats,
     .tx_end           = relay_tx_end,
     .rx_sample        = NULL,
     .stats            = relay_stats,

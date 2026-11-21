@@ -45,6 +45,10 @@ bool sdr_client_open(uint32_t client);
  * cancels a pending tail but refuses while the PTT is still held. */
 bool sdr_client_close(uint32_t sid, bool force);
 uint32_t sdr_current_session(void);
+typedef struct {
+    uint32_t token, received_samples, rejected_samples, routed_samples, pending_samples;
+} sdr_tx_audio_stats_t;
+void sdr_tx_audio_stats(sdr_tx_audio_stats_t *out);
 bool sdr_session_valid(uint32_t sid);
 /* Preserve an idle listener while a bounded tail upload occupies HTTP. */
 void sdr_tail_upload_pause(bool active);

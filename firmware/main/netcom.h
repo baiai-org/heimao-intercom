@@ -81,6 +81,11 @@ typedef struct {
     bool     rf_tx;
 } netcom_cfg_t;
 
+typedef struct {
+    uint32_t accepted_samples, rejected_samples, expired_frames;
+    uint32_t encode_errors, send_errors;
+} netcom_tx_audio_stats_t;
+
 /* Engine vtable: one implementation per network mode. */
 typedef struct netcom_engine netcom_engine_t;
 struct netcom_engine {
@@ -88,8 +93,10 @@ struct netcom_engine {
     /* start/stop run from the app task context; keep them fast. */
     esp_err_t (*start)(const netcom_cfg_t *cfg);
     esp_err_t (*stop)(void);
-    /* Stage 2: audio hooks (PCM 8 kHz 16-bit, mono). */
-    void      (*tx_sample)(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
+    /* Audio hooks (PCM 16 kHz 16-bit, mono). */
+    bool      (*tx_sample)(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
+    bool      (*tx_room)(size_t n, bool tail, int64_t expires_us);
+    void      (*tx_audio_stats)(netcom_tx_audio_stats_t *out);
     /*
      * Optional: the transmission is over -- flush whatever partial packet is
      * buffered and send one final frame with the PTT flag cleared, so the far
@@ -169,11 +176,13 @@ void      netcom_psk(uint8_t *out, bool *set);
 const char *netcom_mode_name(uint8_t mode);           /* "local" | "netp2p" | "relay" */
 
 /*
- * Route shaped TX audio (8 kHz, 16-bit mono) to the active engine.  In a
+ * Route shaped TX audio (16 kHz, 16-bit mono) to the active engine.  In a
  * network mode the TALK task calls this instead of feeding the SA818's MIC_IN.
- * No-op in local mode or while no TX hook is registered.
+ * True only when the engine has accepted the entire input block.
  */
-void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
+bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us);
+bool netcom_tx_room(size_t n, bool tail, int64_t expires_us);
+void netcom_tx_audio_stats(netcom_tx_audio_stats_t *out);
 
 /*
  * Flush the active engine's partial TX packet and send a final frame with the

@@ -365,6 +365,9 @@ static bool s_net_short_cushion, s_net_resume_pending;
 static uint64_t s_net_sender_epoch;
 static uint16_t s_net_first_seq;
 static voice_network_playout_t s_net_playout;
+static voice_sdr_playout_t s_sdr_playout;
+static bool s_sdr_refill, s_sdr_resume_pending, s_sdr_pcm_draining;
+static size_t s_sdr_pcm_write_pending;
 static int64_t s_net_ready_us, s_net_close_us;
 static _Atomic uint32_t s_net_ring_discarded_samples;
 #define BRIDGE_PREFILL_SAMPLES 4800u
@@ -1568,7 +1571,7 @@ static void monitor_task(void *arg)
                     }
                     s_bridge_inj_amp = true;
                     board_amp_enable(!s_inject_silent);
-                } else if (ptt_bridge_keyed()) {
+                } else if (ptt_bridge_keyed() || (ptt_owner() == PTT_OWNER_SDR && ptt_rf_keying_enabled())) {
                     /* Keyed by bridge, waiting for next packet: feed clean
                      * silence to SA818 MIC_IN rather than RX noise. */
                     memset(out, 0, (size_t)m * sizeof(int16_t));
@@ -1713,7 +1716,7 @@ static void monitor_task(void *arg)
                 (write_err != ESP_OK && denoise.active)) {
                 speaker_denoise_end(&denoise);
             }
-            voice_bridge_network_written(write_err == ESP_OK);
+            voice_bridge_written(write_err == ESP_OK);
             if (write_err == ESP_OK) {
                 ++s_stats.blocks;
                 voice_sdr_tail_block_commit();
@@ -2691,8 +2694,10 @@ bool voice_sdr_begin(uint32_t token)
     control_lock();
     const bool ok = s_mode == VOICE_MONITOR && ptt_claim(PTT_OWNER_SDR, token);
     if (ok) {
+        ptt_control_lock();
         voice_inject_reset();
         s_inject_owner = PTT_OWNER_SDR; s_inject_token = token;
+        s_sdr_playout = (voice_sdr_playout_t){.token = token};
         voice_bridge_set_silent(true);
         s_sdr_tail_active = false;
         s_sdr_tail_block_pending = false;
@@ -2703,6 +2708,7 @@ bool voice_sdr_begin(uint32_t token)
         const int mode = netcom_mode();
         s_sdr_net_tx = mode != NETCOM_MODE_LOCAL;
         s_sdr_tail_config = tail_id_for_mode(mode);
+        ptt_control_unlock();
     }
     control_unlock();
     return ok;
@@ -2778,6 +2784,8 @@ void voice_inject_reset(void)
     s_last_bridge_tx_processed = false;
     s_net_feeding = s_net_rf_required = s_net_rf_keyed = s_net_write_pending = false;
     s_net_short_cushion = s_net_resume_pending = false;
+    s_sdr_refill = s_sdr_resume_pending = s_sdr_pcm_draining = false;
+    s_sdr_pcm_write_pending = 0;
     s_net_ready_us = s_net_close_us = 0;
     portEXIT_CRITICAL(&s_bridge_inj_mux);
     ptt_control_unlock();
@@ -2856,15 +2864,46 @@ bool voice_bridge_network_ready(void)
     return ready;
 }
 
-void voice_bridge_network_written(bool written)
+void voice_bridge_written(bool written)
 {
     ptt_control_lock();
+    if (s_sdr_pcm_write_pending) {
+        if (written) {
+            s_sdr_playout.written_samples += (uint32_t)s_sdr_pcm_write_pending;
+            if (s_sdr_resume_pending) {
+                ++s_sdr_playout.resumes;
+                s_sdr_playout.last_resume_us = esp_timer_get_time();
+                s_sdr_resume_pending = false;
+            }
+        } else { ++s_sdr_playout.write_errors; }
+        s_sdr_pcm_write_pending = 0;
+    }
     if (written && s_net_write_pending && s_net_resume_pending) {
         s_net_resume_pending = false;
         ++s_net_playout.resumes;
         s_net_playout.last_resume_us = esp_timer_get_time();
     }
     s_net_write_pending = false;
+    ptt_control_unlock();
+}
+
+bool voice_sdr_drain_pcm(uint32_t token)
+{
+    ptt_control_lock();
+    const bool own = s_inject_owner == PTT_OWNER_SDR && s_inject_token == token && ptt_owned(PTT_OWNER_SDR, token);
+    if (own) {
+        s_sdr_pcm_draining = true;
+        s_sdr_resume_pending = false;
+    }
+    const bool pending = own && (voice_bridge_level() != 0 || s_sdr_pcm_write_pending != 0);
+    ptt_control_unlock();
+    return pending;
+}
+
+void voice_sdr_playout(voice_sdr_playout_t *out)
+{
+    ptt_control_lock();
+    *out = s_sdr_playout;
     ptt_control_unlock();
 }
 
@@ -2936,6 +2975,7 @@ void voice_sdr_inject_processed(uint32_t token, const int16_t *pcm, size_t n)
         }
         s_inject_owner = PTT_OWNER_SDR; s_inject_token = token;
         s_inject_tx_processed = true;
+        if (s_sdr_playout.token != token) { s_sdr_playout = (voice_sdr_playout_t){.token = token}; }
         inject_locked(pcm, n, false);
     }
     ptt_control_unlock();
@@ -2957,11 +2997,6 @@ bool voice_sdr_tail_start(uint32_t token)
         s_sdr_tail_token = token;
         s_sdr_tail_block_pending = false;
         s_sdr_tail_done_token = 0;
-        /* The monitor normally waits for a 600 ms cushion before draining the
-         * browser ring.  Once release is requested, the remaining samples
-         * must be consumed before the courtesy tone, even if the ring never
-         * reached that normal prefill. */
-        s_inj_primed = true;
         s_sdr_tail_active = true;
     }
     ptt_control_unlock();
@@ -3000,6 +3035,13 @@ size_t voice_sdr_tail_fetch(int16_t *out, size_t n)
     if (s_sdr_tail_active && !s_sdr_tail_block_pending &&
         s_sdr_tail_id > TAIL_OFF && s_sdr_tail_id < TAIL_COUNT) {
         const size_t total = tail_samples(s_sdr_tail_id);
+        const size_t left = s_sdr_tail_pos < total ? total - s_sdr_tail_pos : 0;
+        const size_t next = left < n ? left : n;
+        const int64_t expires_us = ptt_release_deadline_us(PTT_OWNER_SDR, s_sdr_tail_token);
+        if (s_sdr_net_tx && next && !netcom_tx_room(next, true, expires_us)) {
+            ptt_control_unlock();
+            return 0;
+        }
         got = tail_fetch(s_sdr_tail_id, s_sdr_tail_pos, out, n);
         s_sdr_tail_pos += got;
         /* Browser tails are outgoing TX audio, so they use the same fixed
@@ -3011,7 +3053,7 @@ size_t voice_sdr_tail_fetch(int16_t *out, size_t n)
              * just fetched; sdr.c sends browser PCM, so this cannot duplicate
              * audio.  Keep the call under the PTT lock so a timeout cannot
              * place the end marker ahead of this final tail block. */
-            netcom_tx_sample_until(out, got, true, ptt_release_deadline_us(PTT_OWNER_SDR, s_sdr_tail_token));
+            netcom_tx_sample_until(out, got, true, expires_us);
         }
         if (!got || s_sdr_tail_pos >= total) {
             s_sdr_tail_block_pending = got != 0;
@@ -3164,7 +3206,7 @@ size_t voice_bridge_take_resampled(int16_t *out, size_t n, float ratio)
 size_t voice_bridge_play(int16_t *out, size_t n)
 {
     ptt_control_lock();
-    const bool browser = ptt_owner() == PTT_OWNER_SDR;
+    const bool browser = s_inject_owner == PTT_OWNER_SDR && ptt_owned(PTT_OWNER_SDR, s_inject_token);
     const bool network = s_inject_owner == PTT_OWNER_NETWORK;
     s_last_bridge_tx_processed = false;
     const size_t lvl = voice_bridge_level();
@@ -3173,6 +3215,13 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     }
     const bool live_network = network && s_net_feeding;
     const bool was_primed = s_inj_primed;
+    if (browser && s_sdr_pcm_draining) {
+        const size_t got = voice_bridge_take(out, n);
+        s_last_bridge_tx_processed = got && s_inject_tx_processed;
+        s_sdr_pcm_write_pending = got;
+        ptt_control_unlock();
+        return got;
+    }
     if (network && lvl < 2) { s_inj_primed = false; }
     /* The last interpolation point is real audio, not disposable padding.
      * Drain it exactly once after input ends, then the next over must prefill. */
@@ -3184,11 +3233,13 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     if (network && !s_net_feeding && lvl >= 2) { s_inj_primed = true; }
     /* A depleted ring needs a shorter cushion within the same over. Keep
      * first audio and RF key-up on their existing timing. */
-    const size_t target = live_network && s_net_short_cushion ? NET_REFILL_SAMPLES : BRIDGE_PREFILL_SAMPLES;
+    const bool short_cushion = (live_network && s_net_short_cushion) || (browser && s_sdr_refill);
+    const size_t target = short_cushion ? NET_REFILL_SAMPLES : BRIDGE_PREFILL_SAMPLES;
     if (!s_inj_primed && lvl >= target) {
         s_inj_primed = true;
         s_net_resume_pending = live_network && s_net_short_cushion;
-    } else if (s_inj_primed && (browser ? lvl < 2 : lvl == 0)) {
+        s_sdr_resume_pending = browser && s_sdr_refill;
+    } else if (s_inj_primed && !browser && lvl == 0) {
         s_inj_primed = false;
         ++s_bridge_starve;
     }
@@ -3199,11 +3250,16 @@ size_t voice_bridge_play(int16_t *out, size_t n)
         if (got > 0) {
             s_last_bridge_tx_processed = browser && s_inject_tx_processed;
             if (network) { s_net_write_pending = true; }
+            if (browser) { s_sdr_pcm_write_pending = got; }
         }
         if (lvl > target + 2600 || lvl + 1200 < target) { ++s_bridge_trim; }
-        if (got < n && browser) {
-            s_inj_primed = false; ++s_bridge_starve;
-        }
+    }
+    if (browser && was_primed && got < n) {
+        s_inj_primed = false;
+        s_sdr_refill = true;
+        s_sdr_resume_pending = false;
+        ++s_bridge_starve;
+        ++s_sdr_playout.underruns;
     }
     if (live_network && was_primed && got < n) {
         s_inj_primed = false;

@@ -35,6 +35,7 @@ typedef int esp_err_t;
 #define PTT_OWNER_NONE 0
 static void ptt_trace_note(unsigned k,unsigned s,unsigned a,unsigned b) {(void)k;(void)s;(void)a;(void)b;}
 #define AUDIO_SAMPLE_RATE_HZ 16000
+#define AUDIO_PKT_SAMPLES 320
 #define TAIL_OFF 0
 #define TAIL_COUNT 9
 #define NVS_READONLY 0
@@ -69,7 +70,8 @@ int netcom_mode(void);
 uint16_t netcom_room(void);
 bool netcom_engine_running(void);
 void netcom_tx_sample(const int16_t *, size_t, bool);
-void netcom_tx_sample_until(const int16_t *, size_t, bool, int64_t);
+bool netcom_tx_sample_until(const int16_t *, size_t, bool, int64_t);
+bool netcom_tx_room(size_t, bool, int64_t);
 void netcom_tx_end(void);
 bool ptt_bridge_keyed(void);
 int ptt_owner(void);
@@ -231,10 +233,14 @@ void netcom_tx_sample(const int16_t *p, size_t n, bool ptt) {
 }
 unsigned tx_timeout_seconds(void) { return 5; }
 int tail_id_for_mode(uint8_t mode) { return tail_should_play(mode) ? tail_get() : TAIL_OFF; }
-void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t deadline) {
+bool netcom_tx_room(size_t n, bool tail, int64_t deadline) {
+    (void)n; (void)tail; return deadline > esp_timer_get_time();
+}
+bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t deadline) {
     (void)tail;
     assert(deadline > esp_timer_get_time());
     netcom_tx_sample(pcm, n, true);
+    return true;
 }
 void netcom_tx_end(void) { ++ends; events[event_n++] = 'E'; }
 bool ptt_bridge_keyed(void) { return keyed; }
@@ -317,7 +323,7 @@ int main(void) {
     bridge_rx_inhibit();
     assert(tail_reads == 0);
     bridge_rx_tap(pcm, 5, true, true);
-    bridge_rx_end();
+    tap(false, true); tap(false, true);
     assert(tail_reads == 1); /* a normal over still has exactly one tone */
     /* Re-selecting the same bridge channel must restore a profile changed by
      * a frequency editor. A separate stale channel cursor cannot prevent it. */
@@ -366,10 +372,12 @@ int main(void) {
     assert(started_level == RF_DENOISE_LEVEL_STANDARD);
     assert(bridge_denoise_set(1, false, true) == ESP_OK);
     tap(false, true);
+    tap(false, true);
     assert(event_n == at + 3 && !memcmp(events + at, "SSE", 3));
     at = event_n;
     tap(true, true);
     assert(event_n == at + 1 && events[at] == 'S');
+    tap(false, true);
     tap(false, true);
     assert(bridge_denoise_update_levels(1, 2, 0, LEVEL(1, RF_DENOISE_LEVEL_EXTREME)) == ESP_OK);
     at = event_n;

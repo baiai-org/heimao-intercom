@@ -582,16 +582,27 @@ void netcom_psk(uint8_t *out, bool *set)
 }
 
 /*
- * Route shaped TX audio to the active engine (8 kHz, 16-bit mono).  The TALK
+ * Route shaped TX audio to the active engine (16 kHz, 16-bit mono). The TALK
  * task calls this in P2P mode instead of writing the SA818's MIC_IN.  In
  * local mode, or while an engine has no TX hook, this is a no-op.
  */
-void netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
+bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     const netcom_engine_t *e = active_engine();
-    if (e && e->tx_sample && expires_us > esp_timer_get_time()) {
-        e->tx_sample(pcm, n, tail, expires_us);
-    }
+    return e && e->tx_sample && expires_us > esp_timer_get_time() && e->tx_sample(pcm, n, tail, expires_us);
+}
+
+bool netcom_tx_room(size_t n, bool tail, int64_t expires_us)
+{
+    const netcom_engine_t *e = active_engine();
+    return e && e->tx_room && expires_us > esp_timer_get_time() && e->tx_room(n, tail, expires_us);
+}
+
+void netcom_tx_audio_stats(netcom_tx_audio_stats_t *out)
+{
+    *out = (netcom_tx_audio_stats_t){0};
+    const netcom_engine_t *e = active_engine();
+    if (e && e->tx_audio_stats) { e->tx_audio_stats(out); }
 }
 
 void netcom_tx_end(void)

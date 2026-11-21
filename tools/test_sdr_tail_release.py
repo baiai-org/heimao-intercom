@@ -16,7 +16,7 @@ SIMULATION = r"""
 #include <string.h>
 
 #define SDR_RELEASE_MAX_US 6000000
-#define SDR_RELEASE_NOTONE_US 600000
+#define SDR_RELEASE_AUDIO_US 1100000
 #define SDR_PTT_HOLD_MAX_MS 30000
 #define SDR_NO_PCM_GRACE_MS 1500
 #define SDR_TX_STALL_MS 1200
@@ -24,7 +24,7 @@ SIMULATION = r"""
 #define SDR_NO_CLIENT_STALE_MS 30000
 #define AUDIO_I2S_BUFFER_MS 48
 #define SDR_PKT_SAMPLES 320
-#define SDR_TX_RING_SAMPLES 640
+#define SDR_TX_RING_SAMPLES 8192
 #define NETCOM_MODE_LOCAL 0
 #define PTT_OWNER_NONE 0
 #define PTT_OWNER_SDR 1
@@ -45,14 +45,18 @@ static uint32_t s_rel_total, s_rel_tail, s_rel_notail, s_rel_pcm_timeout, s_rel_
 static uint32_t s_rel_tail_timeout, s_rel_released_notail, s_owner_mismatch;
 static uint32_t s_begin_busy, s_off_stale, s_off_reject, s_on_reject;
 static uint32_t s_tx_pkts, s_tx_samples, s_tx_dry;
+static uint32_t s_tx_received_samples, s_tx_rejected_samples, s_tx_routed_samples;
 static bool s_ptt_hold, s_releasing, s_tail_started, s_net_tx, s_rf_tx, s_pcm_ever;
 static bool s_last_had_pcm, s_last_tail, s_ws_dead, keyed, allow_key = true;
-static bool tone_configured = true, rf_on_network;
-static unsigned tone_starts, network_ends, routed;
+static bool tone_configured = true, rf_on_network, rf_pending, network_room = true;
+static unsigned tone_starts, network_ends;
+static uint32_t s_tx_raw_peak, s_tx_processed_peak, s_tx_processed_clip;
+static int16_t rf_pcm[SDR_TX_RING_SAMPLES], network_pcm[SDR_TX_RING_SAMPLES];
+static size_t rf_count, network_count;
 static int mode, s_key = 1, s_ws_fd = -1, s_monitor;
-static size_t s_tx_head, s_tx_tail;
+static volatile size_t s_tx_head, s_tx_tail;
 static int16_t s_tx_ring[SDR_TX_RING_SAMPLES];
-static const char *s_end_reason;
+static const char *s_end_reason, *s_release_cause;
 static char s_last_reason[24];
 
 static void strlcpy(char *out, const char *value, size_t n) { snprintf(out, n, "%s", value); }
@@ -81,19 +85,29 @@ static void monitor_rx_local_tx(int *monitor, bool tx) { *monitor = tx; }
 static int netcom_mode(void) { return mode; }
 static bool netcom_rf_tx(void) { return rf_on_network; }
 static bool netcom_tx_ready(void) { return true; }
+static bool netcom_tx_room(size_t samples, bool tail, int64_t expires) {
+    (void)samples; (void)tail; (void)expires; return network_room;
+}
+static int64_t ptt_release_deadline_us(int source, uint32_t token) {
+    assert(ptt_owned(source, token)); return speech_deadline + 6000000;
+}
 static void netcom_tx_end(void) { ++network_ends; }
 static void bridge_rx_inhibit(void) {}
 static size_t voice_bridge_level(void) { return 0; }
 static size_t tx_level_locked(void) { return s_tx_head - s_tx_tail; }
-static size_t ring_take(int16_t *ring, size_t capacity, size_t *head, size_t *tail,
-                        int16_t *pcm, size_t count) {
-    (void)ring; (void)capacity; (void)pcm;
-    const size_t available = *head - *tail;
-    const size_t n = count < available ? count : available;
-    *tail += n;
-    return n;
+static int voice_apply_net_tx_processing(int16_t *pcm, size_t n) { (void)pcm; (void)n; return 0; }
+static void voice_sdr_inject_processed(uint32_t token, const int16_t *pcm, size_t n) {
+    assert(ptt_owned(PTT_OWNER_SDR, token) && rf_count + n <= SDR_TX_RING_SAMPLES);
+    memcpy(rf_pcm + rf_count, pcm, n * sizeof(*pcm));
+    rf_count += n;
 }
-static void sdr_route_tx_pcm(int16_t *pcm, size_t n) { (void)pcm; routed += n; }
+static bool netcom_tx_sample_until(const int16_t *pcm, size_t n, bool tail, int64_t expires) {
+    assert(network_room && !tail && expires > clock_us && network_count + n <= SDR_TX_RING_SAMPLES);
+    memcpy(network_pcm + network_count, pcm, n * sizeof(*pcm));
+    network_count += n;
+    return true;
+}
+static bool voice_sdr_drain_pcm(uint32_t tx) { assert(ptt_owned(PTT_OWNER_SDR,tx)); return rf_pending; }
 static bool voice_sdr_tail_configured(void) { return tone_configured; }
 static uint32_t voice_sdr_tail_ms(void) { return 5000; }
 static bool voice_sdr_tail_start(uint32_t tx) {
@@ -109,6 +123,16 @@ static uint32_t voice_sdr_tail_done(void) {
 """
 
 TEST = r"""
+static void browser_markers(uint32_t sid, uint32_t token, size_t n, int16_t marker) {
+    uint8_t pcm[1280];
+    assert(n <= sizeof(pcm) / 2);
+    for (size_t i = 0; i < n; ++i) {
+        pcm[2*i] = (uint8_t)marker;
+        pcm[2*i+1] = (uint8_t)((uint16_t)marker >> 8);
+    }
+    assert(sdr_tx_push_bytes(sid, token, pcm, n * 2));
+}
+
 int main(void)
 {
     const uint32_t sid = 7;
@@ -127,7 +151,7 @@ int main(void)
     s_tx_head = 200; /* below normal playback prefill */
     assert(sdr_ptt_request(sid, 1, false) && s_releasing);
     sdr_tx_step();
-    assert(routed == 200 && tone_starts == 1 && keyed);
+    assert(rf_count == 200 && tone_starts == 1 && keyed);
     assert(!sdr_ptt_request(sid, 2, true));
     assert(strcmp(s_end_reason, "tail_pending") == 0);
     assert(sdr_ptt_request(sid, 2, false));
@@ -180,8 +204,63 @@ int main(void)
     tail_done = 6;
     sdr_tx_step();
     assert(!owner && !s_releasing && network_ends == 3 && !strcmp(s_last_reason, "hold_limit"));
+
+    mode = 0; tone_configured = false; rf_pending = true;
+    assert(sdr_ptt_request(sid, 7, true) && keyed);
+    s_tx_head += 180; /* short utterance can still be below the 300 ms prefill */
+    assert(sdr_ptt_request(sid, 7, false));
+    sdr_tx_step();
+    assert(keyed && s_releasing && s_tx_routed_samples == 180 && !s_tail_drain_us);
+    clock_us += 16000; sdr_tx_step(); assert(keyed);
+    rf_pending = false; sdr_tx_step(); assert(keyed && s_tail_drain_us);
+    clock_us += AUDIO_I2S_BUFFER_MS * 1000 - 1; sdr_tx_step(); assert(keyed);
+    ++clock_us; sdr_tx_step(); assert(!keyed && !owner);
+
+    mode = 1;
+    assert(sdr_ptt_request(sid, 8, true));
+    s_tx_head += 320; network_room = false;
+    sdr_tx_step(); assert(tx_level_locked() == 320 && s_tx_routed_samples == 0);
+    network_room = true; sdr_tx_step(); assert(tx_level_locked() == 0 && s_tx_routed_samples == 320);
+    assert(sdr_ptt_request(sid, 8, false)); sdr_tx_step(); assert(!owner);
+
+    /* Same 640/640/480 sample payload as the browser HTTP/WS fixture. The
+     * last short packet is still at ingress when the OFF request arrives. */
+    rf_count = network_count = 0;
+    rf_on_network = true;
+    assert(sdr_ptt_request(sid, 9, true));
+    browser_markers(sid, 9, 640, 111);
+    browser_markers(sid, 9, 640, 222);
+    browser_markers(sid, 9, 480, 333);
+    assert(sdr_ptt_request(sid, 9, false));
+    uint8_t late[2] = {0};
+    assert(!sdr_tx_push_bytes(sid, 9, late, sizeof(late)));
+    network_room = false;
+    sdr_tx_step();
+    assert(tx_level_locked() == 1760);
+    network_room = true;
+    for (int i = 0; i < 6; ++i) { clock_us += 5000; sdr_tx_step(); }
+    assert(s_tx_received_samples == 1760 && s_tx_routed_samples == 1760 && !s_tx_rejected_samples);
+    assert(rf_count == 1760 && network_count == 1760 && keyed);
+    assert(!memcmp(rf_pcm, network_pcm, rf_count * sizeof(*rf_pcm)));
+    for (size_t i = 0; i < rf_count; ++i) {
+        assert(rf_pcm[i] == (i < 640 ? 111 : i < 1280 ? 222 : 333));
+    }
+    clock_us += 48000; sdr_tx_step(); assert(!keyed && !owner);
+
+    /* A full ingress ring accepts no part of the rejected message. */
+    rf_count = network_count = 0;
+    assert(sdr_ptt_request(sid, 10, true));
+    for (size_t i = 0; i < 12; ++i) { browser_markers(sid, 10, 640, (int16_t)(100 + i)); }
+    uint8_t excess[1280] = {0};
+    assert(!sdr_tx_push_bytes(sid, 10, excess, sizeof(excess)));
+    assert(s_releasing && s_tx_rejected_samples == 640 && tx_level_locked() == 7680);
+    for (int i = 0; i < 24; ++i) { clock_us += 5000; sdr_tx_step(); }
+    assert(s_tx_routed_samples == 7680 && rf_count == 7680 && network_count == 7680);
+    for (size_t i = 0; i < rf_count; ++i) { assert(rf_pcm[i] == (int16_t)(100 + i / 640)); }
+    clock_us += 48000; sdr_tx_step(); assert(!keyed && !owner && !strcmp(s_last_reason, "pcm_overflow"));
     puts("PASS: SDR configured cutoff stops capture, sends a single tail and then closes the network over");
     puts("PASS: SDR short/long release, last DAC buffer, network end, duplicate/late OFF and blocked late ON");
+    puts("PASS: 1760 browser samples route intact to RF and network on release; overflow preserves 7680 accepted samples");
     return 0;
 }
 """
@@ -189,8 +268,9 @@ int main(void)
 
 def main():
     source = (ROOT / "firmware/main/sdr.c").read_text("utf-8")
-    names = ("release_locked", "request_release_locked", "finish_release_locked",
-             "sdr_tail_upload_pause", "start_tx_locked", "sdr_ptt_request", "sdr_tx_step")
+    names = ("ring_put", "ring_take", "release_locked", "request_release_locked", "finish_release_locked",
+             "sdr_tail_upload_pause", "start_tx_locked", "sdr_ptt_request", "sdr_tx_push_bytes",
+             "sdr_pcm_peak", "sdr_route_tx_pcm", "sdr_tx_drain_locked", "sdr_tx_step")
     code = SIMULATION + "\n".join(function(source, name) for name in names) + TEST
     scratch = ROOT / ".tmp"
     scratch.mkdir(exist_ok=True)

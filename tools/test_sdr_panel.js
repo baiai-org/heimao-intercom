@@ -34,7 +34,10 @@ function runtime() {
   class AudioWorkletNode {
     constructor(ctx, kind) {
       Object.assign(this, node()); this.kind = kind; this.sent = [];
-      this.port = {postMessage: msg => this.sent.push(msg), onmessage: null};
+      this.port = {postMessage: msg => {
+        this.sent.push(msg);
+        if (msg.flush) state.flushCapture(this, msg);
+      }, onmessage: null};
       state.nodes.push(this);
     }
   }
@@ -56,6 +59,7 @@ function runtime() {
     return {track, getTracks: () => [track], getAudioTracks: () => [track]};
   };
   state.getMic = async () => state.stream();
+  state.flushCapture = (node, msg) => node.port.onmessage?.({data:{epoch:msg.epoch,flushed:true}});
   state.response = url => {
     const u = new URL(url, 'https://board'), q = u.searchParams;
     const data = {ok: true, sid: +(q.get('sid') || 4000000001),
@@ -81,7 +85,7 @@ function runtime() {
     log: (...args) => state.logs.push(args),
     $: id => {assert(elements.has(id), id); return elements.get(id);},
   });
-  vm.runInContext(code + '\nglobalThis.api = {SDR, SdrPlayback, sdrWorkletSource, sdrRxStart, sdrPttDown, sdrPttUp, sdrConnect, sdrSendAudio, sdrStop, sdrToggle, sdrHttpStart, sdrRequest, sdrApplyState};', context);
+  vm.runInContext(code + '\nglobalThis.api = {SDR, SdrPlayback, sdrWorkletSource, sdrRxStart, sdrPttDown, sdrPttUp, sdrPttFinish, sdrConnect, sdrSendAudio, sdrStop, sdrToggle, sdrHttpStart, sdrRequest, sdrApplyState};', context);
   Object.assign(state, context.api); state.elements = elements;
   state.ready = async (http = true) => {
     await state.sdrRxStart(); state.SDR.on = true; state.SDR.sid = 4000000001; state.SDR.http = http;
@@ -132,6 +136,7 @@ async function audioTests() {
     assert.equal(messages.length, 25, rate + ' must produce exactly 25 packets/s');
     assert.equal(messages.reduce((n, m) => n + m.samples.length, 0), 16000);
     assert(messages.every(m => m.epoch === 7 && m.samples.byteLength === 1280));
+    assert(messages.every((m, i) => m.first === i * 640));
     assert(messages[24].samples.every(v => v >= 3275 && v <= 3278));
     rec.port.onmessage({data: {on: false}});
     rec.process([[new Float32Array(128)]], [[new Float32Array(128)]]);
@@ -260,13 +265,20 @@ async function transportTests() {
   let r=runtime();await r.ready();
   r.SDR.ptt=r.SDR.keyed=true;r.SDR.activeTx=1;
   const post=deferred();let active=0,max=0;
-  r.fetch=async()=>{active++;max=Math.max(max,active);const v=await post.promise;active--;return v;};
+  r.fetch=async url=>{
+    if(!url.startsWith('/api/sdr_tx?'))return r.response(url);
+    active++;max=Math.max(max,active);const v=await post.promise;active--;return v;
+  };
   r.sdrSendAudio(new Int16Array(640),0);
   for(let i=0;i<25;i++) {r.SDR.ctx.currentTime=i*0.04;r.sdrSendAudio(new Int16Array(640),r.SDR.ctx.currentTime);}
-  assert(r.SDR.txQueued<=8000);assert(r.SDR.txDrop>0);assert.equal(r.requests.length,1);assert.equal(max,1);
+  assert.equal(r.SDR.txQueued,0);assert.equal(r.SDR.txDrop,8320);assert.equal(r.SDR.ptt,false);assert.equal(max,1);
+  assert.match(r.SDR.txReason,/HTTP/);
   r.SDR.ctx.currentTime+=1;post.resolve(r.response(r.requests[0].url));await r.SDR.txIdle;
-  assert.equal(r.requests.length,1);assert.equal(r.SDR.txQueued,0);
+  assert.equal(r.requests.filter(q=>q.url.startsWith('/api/sdr_tx?')).length,1);
   assert(r.requests[0].url.includes('sid=4000000001&tx=1'));
+  await r.SDR.releasePending;
+  assert(r.requests.some(q=>q.url.startsWith('/api/sdr_ptt?on=0')));
+  r=runtime();await r.ready();r.SDR.ptt=r.SDR.keyed=true;r.SDR.activeTx=2;
   r.SDR.ctx.currentTime=2;
   const batch=deferred();r.fetch=()=>batch.promise;
   r.sdrSendAudio(new Int16Array(640),2);
@@ -287,7 +299,64 @@ async function transportTests() {
   const read=r.sdrRequest('/body-stalls',{},'pcm');await flush();
   [...r.timers.values()].find(t=>t.ms===3000).fn();await assert.rejects(read,/aborted/);
 }
+
+async function finalCaptureTests() {
+  const test=runtime(), processors=new Map(), emitted=[];
+  class Processor { constructor(){this.port={postMessage: m=>emitted.push(m)};} }
+  const ctx=vm.createContext({AudioWorkletProcessor:Processor,sampleRate:16000,currentTime:0,
+    registerProcessor:(name,ctor)=>processors.set(name,ctor)});
+  vm.runInContext(test.sdrWorkletSource(),ctx);
+  for (const tail of [1,127,319,320,480,639]) {
+    const capture=new (processors.get('radio-recorder'))({processorOptions:{wire:16000}});
+    emitted.length=0;
+    capture.port.onmessage({data:{on:true,epoch:8}});
+    for(let remaining=640+tail;remaining>0;remaining-=128) {
+      const input=new Float32Array(Math.min(128,remaining)).fill(0.2);
+      capture.process([[input]], [[new Float32Array(input.length)]]);
+    }
+    capture.port.onmessage({data:{on:false,flush:true,epoch:8}});
+    assert.equal(emitted.length,3);
+    assert.equal(emitted[0].samples.length,640);
+    assert.equal(emitted[1].samples.length,tail);
+    assert.equal(emitted[1].first,640);
+    assert.equal(emitted[2].flushed,true);
+  }
+  for (const http of [true,false]) {
+    const r=runtime();await r.ready(http);
+    const down=r.sdrPttDown();await flush();
+    const ws=r.SDR.ws;
+    if(!http)ws.ack(1,true);
+    await down;
+    const node=r.SDR.micSp,epoch=r.SDR.txEpoch;
+    const post=deferred(), delivered=[];
+    r.fetch=async (url,options)=>{
+      if(url.startsWith('/api/sdr_tx?')){
+        await post.promise;
+        delivered.push(...new Int16Array(options.body));
+      }
+      return r.response(url);
+    };
+    const send=(first,length,value)=>node.port.onmessage({data:{epoch,first,samples:new Int16Array(length).fill(value),stamp:0,peak:value}});
+    send(0,640,111);send(640,640,222);
+    r.flushCapture=(node,msg)=>{
+      send(1280,480,333);node.port.onmessage({data:{epoch,flushed:true}});
+    };
+    const finishing=r.sdrPttFinish();await flush();
+    if(http){
+      assert(!r.requests.some(q=>q.url.startsWith('/api/sdr_ptt?on=0')));
+      r.SDR.ctx.currentTime=0.3;post.resolve();
+    }else{
+      assert.match(ws.sent.at(-1),/^ptt0:/);
+      for(const b of ws.sent.filter(f=>f instanceof ArrayBuffer)) delivered.push(...new Int16Array(b,8));
+      ws.ack(2,false);
+    }
+    assert.equal(await finishing,true);
+    assert.deepEqual(delivered,[...new Array(640).fill(111),...new Array(640).fill(222),...new Array(480).fill(333)]);
+    assert.equal(r.SDR.txCaptured,1760);assert.equal(r.SDR.txSent,1760);assert.equal(r.SDR.txDrop,0);
+  }
+  console.log('PASS: 1–639 sample worklet tail, HTTP backlog drain and ordered WebSocket PCM before OFF');
+}
 (async()=>{
-  await audioTests();await lifecycleTests();await clickTests();await transportTests();
+  await audioTests();await lifecycleTests();await clickTests();await transportTests();await finalCaptureTests();
   console.log('PASS: production worklets, sid/TX ACK, PCM framing, PTT button click/manual stop/board timeout, cancellation and HTTP queues');
 })().catch(e=>{console.error(e);process.exitCode=1;});

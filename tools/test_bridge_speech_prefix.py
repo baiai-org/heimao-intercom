@@ -25,13 +25,17 @@ static uint64_t s_net_sender_epoch;
 static uint16_t s_net_first_seq;
 typedef struct {uint32_t underruns,resumes;int64_t last_underrun_us,last_resume_us;} voice_network_playout_t;
 static voice_network_playout_t s_net_playout;
+typedef struct {uint32_t token,written_samples,write_errors,underruns,resumes;int64_t last_resume_us;} voice_sdr_playout_t;
+static voice_sdr_playout_t s_sdr_playout;
+static bool s_sdr_refill,s_sdr_resume_pending,s_sdr_pcm_draining;
+static size_t s_sdr_pcm_write_pending;
 static int64_t s_net_ready_us,s_net_close_us;
 static uint32_t s_inject_token,s_bridge_starve,s_bridge_trim;
 static ptt_owner_t s_inject_owner;
 void voice_inject_reset(void);size_t voice_bridge_level(void);size_t voice_bridge_take(int16_t*,size_t);
 void voice_bridge_network_state(bool,bool,uint64_t,uint16_t);void voice_bridge_network_keyed(bool);
 bool voice_bridge_network_pending(void);bool voice_bridge_network_ready(void);
-void voice_bridge_network_written(bool);void voice_bridge_network_cancel(void);
+void voice_bridge_written(bool);void voice_bridge_network_cancel(void);
 static uint16_t wire_pcm;
 '''
 
@@ -65,7 +69,7 @@ static void clip(int frames,int gap){
     assert(rf_pin && first_key>=0 && t-first_key>=300);
     if(first<0){first=pcm[0];first_play=t;}last=pcm[n-1];count+=n;
    }
-   voice_bridge_network_written(n != 0);
+   voice_bridge_written(n != 0);
   }
   if(ended && first>=0 && !rf_pin && !voice_bridge_level() && !voice_bridge_network_pending()){
    assert(first==1000 && last==9000 && count>320);
@@ -89,7 +93,7 @@ static void burst(int frames,int end_at){
    if(t%20==0 && voice_bridge_room()>=320){int16_t pcm[320];have=engine_take(pcm);if(have)voice_bridge_inject(pcm,320);}
    bridge_key_update(have,false);
   }
-  if(t%16==0){int16_t pcm[256];size_t n=voice_bridge_play(pcm,256);if(n){assert(rf_pin);if(first<0)first=pcm[0];last=pcm[n-1];}voice_bridge_network_written(n != 0);}
+  if(t%16==0){int16_t pcm[256];size_t n=voice_bridge_play(pcm,256);if(n){assert(rf_pin);if(first<0)first=pcm[0];last=pcm[n-1];}voice_bridge_written(n != 0);}
   if(saw_key && !rf_pin && !voice_bridge_level()){assert(first==1000 && last==9000);return;}
   advance(1);
  }
@@ -163,10 +167,10 @@ static void ring_recovery(void) {
  assert(voice_bridge_play(pcm,256)==0);
  voice_bridge_inject(packet,320);
  assert(voice_bridge_play(pcm,256)==256 && pcm[0]==1000);
- voice_bridge_network_written(true);
+ voice_bridge_written(true);
  unsigned underruns=s_net_playout.underruns,resumes=s_net_playout.resumes;
  for (size_t i=0;i<30 && s_net_playout.underruns==underruns;i++) {
-  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_network_written(n!=0);
+  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_written(n!=0);
  }
  assert(s_net_playout.underruns==underruns+1);
  for (size_t i=0;i<5;i++) {
@@ -175,19 +179,49 @@ static void ring_recovery(void) {
  }
  voice_bridge_inject(packet,320);
  assert(voice_bridge_play(pcm,256)==256 && pcm[0]==1000);
- voice_bridge_network_written(false);
+ voice_bridge_written(false);
  assert(s_net_playout.resumes==resumes);
  advance(16);
  assert(voice_bridge_play(pcm,256)!=0);
- voice_bridge_network_written(true);
+ voice_bridge_written(true);
  assert(s_net_playout.resumes==resumes+1 && s_net_playout.last_resume_us==clock_us);
 
  for (size_t i=0;i<20 && s_inj_primed;i++) {
-  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_network_written(n!=0);
+  advance(16);size_t n=voice_bridge_play(pcm,256);voice_bridge_written(n!=0);
  }
  voice_bridge_network_state(true,false,1,999);
  for (size_t i=0;i<6;i++) { voice_bridge_inject(packet,320); }
  assert(voice_bridge_play(pcm,256)==0 && s_net_playout.resumes==resumes+1);
+}
+static void browser_ring_recovery(void) {
+ fixture();assert(ptt_claim(PTT_OWNER_SDR,55));
+ int16_t packet[640],pcm[256];
+ for (size_t i=0;i<640;i++) { packet[i]=1000; }
+ for (size_t i=0;i<7;i++) { voice_sdr_inject_processed(55,packet,640); }
+ assert(voice_bridge_play(pcm,256)==0);
+ voice_sdr_inject_processed(55,packet,640);
+ for (size_t i=0;i<30 && !s_sdr_playout.underruns;i++) {
+  assert(voice_bridge_play(pcm,256));voice_bridge_written(true);advance(16);
+ }
+ assert(s_sdr_playout.underruns==1 && !s_inj_primed);
+ int first=-1;
+ for (int t=0;t<160;t++) {
+  if (!(t%40)) { voice_sdr_inject_processed(55,packet,640); }
+  if (!(t%16) && voice_bridge_play(pcm,256)) {voice_bridge_written(true);first=t;break;}
+  advance(1);
+ }
+ assert(first==80 && s_sdr_playout.resumes==1 && ptt_owned(PTT_OWNER_SDR,55));
+ ptt_release(PTT_OWNER_SDR,55);voice_inject_reset();
+
+ assert(ptt_claim(PTT_OWNER_SDR,56));
+ const int16_t last[]={-21,788,1600};
+ voice_sdr_inject_processed(56,last,3);
+ assert(voice_bridge_play(pcm,256)==0 && !voice_sdr_drain_pcm(55));
+ assert(voice_sdr_drain_pcm(56) && voice_bridge_play(pcm,256)==3);
+ assert(!memcmp(pcm,last,sizeof(last)) && voice_sdr_drain_pcm(56));
+ voice_bridge_written(true);
+ assert(!voice_sdr_drain_pcm(56) && s_sdr_playout.written_samples==3);
+ ptt_release(PTT_OWNER_SDR,56);voice_inject_reset();
 }
 int main(void){
  setvbuf(stdout,NULL,_IONBF,0);rx_guard_init();ptt_init();fixture();
@@ -204,6 +238,8 @@ int main(void){
  printf("PASS %s marked and legacy same-over re-prime, wrap, stale packet, spare input and delayed OFF\n",ENGINE);
  ring_recovery();
  printf("PASS %s network underrun uses 120ms same-over refill; new over and I2S confirmation use separate state\n",ENGINE);
+ browser_ring_recovery();
+ printf("PASS %s browser restart after 80ms at 40ms cadence; short final PCM survives below startup prefill\n",ENGINE);
 
  // A short over can finish the network jitter buffer before the DSP emits speech.
  fixture();int16_t delayed=321,filtered[256];
@@ -212,7 +248,7 @@ int main(void){
  voice_bridge_inject(&delayed,1);bridge_key_update(true,false);
  assert(voice_bridge_play(filtered,256)==1 && filtered[0]==321);
  advance(300);bridge_key_update(false,false);assert(rf_pin);
- voice_bridge_network_written(true);bridge_key_update(false,false);
+ voice_bridge_written(true);bridge_key_update(false,false);
  advance(251);bridge_key_update(false,false);assert(!rf_pin);
 
  // The final sample and final I2S block both keep the transmitter reserved.
@@ -220,7 +256,7 @@ int main(void){
  bridge_key_update(false,false);assert(rf_pin);advance(300);
  assert(voice_bridge_play(out,256)==1 && out[0]==777 && voice_bridge_level()==0);
  assert(voice_bridge_network_pending());advance(300);bridge_key_update(false,false);assert(rf_pin);
- voice_bridge_network_written(true);bridge_key_update(false,false);advance(251);bridge_key_update(false,false);
+ voice_bridge_written(true);bridge_key_update(false,false);advance(251);bridge_key_update(false,false);
  assert(!rf_pin && !voice_bridge_network_pending());
  printf("PASS %s last interpolation sample and I2S completion hold RF\n",ENGINE);
 
@@ -309,8 +345,9 @@ def run(out):
     common=common.replace('(void)p;(void)data;(void)n;memset(out,0,320*sizeof(*out));return 320;',
         '(void)p;(void)n;int16_t value=data?(int16_t)(data[0]|(data[1]<<8)):0;for(int i=0;i<320;i++)out[i]=value;return 320;')
     funcs=('clamp16','inject_locked','voice_inject_reset','voice_bridge_network_state','voice_bridge_network_keyed',
-        'voice_bridge_network_pending','voice_bridge_network_ready','voice_bridge_network_written','voice_bridge_network_cancel',
-        'voice_bridge_room','voice_bridge_inject','voice_bridge_level','voice_bridge_take_resampled','voice_bridge_play','voice_bridge_take')
+        'voice_bridge_network_pending','voice_bridge_network_ready','voice_bridge_written','voice_bridge_network_cancel',
+        'voice_bridge_room','voice_bridge_inject','voice_sdr_inject_processed','voice_sdr_drain_pcm',
+        'voice_bridge_level','voice_bridge_take_resampled','voice_bridge_play','voice_bridge_take')
     voice_code=VOICE+''.join(function(voice,n) for n in funcs)
     for name in ('rx_guard.c','rx_guard.h','ptt.c','ptt.h','net_rx_order.h','net_audio_denoise.h','rf_denoise.h','tx_timeout.h'):
         shutil.copy2(ROOT/'firmware/main'/name,out/name)

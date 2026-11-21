@@ -52,6 +52,7 @@
 #include <stdatomic.h>
 #include "np_access.h"
 #include "net_rx_order.h"
+#include "net_tx_pcm.h"
 #include "peer_labels.h"
 #include "device_name.h"
 #include "device_maintenance.h"
@@ -562,6 +563,8 @@ static volatile int64_t s_rx_ptt_ms;
 static volatile int64_t s_rx_hang_ms;      /* unkey pending since (0 = none) */
 static uint32_t s_tx_msgs, s_tx_errs;
 static atomic_uint s_tx_qdrop;
+static bool s_tx_open;
+static net_tx_pcm_counters_t s_tx_audio;
 static int      s_last_send_rc = -999;  /* lwip_sendto of the last frame */
 static char     s_last_del[72] = "";    /* last delete: peer, fam, result */
 static uint32_t s_bye_rx;              /* BYE frames received */
@@ -2081,15 +2084,20 @@ static bool send_audio_to_all(const int16_t *pcm, bool ptt, bool tail, int64_t e
     const int enc = s_opus_enc
                         ? opus_link_encode(s_opus_enc, pcm, s_enc_buf, sizeof(s_enc_buf))
                         : -1;
-    if (enc != NP_AUDIO_OPUS) { ++s_tx_errs; return false; }
+    if (enc != NP_AUDIO_OPUS) {
+        ++s_tx_errs;
+        atomic_fetch_add(&s_tx_audio.encode_errors, 1);
+        return false;
+    }
     bool sent = false;
     bool failed = false;
+    bool expired = false;
     peer_lock();
     s_tx_tail_frame = tail;
     const uint16_t seq = s_tx_seq++;
     s_last_tx_ms = now_ms();
     for (int i = 0; i < SLOT_MAX; ++i) {
-        if (expires_us && esp_timer_get_time() >= expires_us) { failed = true; break; }
+        if (expires_us && esp_timer_get_time() >= expires_us) { expired = true; break; }
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest || !peer_addr_set(p)) { continue; }
         if (!frame_send_to(p, F_AUDIO, seq, ptt, s_enc_buf)) {
@@ -2102,7 +2110,9 @@ static bool send_audio_to_all(const int16_t *pcm, bool ptt, bool tail, int64_t e
     }
     s_tx_tail_frame = false;
     peer_unlock();
-    return sent && !failed;
+    if (expired) { atomic_fetch_add(&s_tx_audio.expired_frames, 1); }
+    if (failed || (!sent && !expired)) { atomic_fetch_add(&s_tx_audio.send_errors, 1); }
+    return sent && !failed && !expired;
 }
 
 typedef struct {
@@ -2113,6 +2123,7 @@ typedef struct {
     int64_t end_ms;             /* diagnostic only; 0 for ordinary audio */
 } np_tx_item_t;
 
+#define NP_TXQ_DEPTH (24u + NET_TX_PCM_CLOSE_SLOTS)
 static QueueHandle_t s_txq_pcm;
 static TaskHandle_t  s_tx_task;
 static bool s_tx_acc_tail;
@@ -2123,7 +2134,7 @@ uint32_t netp2pnet_tx_qdrop(void)
     return atomic_load(&s_tx_qdrop);
 }
 
-/* Submit under the TX accumulator lock. Count evictions separately from DSP misses. */
+/* Submit under the TX accumulator lock after reserving space for the batch. */
 static void np_enqueue_pcm(const int16_t *pcm, bool ptt)
 {
     if (!s_txq_pcm) { return; }
@@ -2133,10 +2144,27 @@ static void np_enqueue_pcm(const int16_t *pcm, bool ptt)
     item.tail = ptt && s_tx_acc_tail;
     item.expires_us = ptt ? s_tx_acc_expiry : 0;
     item.end_ms = ptt ? 0 : now_ms();
-    if (xQueueSend(s_txq_pcm, &item, 0) == pdTRUE) { return; }
-    np_tx_item_t dump;
-    if (xQueueReceive(s_txq_pcm, &dump, 0) == pdTRUE) { atomic_fetch_add(&s_tx_qdrop, 1); }
     if (xQueueSend(s_txq_pcm, &item, 0) != pdTRUE) { atomic_fetch_add(&s_tx_qdrop, 1); }
+}
+
+static bool np_tx_fits(size_t n, bool tail, int64_t expires_us)
+{
+    return s_started && s_txq_pcm && net_tx_pcm_fits(uxQueueSpacesAvailable(s_txq_pcm), NP_PKT_SAMPLES,
+        s_tx_acc_n, n, tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry);
+}
+
+static bool np_tx_room(size_t n, bool tail, int64_t expires_us)
+{
+    tx_lock();
+    const bool fits = np_tx_fits(n, tail, expires_us) &&
+                      (!tail || uxQueueMessagesWaiting(s_txq_pcm) < NET_TX_TAIL_BACKLOG_FRAMES);
+    tx_unlock();
+    return fits;
+}
+
+static void np_tx_audio_stats(netcom_tx_audio_stats_t *out)
+{
+    net_tx_pcm_counters_read(&s_tx_audio, out);
 }
 
 /*
@@ -2150,7 +2178,10 @@ static void np_tx_task(void *arg)
     while (!s_tx_stop) {
         np_tx_item_t item;
         if (!s_txq_pcm || xQueueReceive(s_txq_pcm, &item, pdMS_TO_TICKS(100)) != pdTRUE) continue;
-        if (item.expires_us && esp_timer_get_time() >= item.expires_us) { continue; }
+        if (item.expires_us && esp_timer_get_time() >= item.expires_us) {
+            atomic_fetch_add(&s_tx_audio.expired_frames, 1);
+            continue;
+        }
         const bool sent = send_audio_to_all(item.pcm, item.ptt != 0, item.tail, item.expires_us);
         if (!item.ptt) { netcom_note_end_sent(item.end_ms, sent); }
     }
@@ -2159,13 +2190,14 @@ static void np_tx_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-static void netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
+static bool netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t expires_us)
 {
     tx_lock();
-    if (!s_started) {
-        s_tx_acc_n = 0;
+    if (!np_tx_fits(n, tail, expires_us)) {
+        atomic_fetch_add(&s_tx_qdrop, 1);
+        atomic_fetch_add(&s_tx_audio.rejected_samples, n);
         tx_unlock();
-        return;
+        return false;
     }
     if (s_tx_acc_n && (tail != s_tx_acc_tail || expires_us != s_tx_acc_expiry)) {
         while (s_tx_acc_n < NP_PKT_SAMPLES) { s_tx_acc[s_tx_acc_n++] = 0; }
@@ -2181,13 +2213,16 @@ static void netp2pnet_tx_sample(const int16_t *pcm, size_t n, bool tail, int64_t
             np_enqueue_pcm(s_tx_acc, true);
         }
     }
+    s_tx_open |= n != 0;
+    atomic_fetch_add(&s_tx_audio.accepted_samples, n);
     tx_unlock();
+    return true;
 }
 
 static void netp2pnet_tx_end(void)
 {
     tx_lock();
-    if (!s_started) {
+    if (!s_started || !s_tx_open) {
         tx_unlock();
         return;
     }
@@ -2197,6 +2232,7 @@ static void netp2pnet_tx_end(void)
     }
     memset(s_tx_acc, 0, sizeof(s_tx_acc));
     s_tx_acc_n = 0;
+    s_tx_open = false;
     np_enqueue_pcm(s_tx_acc, false);
     tx_unlock();
 }
@@ -2290,10 +2326,10 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
      * PSRAM so internal RAM stays free for WiFi and lwIP.
      */
     if (!s_txq_pcm) {
-        s_txq_pcm = xQueueCreateWithCaps(24, sizeof(np_tx_item_t),
+        s_txq_pcm = xQueueCreateWithCaps(NP_TXQ_DEPTH, sizeof(np_tx_item_t),
                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_txq_pcm) {
-            s_txq_pcm = xQueueCreateWithCaps(24, sizeof(np_tx_item_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            s_txq_pcm = xQueueCreateWithCaps(NP_TXQ_DEPTH, sizeof(np_tx_item_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         }
     }
     if (!s_txq_pcm) {
@@ -2338,6 +2374,7 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
      * enough to guarantee every tx_sample/tx_end sees a valid handle. */
     tx_lock();
     s_tx_acc_n = 0;
+    s_tx_open = false;
     s_tx_seq = 0;
     s_tx_epoch = (uint16_t)esp_random(); if (!s_tx_epoch) { s_tx_epoch = 1; }
     s_tx_epoch_open = false;
@@ -2555,6 +2592,8 @@ static const netcom_engine_t s_engine = {
     .start        = netp2pnet_start,
     .stop         = netp2pnet_stop,
     .tx_sample    = netp2pnet_tx_sample,
+    .tx_room      = np_tx_room,
+    .tx_audio_stats = np_tx_audio_stats,
     .tx_end       = netp2pnet_tx_end,
     .rx_sample    = NULL,
     .stats        = netp2pnet_stats,

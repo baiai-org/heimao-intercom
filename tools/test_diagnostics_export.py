@@ -15,6 +15,10 @@ PREFIX=r'''
 #include <stdatomic.h>
 #include "ptt.h"
 #include "sa818_cfg.h"
+#include "bridge.h"
+#include "netcom.h"
+#include "sdr.h"
+#include "voice.h"
 #define ESP_OK 0
 #define ESP_FAIL -1
 #define HTTPD_500_INTERNAL_SERVER_ERROR 500
@@ -41,6 +45,15 @@ static int64_t esp_timer_get_time(void){return INT64_C(4294967295)*1000;}
 static const char *device_identity_id(void){return "orl-test";}
 static const app_desc_t *esp_app_get_description(void){static app_desc_t a={"r11-93"};return &a;}
 static unsigned tx_timeout_seconds(void){return 600;}
+void sdr_tx_audio_stats(sdr_tx_audio_stats_t *s){*s=(sdr_tx_audio_stats_t){47,1760,0,1760,0};}
+void voice_sdr_playout(voice_sdr_playout_t *s){
+ *s=(voice_sdr_playout_t){.token=47,.written_samples=1760,.last_resume_us=INT64_MAX};
+}
+void bridge_rx_stats(bridge_rx_stats_t *s){*s=(bridge_rx_stats_t){.captured_samples=2560,.submitted_samples=2560};}
+void netcom_tx_audio_stats(netcom_tx_audio_stats_t *s){
+ *s=(netcom_tx_audio_stats_t){.accepted_samples=UINT32_MAX,.expired_frames=2,.encode_errors=3,.send_errors=4};
+}
+uint8_t netcom_mode(void){return NETCOM_MODE_NETP2P;}
 static int httpd_get_client_list(httpd_handle_t h,size_t *n,int *fds){(void)h;assert(*n>=2);*n=2;fds[0]=7;fds[1]=8;return ESP_OK;}
 static int httpd_resp_send_err(httpd_req_t *req,int code,const char *text){(void)req;(void)text;assert(code==500);return ESP_FAIL;}
 static void httpd_resp_set_hdr(httpd_req_t *req,const char *key,const char *value){(void)req;assert(!strcmp(key,"Cache-Control")&&!strcmp(value,"no-store"));}
@@ -61,6 +74,7 @@ def main():
     scratch=ROOT/'.tmp';scratch.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='diagnostics-',dir=scratch) as temp:
         d=Path(temp);(d/'esp_err.h').write_text('typedef int esp_err_t;\n')
+        (d/'esp_http_server.h').write_text('typedef void *httpd_handle_t;\n')
         (d/'test.c').write_text(code,encoding='utf-8');exe=d/'test.exe';env=dict(os.environ,TEMP=temp,TMP=temp,TMPDIR=temp)
         subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-I',str(d),'-I',str(ROOT/'firmware/main'),str(d/'test.c'),'-o',str(exe)],check=True,env=env)
         raw=subprocess.check_output([str(exe)],env=env,text=True);data=json.loads(raw)
@@ -68,7 +82,14 @@ def main():
         assert all(len(e)==6 and all(isinstance(x,int) for x in e) for e in data['events'])
         assert data['memory']['internal_free']==4294967295 and data['connections']['last_tls_error']==-30592
         assert data['tx_timeout_s']==600
-        assert set(data)=={'version','device_id','firmware','uptime_ms','memory','connections','rf_config','tx_timeout_s','event_sequence','events'}
+        assert set(data)=={'version','device_id','firmware','uptime_ms','memory','connections','rf_config',
+                           'tx_timeout_s','tx_audio','event_sequence','events'}
+        audio = data['tx_audio']
+        assert audio['sdr']=={'token':47,'received':1760,'rejected':0,'routed':1760,'pending':0}
+        assert audio['sdr_rf']['written']==1760 and audio['sdr_rf']['last_resume_us']==(1<<63)-1
+        assert audio['bridge']['captured']==audio['bridge']['submitted']==2560
+        assert audio['network']=={'mode':1,'accepted':4294967295,'rejected':0,'expired_frames':2,
+                                  'encode_errors':3,'send_errors':4}
         assert len(raw)<12288
         print('PASS: diagnostic export maximum counters/64 events form valid bounded JSON; both PSRAM allocation failures reclaim memory')
 if __name__=='__main__':main()

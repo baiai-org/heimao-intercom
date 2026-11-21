@@ -120,12 +120,18 @@ bool voice_bridge_network_ready(void);
 bool voice_bridge_network_pending(void);
 void voice_bridge_network_discard(void);
 uint32_t voice_bridge_network_discarded_samples(void);
-void voice_bridge_network_written(bool written);
+void voice_bridge_written(bool written);
 typedef struct {
     uint32_t underruns, resumes;
     int64_t last_underrun_us, last_resume_us;
 } voice_network_playout_t;
 void voice_bridge_network_playout(voice_network_playout_t *out);
+typedef struct {
+    uint32_t token, written_samples, write_errors, underruns, resumes;
+    int64_t last_resume_us;
+} voice_sdr_playout_t;
+bool voice_sdr_drain_pcm(uint32_t token);
+void voice_sdr_playout(voice_sdr_playout_t *out);
 void voice_bridge_network_cancel(void);
 size_t voice_bridge_room(void);
 size_t voice_bridge_take(int16_t *out, size_t cap);
