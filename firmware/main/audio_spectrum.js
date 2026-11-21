@@ -113,7 +113,12 @@
       current.boardNow = now;
       current.boardElapsed = elapsed;
       const offset = received - elapsed - rtt / 2;
-      current.clockOffset = reboot ? offset : Math.min(current.clockOffset, offset);
+      // Requests delayed in the server queue give a biased clock estimate.
+      // Use the fastest observed exchange for this device boot.
+      if (reboot || rtt < current.clockRtt) {
+        current.clockRtt = rtt;
+        current.clockOffset = offset;
+      }
       if (restart || gap) {
         fill = 0;
         current.anchor = null;
@@ -143,7 +148,8 @@
       current.after = first + count;
       current.selection = null;
       reply(current, output, {mask, path, reset, gap: clockGap || gap || (restart && !reset && !!count),
-        samples: count, rtt, fftMs, contention});
+        samples: count, rtt, fftMs, contention,
+        sourceLag: count ? ((now - stamp) >>> 0) + (latest - first - count) / (sampleRate / 1000) : 0});
       return {mask, behind: latest - current.after};
     }
 
@@ -202,7 +208,7 @@
       fill = 0;
       if (data.type === 'stop') return;
       session = {mode: data.type, epoch: data.epoch, selection: data.selection,
-        generation: 0, boot: null, boardNow: null, clockOffset: Infinity, after: 0, anchor: null,
+        generation: 0, boot: null, boardNow: null, clockRtt: Infinity, clockOffset: 0, after: 0, anchor: null,
         errors: 0, lastGood: performance.now()};
       if (session.mode === 'radio') void read(session);
     };
@@ -690,7 +696,7 @@
   let retries = 0;
   let workerRetry = 0;
   const errorLabel = root.querySelector('[data-spectrum-problem]');
-  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0};
+  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0, sourceLag:0};
 
   function visible() {
     return onScreen && !document.hidden && root.getClientRects().length > 0;
@@ -760,6 +766,7 @@
     if (data.rtt !== undefined) {
       stats.rtt = data.rtt;
       stats.contention = data.contention;
+      stats.sourceLag = data.sourceLag;
       if (data.rows.length) {
         stats.fftMs = data.fftMs;
         // Move the playout delay gradually so normal RTT jitter does not shift the time grid.

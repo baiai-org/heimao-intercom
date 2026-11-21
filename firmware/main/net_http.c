@@ -2810,6 +2810,12 @@ static uint32_t sdr_query_id(httpd_req_t *req, const char *key)
     return end && !*end && v > 0 && v <= UINT32_MAX ? (uint32_t)v : 0;
 }
 
+static void sdr_tcp_low_latency(int fd)
+{
+    const int enabled = 1;
+    if (fd >= 0) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)); }
+}
+
 static esp_err_t h_audio_spectrum(httpd_req_t *req)
 {
     enum { HEADER_ROOM = 160 };
@@ -2842,12 +2848,24 @@ static esp_err_t h_audio_spectrum(httpd_req_t *req)
     if (n <= 0 || (size_t)n >= sizeof(header)) { return ESP_FAIL; }
     char *response = (char *)reply - n;
     memcpy(response, header, n);
+    const int fd = httpd_req_to_sockfd(req);
+    sdr_tcp_low_latency(fd);
+    struct timeval previous_timeout;
+    socklen_t timeout_len = sizeof(previous_timeout);
+    const struct timeval send_timeout = {.tv_sec = 0, .tv_usec = 180000};
+    const bool restore = fd >= 0 &&
+        getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &previous_timeout, &timeout_len) == 0 &&
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) == 0;
+    const int64_t deadline = esp_timer_get_time() + 180000;
+    esp_err_t result = ESP_OK;
     for (size_t offset = 0; offset < length + n;) {
         const int written = httpd_send(req, response + offset, length + n - offset);
-        if (written <= 0) { return ESP_FAIL; }
+        if (written <= 0) { result = ESP_FAIL; break; }
         offset += written;
+        if (offset < length + n && esp_timer_get_time() >= deadline) { result = ESP_FAIL; break; }
     }
-    return ESP_OK;
+    if (restore) { (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &previous_timeout, timeout_len); }
+    return result;
 }
 
 static void sdr_reply_json(char *reply, size_t n, bool ok, uint32_t id, bool activity)
@@ -2858,12 +2876,6 @@ static void sdr_reply_json(char *reply, size_t n, bool ok, uint32_t id, bool act
         radio_activity_json(snapshot, sizeof(snapshot));
         snprintf(reply, n, "%.*s,\"activity\":%s}", (int)strlen(state)-1, state, snapshot);
     } else { snprintf(reply, n, "%s", state); }
-}
-
-static void sdr_tcp_low_latency(int fd)
-{
-    const int enabled = 1;
-    if (fd >= 0) { (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)); }
 }
 
 static esp_err_t sdr_reply(httpd_req_t *req, bool ok, uint32_t id)
