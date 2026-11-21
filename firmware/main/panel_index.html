@@ -2678,6 +2678,9 @@ function setPttLabel(el, text) {
 
 /* PCM16 LE, mono. All durations are derived from the board's sample rate. */
 const SDR_HTTP_RECOVERY_MS = 1100;
+const SDR_HTTP_FIRST_POST_MS = 300;
+const SDR_HTTP_RETRY_POST_MS = 750;
+const SDR_HTTP_DRAIN_MS = SDR_HTTP_FIRST_POST_MS + SDR_HTTP_RETRY_POST_MS + 350;
 const SDR = {
   on: false, ws: null, http: false, ctx: null, sp: null, worklet: null,
   wire: 16000, maxFrame: 2048, player: 'none', frames: 0, peak: 0,
@@ -2685,7 +2688,8 @@ const SDR = {
   micCtx: null, micStream: null, micSp: null, micPeak: 0, micFrames: 0,
   tick: null, txQueue: [], txQueued: 0, txBusy: false, txDrop: 0,
   txCaptured: 0, txSent: 0, txConfirmed: 0, txConfirmedAt: -Infinity, txInFlight: 0,
-  txReason: 'idle', txFlush: null, stateDeadline: null, txDeadline: 0, txOpenedAt: 0,
+  txReason: 'idle', txFlush: null, txDrainDeadline: 0, txRequest: null,
+  stateDeadline: null, txDeadline: 0, txOpenedAt: 0,
   rxStats: {ms: 0, underruns: 0, dropped: 0}, httpMs: 0,
   control: Promise.resolve(), session: Promise.resolve(), releasePending: Promise.resolve(true),
   txIdle: Promise.resolve(), keyId: 0, keyAck: null,
@@ -2879,6 +2883,9 @@ async function sdrMicList() {
 /* Keep the timeout in force while consuming the body, not just its headers. */
 async function sdrRequest(path, options = {}, type = 'json', timeoutMs = 3000) {
   const controller = new AbortController(), start = performance.now();
+  const parent = options.signal, cancel = () => controller.abort();
+  if (parent?.aborted) cancel();
+  else parent?.addEventListener('abort', cancel, {once: true});
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(path, {...options, cache: 'no-store', signal: controller.signal});
@@ -2887,9 +2894,22 @@ async function sdrRequest(path, options = {}, type = 'json', timeoutMs = 3000) {
       (type === 'json' || type === 'state') ? await r.json() : await r.arrayBuffer();
     if (type === 'json' && data.ok === false) throw new Error(data.err || data.reason || '设备拒绝操作');
     SDR.httpMs = Math.round(performance.now() - start);
-    if (type === 'tx') return Number(r.headers?.get('X-ORL-TX-Samples'));
+    if (type === 'tx') {
+      const samples = r.headers?.get('X-ORL-TX-Samples');
+      const raw = r.headers?.get('X-ORL-TX-State');
+      const status = raw && /^(\d+):(\d+):([01]):([a-z_?]+)$/.exec(raw);
+      if (typeof samples !== 'string' || !/^\d+$/.test(samples) || (raw && !status)) {
+        throw new Error('音频累计确认无效');
+      }
+      return {samples: Number(samples), state: status && {
+        sid: Number(status[1]), tx: Number(status[2]), on: true,
+        ptt: status[3] === '1', reason: status[4]}};
+    }
     return data;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener('abort', cancel);
+  }
 }
 function sdrOnline() { return SDR.http || !!(SDR.ws && SDR.ws.readyState === 1); }
 function sdrHttpPtt(on, tx = SDR.activeTx, sid = SDR.sid, epoch = SDR.txEpoch) {
@@ -2973,9 +2993,11 @@ async function sdrHttpTxPump() {
   if (SDR.txBusy) return;
   SDR.txBusy = true;
   const epoch = SDR.txEpoch, sid = SDR.sid, tx = SDR.activeTx;
+  const controller = SDR.txRequest = new AbortController();
   try {
     while (SDR.http && SDR.ptt && SDR.keyed && SDR.txEpoch === epoch && SDR.txQueue.length) {
-      if ((SDR.ctx.currentTime - SDR.txQueue[0].stamp) * 1000 > SDR_HTTP_RECOVERY_MS) {
+      if (!SDR.txDrainDeadline &&
+          (SDR.ctx.currentTime - SDR.txQueue[0].stamp) * 1000 > SDR_HTTP_RECOVERY_MS) {
         sdrAbortAudio('HTTP 待发语音超时'); break;
       }
       const frames = []; let count = 0;
@@ -2985,29 +3007,44 @@ async function sdrHttpTxPump() {
       SDR.txQueued -= count;
       const body = new Int16Array(count); let off = 0;
       frames.forEach(f => {body.set(f, off); off += f.length;});
-      SDR.txInFlight = count;
       const start = SDR.txSent, end = start + count;
-      const path = '/api/sdr_tx?sid=' + sid + '&tx=' + tx + '&offset=' + start;
+      let position = start;
       for (let attempt = 0; attempt < 2; attempt++) {
+        const remaining = SDR.txDrainDeadline ? SDR.txDrainDeadline - performance.now() : Infinity;
+        if (remaining <= 0) throw new Error('语音排空超时');
+        SDR.txInFlight = end - position;
+        const path = '/api/sdr_tx?sid=' + sid + '&tx=' + tx + '&offset=' + position + '&ack=2';
         try {
           // A replacement TLS connection can take longer than a normal POST.
-          const samples = await sdrRequest(path, {method: 'POST', body: body.buffer}, 'tx', attempt ? 750 : 300);
+          const budget = Math.min(remaining, attempt ? SDR_HTTP_RETRY_POST_MS : SDR_HTTP_FIRST_POST_MS);
+          const payload = position === start ? body.buffer : body.slice(position - start).buffer;
+          const {samples, state} = await sdrRequest(path,
+            {method: 'POST', body: payload, signal: controller.signal}, 'tx', budget);
           if (SDR.txEpoch !== epoch) return;
+          if (state && (state.sid !== sid || state.tx !== tx)) throw new Error('音频确认话段不匹配');
+          if (!Number.isSafeInteger(samples) || samples < position || samples > end) {
+            throw new Error('音频累计确认越界');
+          }
           sdrAcceptTxAck(sid, tx, samples);
-          if (samples !== end) throw new Error('音频累计确认不完整');
-          SDR.txSent = end;
-          break;
+          if (state?.ptt === false) { sdrApplyState(state, sid); return; }
+          if (samples === end) { SDR.txSent = end; break; }
+          position = samples;
+          throw new Error('音频累计确认不完整');
         } catch (e) {
           if (SDR.txEpoch !== epoch) return;
-          if (attempt || (start > 0 && performance.now() - SDR.txConfirmedAt >= SDR_HTTP_RECOVERY_MS)) throw e;
+          if (attempt || (!SDR.txDrainDeadline && start > 0 &&
+              performance.now() - SDR.txConfirmedAt >= SDR_HTTP_RECOVERY_MS)) throw e;
         }
       }
       SDR.txInFlight = 0;
     }
   } catch (e) {
-    if (SDR.txEpoch === epoch) sdrAbortAudio('HTTP 语音发送失败');
+    if (SDR.txEpoch === epoch) {
+      sdrAbortAudio(SDR.txDrainDeadline && performance.now() >= SDR.txDrainDeadline ?
+        '排空语音超时' : 'HTTP 语音发送失败');
+    }
   } finally {
-    SDR.txInFlight = 0; SDR.txBusy = false;
+    SDR.txRequest = null; SDR.txInFlight = 0; SDR.txBusy = false;
   }
 }
 
@@ -3169,7 +3206,9 @@ function sdrApplyState(reply, sid = SDR.sid) {
   // A poll sent before key-on can report the preceding TX. Only a matching
   // transmission ID is authoritative for this press.
   if (SDR.keyed && reply.tx === SDR.activeTx && !reply.ptt) {
+    SDR.txReason = reply.reason || 'board_stopped';
     sdrPttUp(false);
+    SDR.releasePending = Promise.resolve(true);
     if (reply.reason === 'hold_limit') log('已达发射超时', 'good');
     else log('手台端已停止发射: ' + (reply.reason || 'released'), 'err');
   } else if (SDR.keyed && reply.tx === SDR.activeTx && reply.ptt === true) {
@@ -3187,7 +3226,8 @@ function sdrStateStart() {
     if (SDR.http && SDR.ptt) {
       // The PCM POST already acknowledges this exact over. Keep the single
       // HTTPS worker free for audio uploads and any replacement connection.
-      if (SDR.keyed && performance.now() - Math.max(SDR.txOpenedAt, SDR.txConfirmedAt) > 1500) {
+      if (SDR.keyed && !SDR.txDrainDeadline &&
+          performance.now() - Math.max(SDR.txOpenedAt, SDR.txConfirmedAt) > 1500) {
         sdrAbortAudio('HTTP 收音确认超时');
       } else if (SDR.keyed && !SDR.txFlush && SDR.txDeadline) {
         const left = Math.max(0, Math.ceil((SDR.txDeadline - performance.now()) / 1000));
@@ -3304,11 +3344,13 @@ async function sdrPttDown(ev) {
 function sdrPttFinish() {
   if (!SDR.keyed || !SDR.micSp || SDR.txFlush) return sdrPttUp();
   const epoch = SDR.txEpoch;
+  const budget = SDR.http ? SDR_HTTP_DRAIN_MS : 600;
+  if (SDR.http) SDR.txDrainDeadline = performance.now() + budget;
   setPttLabel($('sdrPtt'), '正在发送余音 · 点击立即停止');
   const flushed = new Promise(resolve => { SDR.txFlush = resolve; });
   SDR.micSp.port.postMessage({on: false, flush: true, epoch});
   let timer;
-  const expired = new Promise(resolve => { timer = setTimeout(() => resolve(false), 600); });
+  const expired = new Promise(resolve => { timer = setTimeout(() => resolve(false), budget); });
   const drained = flushed.then(async ok => {
     if (ok && SDR.http) await SDR.txIdle;
     return ok;
@@ -3334,6 +3376,8 @@ function sdrPttUp(notify = true) {
     if (notify && SDR.keyed) sdrReport('tx-end');
   }
   SDR.ptt = SDR.keyed = SDR.keyPending = false; SDR.txEpoch++;
+  SDR.txDrainDeadline = 0;
+  if (SDR.txRequest) SDR.txRequest.abort();
   SDR.txQueue = []; SDR.txQueued = 0;
   if (SDR.micSp) {
     SDR.micSp.port.onmessage = null; SDR.micSp.port.postMessage({on: false});

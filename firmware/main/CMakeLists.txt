@@ -149,6 +149,12 @@ if(NOT https_replaced EQUAL 1)
 endif()
 set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
 
+option(HEIMAO_SDR_HTTP_TIMING "Record bounded HTTPS PCM timing for a lab build" OFF)
+if(HEIMAO_SDR_HTTP_TIMING)
+    target_compile_definitions(${https_lib} PRIVATE ORL_SDR_HTTP_TIMING)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE ORL_SDR_HTTP_TIMING)
+endif()
+
 # Apply the exact ADC sample clock inside the driver's start sequence, before
 # conversion is enabled, without modifying the SDK shared with the original.
 target_link_options(${COMPONENT_LIB} INTERFACE

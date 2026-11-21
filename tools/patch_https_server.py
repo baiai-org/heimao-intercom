@@ -21,7 +21,20 @@ def patched_source(raw):
         raise ValueError('Unexpected transport context failure branch')
     block = block.replace(needle, '        /* r11-93: not attached to HTTP yet; reclaim the completed TLS session. */\n'
                          '        esp_tls_server_session_delete(tls);\n' + needle)
-    return (text[:start] + block + text[end:]).encode('utf-8')
+    text = text[:start] + block + text[end:]
+    handshake = '    int ret = esp_tls_server_session_create(global_ctx->tls_cfg, sockfd, tls);'
+    if text.count(handshake) != 1:
+        raise ValueError('Unexpected TLS handshake site')
+    text = text.replace(handshake, (
+        '#ifdef ORL_SDR_HTTP_TIMING\n'
+        '    extern void orl_sdr_http_tls_handshake(int fd, int begin);\n'
+        '    orl_sdr_http_tls_handshake(sockfd, 1);\n'
+        '#endif\n'
+        f'{handshake}\n'
+        '#ifdef ORL_SDR_HTTP_TIMING\n'
+        '    orl_sdr_http_tls_handshake(sockfd, 0);\n'
+        '#endif'))
+    return text.encode('utf-8')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

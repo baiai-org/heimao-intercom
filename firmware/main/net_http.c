@@ -3154,8 +3154,98 @@ static esp_err_t h_sdr_ptt(httpd_req_t *req)
     return sdr_reply(req, ok, sdr_query_id(req, "id"));
 }
 
+#ifdef ORL_SDR_HTTP_TIMING
+#define SDR_HTTP_TRACE_COUNT 32
+typedef struct {
+    int64_t begin_us, done_us;
+} sdr_tls_trace_t;
+typedef struct {
+    uint32_t probe, offset, samples;
+    int fd, result;
+    int64_t entered_us, body_done_us, recv_us, enqueue_us, reply_begin_us, reply_done_us;
+    sdr_tls_trace_t tls;
+} sdr_http_trace_t;
+static sdr_tls_trace_t s_sdr_tls_trace[CONFIG_LWIP_MAX_SOCKETS];
+static sdr_http_trace_t *s_sdr_http_trace; /* PSRAM, only used by the HTTPS task */
+
+void orl_sdr_http_tls_handshake(int fd, int begin)
+{
+    sdr_tls_trace_t *entry = &s_sdr_tls_trace[fd % CONFIG_LWIP_MAX_SOCKETS];
+    if (begin) { *entry = (sdr_tls_trace_t){.begin_us = esp_timer_get_time()}; }
+    else { entry->done_us = esp_timer_get_time(); }
+}
+
+static void sdr_http_trace_record(const sdr_http_trace_t *trace)
+{
+    if (!s_sdr_http_trace) {
+        s_sdr_http_trace = heap_caps_calloc(SDR_HTTP_TRACE_COUNT, sizeof(*s_sdr_http_trace),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_sdr_http_trace) { s_sdr_http_trace[trace->probe % SDR_HTTP_TRACE_COUNT] = *trace; }
+}
+
+static esp_err_t h_sdr_tx_trace(httpd_req_t *req)
+{
+    if (req->handle != s_tls_handle) { return httpd_resp_send_404(req); }
+    const uint32_t first = sdr_query_id(req, "first");
+    const int count = query_int(req, "count", SDR_HTTP_TRACE_COUNT, NULL);
+    if (!first || count <= 0 || count > SDR_HTTP_TRACE_COUNT || first > UINT32_MAX - (uint32_t)count) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid trace range");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_sendstr_chunk(req, "{\"rows\":[");
+    bool comma = false;
+    for (uint32_t probe = first; s_sdr_http_trace && err == ESP_OK && probe < first + count; ++probe) {
+        const sdr_http_trace_t *row = &s_sdr_http_trace[probe % SDR_HTTP_TRACE_COUNT];
+        if (row->probe != probe) { continue; }
+        char item[280];
+        const int n = snprintf(item, sizeof(item),
+            "%s[%" PRIu32 ",%d,%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64
+            ",%" PRId64 ",%" PRId64 ",%d,%" PRIu32 ",%" PRIu32 "]",
+            comma ? "," : "", probe, row->fd, row->tls.begin_us, row->tls.done_us, row->entered_us,
+            row->body_done_us, row->recv_us, row->enqueue_us, row->reply_begin_us, row->reply_done_us,
+            row->result, row->offset, row->samples);
+        if (n < 0 || (size_t)n >= sizeof(item)) { return ESP_FAIL; }
+        err = httpd_resp_send_chunk(req, item, n);
+        comma = true;
+    }
+    if (err != ESP_OK || httpd_resp_sendstr_chunk(req, "]}") != ESP_OK) { return ESP_FAIL; }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+#endif
+
+static esp_err_t sdr_http_ack_reply(httpd_req_t *req, const char *count, const char *state,
+                                    const char *phases, bool compact)
+{
+    if (compact) {
+        /* This reply is fully framed before handing it to the HTTPD transport.
+         * httpd_send preserves the session's TLS override and may short-write. */
+        char response[256];
+        const int len = snprintf(response, sizeof(response),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\nCache-Control: no-store\r\n"
+            "X-ORL-TX-Samples: %s\r\nX-ORL-TX-State: %s\r\n\r\n", count, state);
+        if (len < 0 || (size_t)len >= sizeof(response)) { return ESP_FAIL; }
+        for (int sent = 0; sent < len;) {
+            const int n = httpd_send(req, response + sent, len - sent);
+            if (n <= 0) { return ESP_FAIL; }
+            sent += n;
+        }
+        return ESP_OK;
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (count[0]) { httpd_resp_set_hdr(req, "X-ORL-TX-Samples", count); }
+    if (state[0]) { httpd_resp_set_hdr(req, "X-ORL-TX-State", state); }
+    if (phases[0]) { httpd_resp_set_hdr(req, "Server-Timing", phases); }
+    return httpd_resp_send(req, NULL, 0);
+}
+
 static esp_err_t h_sdr_tx(httpd_req_t *req)
 {
+#ifdef ORL_SDR_HTTP_TIMING
+    const int64_t entered_us = esp_timer_get_time();
+    const uint32_t probe = req->handle == s_tls_handle ? sdr_query_id(req, "probe") : 0;
+#endif
     const uint32_t sid = sdr_query_id(req, "sid"), tx = sdr_query_id(req, "tx");
     if (req->content_len <= 0 || req->content_len > 8192 || (req->content_len & 1)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid PCM length"); return ESP_FAIL;
@@ -3174,6 +3264,16 @@ static esp_err_t h_sdr_tx(httpd_req_t *req)
         }
         offset = (uint32_t)parsed;
     }
+    const bool status_ack = offset != SDR_TX_APPEND && query_int(req, "ack", 0, NULL) == 2;
+    const bool timing_header = query_int(req, "timing", 0, NULL) == 1;
+    bool compact = status_ack && !timing_header;
+    bool timing = timing_header;
+#ifdef ORL_SDR_HTTP_TIMING
+    if (probe && query_int(req, "split", 0, NULL) == 1) { compact = false; }
+    timing |= probe != 0;
+    sdr_http_trace_t trace = {.probe = probe, .fd = fd, .offset = offset, .entered_us = entered_us};
+    if (probe && fd >= 0) { trace.tls = s_sdr_tls_trace[fd % CONFIG_LWIP_MAX_SOCKETS]; }
+#endif
     /* An incomplete retryable body should release the HTTP worker quickly.
      * Legacy clients keep the configured socket timeout. */
     struct timeval old_timeout;
@@ -3182,43 +3282,70 @@ static esp_err_t h_sdr_tx(httpd_req_t *req)
     const bool restore_timeout = offset != SDR_TX_APPEND && fd >= 0 &&
         getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, &timeout_len) == 0 &&
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &pcm_timeout, sizeof(pcm_timeout)) == 0;
-    const bool timing = query_int(req, "timing", 0, NULL) == 1;
     int64_t recv_us = 0, enqueue_us = 0;
+    esp_err_t result = ESP_FAIL;
+    bool push_more = true;
+    sdr_tx_ack_t ack = {0};
     uint8_t buf[513]; size_t carry = 0, left = (size_t)req->content_len;
     while (left) {
         const size_t want = left < 512 ? left : 512;
         const int64_t before = timing ? esp_timer_get_time() : 0;
         const int r = httpd_req_recv(req, (char *)buf+carry, want);
-        if (r <= 0) { return ESP_FAIL; }
+        const int64_t received = timing ? esp_timer_get_time() : 0;
+        recv_us += received - before;
+        if (r <= 0) { goto finish; }
         left -= (size_t)r;
         const size_t total = carry + (size_t)r, even = total & ~(size_t)1;
         /* TCP fragments can end halfway through a sample. Carry that byte
          * across reads and validate this same TX token on EVERY fragment. */
-        const int64_t received = timing ? esp_timer_get_time() : 0;
-        if (even && !sdr_tx_push_bytes_at(sid, tx, buf, even, offset)) { return ESP_FAIL; }
-        if (offset != SDR_TX_APPEND) { offset += even / 2; }
-        if (timing) {
-            recv_us += received - before;
-            enqueue_us += esp_timer_get_time() - received;
+        if (even && push_more && !sdr_tx_push_bytes_at(sid, tx, buf, even, offset)) {
+            if (!status_ack) { goto finish; }
+            /* Read the bounded remainder so the matching client can receive
+             * the actual stopped state or the contiguous watermark. */
+            push_more = false;
         }
+        if (offset != SDR_TX_APPEND) { offset += even / 2; }
+        if (timing) { enqueue_us += esp_timer_get_time() - received; }
         carry = total - even;
         if (carry) { buf[0] = buf[even]; }
     }
+#ifdef ORL_SDR_HTTP_TIMING
+    if (probe) { trace.body_done_us = esp_timer_get_time(); }
+#endif
     if (restore_timeout) { (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, timeout_len); }
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    uint32_t samples;
-    char ack[16], phases[96];
-    if (sdr_tx_received(sid, tx, &samples)) {
-        snprintf(ack, sizeof(ack), "%" PRIu32, samples);
-        httpd_resp_set_hdr(req, "X-ORL-TX-Samples", ack);
+    char count[16] = "", state[96] = "", phases[96] = "";
+    if (sdr_tx_ack(sid, tx, &ack)) {
+        snprintf(count, sizeof(count), "%" PRIu32, ack.samples);
+        if (status_ack) {
+            const int n = snprintf(state, sizeof(state), "%" PRIu32 ":%" PRIu32 ":%d:%s",
+                                   sid, tx, ack.keyed, ack.reason);
+            if (n < 0 || (size_t)n >= sizeof(state)) { goto finish; }
+        }
+    } else if (status_ack) {
+        goto finish;
     }
-    if (timing) {
+    if (timing_header) {
         snprintf(phases, sizeof(phases), "recv;dur=%lld.%03lld, enqueue;dur=%lld.%03lld",
                  (long long)(recv_us/1000), (long long)(recv_us%1000),
                  (long long)(enqueue_us/1000), (long long)(enqueue_us%1000));
-        httpd_resp_set_hdr(req, "Server-Timing", phases);
     }
-    return httpd_resp_send(req, NULL, 0);
+#ifdef ORL_SDR_HTTP_TIMING
+    if (probe) { trace.reply_begin_us = esp_timer_get_time(); }
+#endif
+    result = sdr_http_ack_reply(req, count, state, phases, compact);
+finish:
+#ifdef ORL_SDR_HTTP_TIMING
+    if (probe) {
+        if (!trace.body_done_us) { (void)sdr_tx_ack(sid, tx, &ack); }
+        trace.reply_done_us = esp_timer_get_time();
+        trace.recv_us = recv_us;
+        trace.enqueue_us = enqueue_us;
+        trace.samples = ack.samples;
+        trace.result = result;
+        sdr_http_trace_record(&trace);
+    }
+#endif
+    return result;
 }
 
 #define SDR_HTTP_RX_PKTS 16     /* 320 ms catches up over high-RTT HTTP */
@@ -3334,6 +3461,9 @@ static const httpd_uri_t s_routes[] = {
     { .uri = "/api/sdr_state", .method = HTTP_GET, .handler = h_sdr_state },
     { .uri = "/api/sdr_report", .method = HTTP_GET, .handler = h_sdr_report },
     { .uri = "/api/sdr_ptt",   .method = HTTP_GET,  .handler = h_sdr_ptt },
+#ifdef ORL_SDR_HTTP_TIMING
+    { .uri = "/api/sdr_tx_trace", .method = HTTP_GET, .handler = h_sdr_tx_trace },
+#endif
     { .uri = "/api/sdr_test",  .method = HTTP_GET,  .handler = h_sdr_test },
     { .uri = "/api/sdr_tx",    .method = HTTP_POST, .handler = h_sdr_tx  },
     { .uri = "/api/sdr_rx",    .method = HTTP_GET,  .handler = h_sdr_rx  },
