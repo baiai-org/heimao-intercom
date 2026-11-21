@@ -2812,6 +2812,7 @@ static uint32_t sdr_query_id(httpd_req_t *req, const char *key)
 
 static esp_err_t h_audio_spectrum(httpd_req_t *req)
 {
+    enum { HEADER_ROOM = 160 };
     const uint32_t after = sdr_query_id(req, "after");
     char choice[16];
     query_str(req, "select", choice, sizeof(choice));
@@ -2824,19 +2825,29 @@ static esp_err_t h_audio_spectrum(httpd_req_t *req)
      * separate so sending does not hold the audio tap lock. */
     static uint8_t *http_reply, *https_reply;
     uint8_t **slot = req->handle == s_tls_handle ? &https_reply : &http_reply;
-    if (!*slot) { *slot = heap_caps_malloc(SPECTRUM_REPLY_BYTES, MALLOC_CAP_SPIRAM); }
-    uint8_t *reply = *slot;
+    if (!*slot) { *slot = heap_caps_malloc(HEADER_ROOM + SPECTRUM_REPLY_BYTES, MALLOC_CAP_SPIRAM); }
+    uint8_t *reply = *slot ? *slot + HEADER_ROOM : NULL;
     const size_t length = reply ? audio_spectrum_read(after, generation, choice[0] != 0, path, reply) : 0;
-    esp_err_t err;
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    if (length) {
-        httpd_resp_set_type(req, "application/octet-stream");
-        err = httpd_resp_send(req, (const char *)reply, length);
-    } else {
+    if (!length) {
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
         httpd_resp_set_status(req, "503 Service Unavailable");
-        err = send_result(req, false, "频谱暂不可用");
+        return send_result(req, false, "频谱暂不可用");
     }
-    return err;
+    /* Hand the header and PCM to the same TLS/plain writer together. The
+     * time between small header writes can otherwise dominate the RTT. */
+    char header[HEADER_ROOM];
+    const int n = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+        "Content-Length: %u\r\nCache-Control: no-store\r\n\r\n", (unsigned)length);
+    if (n <= 0 || (size_t)n >= sizeof(header)) { return ESP_FAIL; }
+    char *response = (char *)reply - n;
+    memcpy(response, header, n);
+    for (size_t offset = 0; offset < length + n;) {
+        const int written = httpd_send(req, response + offset, length + n - offset);
+        if (written <= 0) { return ESP_FAIL; }
+        offset += written;
+    }
+    return ESP_OK;
 }
 
 static void sdr_reply_json(char *reply, size_t n, bool ok, uint32_t id, bool activity)

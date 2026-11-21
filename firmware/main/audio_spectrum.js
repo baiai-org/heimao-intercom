@@ -118,8 +118,19 @@
         fill = 0;
         current.anchor = null;
       }
-      if (count && current.anchor === null) {
-        current.anchor = elapsed + current.clockOffset - ((now - stamp) >>> 0) - latest / (sampleRate / 1000);
+      let clockGap = false;
+      if (count) {
+        const measured = elapsed + current.clockOffset - ((now - stamp) >>> 0) - latest / (sampleRate / 1000);
+        if (current.anchor === null) current.anchor = measured;
+        else {
+          const drift = measured - current.anchor;
+          // A source can pause briefly without ending its route. Move forward
+          // if those gaps accumulate, preserving the order of existing rows.
+          if (drift > 80) {
+            current.anchor = measured;
+            clockGap = true;
+          } else if (drift > 8) current.anchor += Math.min(4, drift / 8);
+        }
       }
       const pcm = new Int16Array(buffer, headerBytes, count);
       const started = performance.now();
@@ -131,7 +142,7 @@
       if (path) current.path = path;
       current.after = first + count;
       current.selection = null;
-      reply(current, output, {mask, path, reset, gap: gap || (restart && !reset && !!count),
+      reply(current, output, {mask, path, reset, gap: clockGap || gap || (restart && !reset && !!count),
         samples: count, rtt, fftMs, contention});
       return {mask, behind: latest - current.after};
     }
@@ -236,8 +247,6 @@
   const layer = root.querySelector('[data-spectrum-gl]');
   const history = Array(ringSize).fill(null);
   const occupied = Array(historyCount).fill(null);
-  const ages = Array.from({length: historyCount}, (_, i) => i)
-    .filter(i => i < 50 || i % 4 === 2 || i === historyCount - 1);
   let active = 'surface';
   let columns = 0;
   let mesh = null;
@@ -359,8 +368,14 @@
   }
 
   function makeMesh() {
-    const gl = layer.getContext('webgl2', { alpha: true, antialias: true });
+    const gl = layer.getContext('webgl2', { alpha: true, antialias: false });
     if (!gl) return null;
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const software = info && /SwiftShader|llvmpipe|software/i.test(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+    const recent = software ? 12 : 50;
+    const spacing = software ? 16 : 4;
+    const ages = Array.from({length: historyCount}, (_, i) => i)
+      .filter(i => i < recent || (i - recent) % spacing === 0 || i === historyCount - 1);
     const vertex = [
       '#version 300 es',
       'precision highp float;',
@@ -675,7 +690,7 @@
   let retries = 0;
   let workerRetry = 0;
   const errorLabel = root.querySelector('[data-spectrum-problem]');
-  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0, age:0};
+  const stats = {samples:0, rows:0, drawn:0, gaps:0, contention:0, fftMs:0, rtt:0};
 
   function visible() {
     return onScreen && !document.hidden && root.getClientRects().length > 0;

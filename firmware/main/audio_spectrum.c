@@ -26,6 +26,14 @@ static SemaphoreHandle_t s_mutex;
 static spectrum_state_t *s_state;
 static atomic_uint s_lease_until, s_missed, s_contention;
 
+/* A reader pins the physical span only while it copies into its HTTP
+ * response. Route changes keep the write index moving around the ring. */
+typedef struct {
+    unsigned index, count;
+    atomic_bool active;
+} spectrum_pin_t;
+static spectrum_pin_t s_pins[2];
+
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
@@ -73,7 +81,19 @@ static unsigned priority(audio_spectrum_path_t path)
 static void reset_stream(spectrum_state_t *s)
 {
     if (++s->generation == 0) { ++s->generation; }
-    s->head = s->count = s->next = 0;
+    s->count = s->next = 0;
+}
+
+static bool pinned(unsigned head, unsigned count)
+{
+    for (unsigned i = 0; i < sizeof(s_pins) / sizeof(s_pins[0]); ++i) {
+        const spectrum_pin_t *pin = &s_pins[i];
+        if (!atomic_load_explicit(&pin->active, memory_order_acquire)) { continue; }
+        const unsigned ahead = (pin->index + PCM_CAPACITY - head) % PCM_CAPACITY;
+        const unsigned within = (head + PCM_CAPACITY - pin->index) % PCM_CAPACITY;
+        if (ahead < count || within < pin->count) { return true; }
+    }
+    return false;
 }
 
 static void use_path(spectrum_state_t *s, audio_spectrum_path_t path)
@@ -111,6 +131,12 @@ void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t s
         }
         if (s->count && (gap > ACTIVE_MS || missed || samples > UINT32_MAX - s->next)) {
             reset_stream(s);
+        }
+        if (pinned(s->head, samples)) {
+            atomic_fetch_or_explicit(&s_missed, bit, memory_order_relaxed);
+            atomic_fetch_add_explicit(&s_contention, 1, memory_order_relaxed);
+            xSemaphoreGive(s_mutex);
+            return;
         }
         const size_t room = PCM_CAPACITY - s->head;
         const size_t first = samples < room ? samples : room;
@@ -177,23 +203,33 @@ size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, aud
     }
     unsigned count = s->next - first;
     if (count > SPECTRUM_MAX_SAMPLES) { count = SPECTRUM_MAX_SAMPLES; }
-    memcpy(out, "APC\x01", 4);
-    le32(out + 4, s->boot);
-    le32(out + 8, s->generation);
-    le32(out + 12, active);
-    le32(out + 16, now);
-    le32(out + 20, s->stamp);
-    le32(out + 24, first);
-    le32(out + 28, s->next);
-    le32(out + 32, count);
-    le32(out + 36, s->path);
-    le32(out + 40, atomic_load_explicit(&s_contention, memory_order_relaxed));
-
-    const size_t index = (s->head + PCM_CAPACITY - (s->next - first)) % PCM_CAPACITY;
-    const size_t run = count < PCM_CAPACITY - index ? count : PCM_CAPACITY - index;
-    /* ESP32-S3 stores the signed 16-bit samples in wire byte order. */
-    memcpy(out + SPECTRUM_HEADER_BYTES, s->pcm + index, run * sizeof(int16_t));
-    memcpy(out + SPECTRUM_HEADER_BYTES + run * sizeof(int16_t), s->pcm, (count - run) * sizeof(int16_t));
+    const unsigned index = (s->head + PCM_CAPACITY - (s->next - first)) % PCM_CAPACITY;
+    spectrum_pin_t *pin = NULL;
+    if (count) {
+        for (unsigned i = 0; i < sizeof(s_pins) / sizeof(s_pins[0]); ++i) {
+            if (!atomic_load_explicit(&s_pins[i].active, memory_order_acquire)) {
+                pin = &s_pins[i];
+                pin->index = index;
+                pin->count = count;
+                atomic_store_explicit(&pin->active, true, memory_order_release);
+                break;
+            }
+        }
+        if (!pin) { xSemaphoreGive(s_mutex); return 0; }
+    }
+    const uint32_t header[] = { s->boot, s->generation, active, now, s->stamp, first,
+        s->next, count, s->path, atomic_load_explicit(&s_contention, memory_order_relaxed) };
     xSemaphoreGive(s_mutex);
+
+    memcpy(out, "APC\x01", 4);
+    _Static_assert(4 + sizeof(header) == SPECTRUM_HEADER_BYTES, "PCM header size");
+    for (unsigned i = 0; i < sizeof(header) / sizeof(header[0]); ++i) { le32(out + 4 * (i + 1), header[i]); }
+    if (pin) {
+        const size_t run = count < PCM_CAPACITY - index ? count : PCM_CAPACITY - index;
+        /* ESP32-S3 stores the signed 16-bit samples in wire byte order. */
+        memcpy(out + SPECTRUM_HEADER_BYTES, s->pcm + index, run * sizeof(int16_t));
+        memcpy(out + SPECTRUM_HEADER_BYTES + run * sizeof(int16_t), s->pcm, (count - run) * sizeof(int16_t));
+        atomic_store_explicit(&pin->active, false, memory_order_release);
+    }
     return SPECTRUM_HEADER_BYTES + count * sizeof(int16_t);
 }
