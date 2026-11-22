@@ -84,6 +84,7 @@
 #include "mbedtls/md.h"
 
 #include "audio_i2s.h"
+#include "audio_spectrum.h"
 #include "board_hw.h"
 #include "bridge.h"
 #include "net_audio_denoise.h"
@@ -433,6 +434,17 @@ typedef struct {
     uint16_t port;
 } np_addr_t;
 
+typedef enum { DNS_WAIT, DNS_QUERY, DNS_FAILED, DNS_CANDIDATE } peer_dns_state_t;
+typedef struct {
+    np_access_host_t config;
+    uint64_t key;
+    uint32_t ticket, wifi_epoch;
+    peer_dns_state_t state;
+    np_addr_t addresses[2];
+    uint8_t count, current, failures;
+    int64_t retry_at, switch_at;
+} peer_dns_t;
+
 typedef struct {
     bool     in_use;
     bool     selftest;
@@ -443,7 +455,9 @@ typedef struct {
     uint8_t  ip6[16];            /* IPv6 peers */
     uint16_t port;
     bool     linked;
+    bool     handshake_verified;
     bool     manual;             /* entered by the operator (not auto-learned) */
+    peer_dns_t *dns;             /* PSRAM, present only for a configured hostname */
     bool     hub;                /* advertised/inferred role of a direct peer */
     bool     via_hub;            /* audio origin, not a directly reachable peer */
     uint8_t  hub_mac[6];          /* upstream transport identity for via_hub */
@@ -482,6 +496,9 @@ typedef struct {
 } rt_peer_t;
 
 static rt_peer_t s_peer[SLOT_MAX];
+static TaskHandle_t s_dns_task;
+static uint32_t s_dns_ticket;
+static atomic_uint s_dns_run;
 static SemaphoreHandle_t s_peer_mux;
 static void peer_lock(void) { if (s_peer_mux) xSemaphoreTake(s_peer_mux, portMAX_DELAY); }
 static void peer_unlock(void) { if (s_peer_mux) xSemaphoreGive(s_peer_mux); }
@@ -516,6 +533,7 @@ static void peer_record(const rt_peer_t *p, np_access_record_t *r)
     memcpy(r->peer.name, p->name, 8);
     if (!r->peer.name[0]) { snprintf(r->peer.name, 8, "peer"); }
     memcpy(r->mac, p->mac, 6);
+    if (p->dns) { r->dns_key = p->dns->key; }
     if (!p->via_hub) {
         r->peer.family = p->fam; r->peer.port = p->port;
         if (p->fam == 6) { memcpy(r->peer.address, p->ip6, 16); }
@@ -593,11 +611,25 @@ static bool        s_hub_on;
 #define KEY_PEERS2       "np_peer2"
 #define KEY_PEERS3       "np_peer3"
 #define KEY_ACCESS       "np_state1"
+#define KEY_ACCESS2      "np_state2"
 #define PEER_BLOB2_ENTRY 27   /* name(8) + fam(1) + addr(16) + port(2)      */
 #define PEER_BLOB2_LEN   (PEER_MAX * PEER_BLOB2_ENTRY)
 
 static bool stun_set_inner(const char *host_port);
 static void peer_clear(rt_peer_t *p);
+static bool dns_worker_start(void);
+
+static peer_dns_t *dns_create(const np_access_host_t *config)
+{
+    peer_dns_t *dns = heap_caps_calloc(1, sizeof(*dns), MALLOC_CAP_SPIRAM);
+    if (dns) {
+        dns->config = *config;
+        dns->key = np_access_dns_key(config->host, config->port);
+        dns->ticket = ++s_dns_ticket;
+        dns->wifi_epoch = net_wifi_ip_epoch();
+    }
+    return dns;
+}
 
 static void peers_load(void)
 {
@@ -606,10 +638,15 @@ static void peers_load(void)
     if (err != ESP_OK) { s_access_error = err != ESP_ERR_NVS_NOT_FOUND; return; }
     /* Keep policy snapshots and encoded blobs off the HTTP/engine task stacks. */
     np_access_state_t *state = heap_caps_malloc(sizeof(*state), MALLOC_CAP_SPIRAM);
-    uint8_t *blob = heap_caps_malloc(NP_ACCESS_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *blob = heap_caps_malloc(NP_ACCESS_V2_BYTES, MALLOC_CAP_SPIRAM);
     if (!state || !blob) { s_access_error = true; goto done; }
-    size_t len = NP_ACCESS_BYTES;
-    err = nvs_get_blob(h, KEY_ACCESS, blob, &len);
+    size_t len = NP_ACCESS_V2_BYTES;
+    err = nvs_get_blob(h, KEY_ACCESS2, blob, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        len = NP_ACCESS_V2_BYTES;
+        err = nvs_get_blob(h, KEY_ACCESS, blob, &len);
+        if (err == ESP_OK) { s_peers_dirty = true; }
+    }
     if (err == ESP_OK) {
         if (!np_access_decode(blob, len, state)) { s_access_error = true; goto done; }
         s_denied_count = state->denied_count;
@@ -634,6 +671,17 @@ static void peers_load(void)
         rt_peer_t *p = &s_peer[i]; const np_access_record_t *r = &state->peers[i];
         peer_clear(p); p->in_use = p->manual = true;
         memcpy(p->name, r->peer.name, 8); memcpy(p->mac, r->mac, 6);
+        if (r->dns_key) {
+            const np_access_host_t *host = &state->hosts[i];
+            net_endpoint_t endpoint;
+            if (!net_endpoint_parse(host->host, host->port, &endpoint) ||
+                endpoint.kind != NET_HOST_DNS || strcmp(endpoint.host, host->host) ||
+                !(p->dns = dns_create(host))) {
+                s_access_error = true;
+                goto done;
+            }
+            continue; /* Resolve again before knocking on a hostname. */
+        }
         p->fam = r->peer.family; p->port = r->peer.port;
         if (p->fam == 6) { memcpy(p->ip6, r->peer.address, 16); }
         else { p->ip = be32(r->peer.address); }
@@ -653,27 +701,30 @@ static esp_err_t peers_save_ex(const rt_peer_t *exclude, const rt_peer_t *prefer
     if (s_access_error) { return ESP_ERR_INVALID_STATE; }
     if (!device_maintenance_write_begin()) { s_peers_dirty = true; return ESP_ERR_INVALID_STATE; }
     np_access_state_t *state = heap_caps_malloc(sizeof(*state), MALLOC_CAP_SPIRAM);
-    uint8_t *blob = heap_caps_malloc(NP_ACCESS_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *blob = heap_caps_malloc(NP_ACCESS_V2_BYTES, MALLOC_CAP_SPIRAM);
     esp_err_t err = ESP_ERR_NO_MEM;
     if (!state || !blob) { goto done; }
     memset(state, 0, sizeof(*state));
     for (int i = 0; i < PEER_MAX; ++i) {
         const rt_peer_t *p = &s_peer[i];
-        if (p == exclude || !p->in_use || p->selftest || p->via_hub || !peer_addr_set(p)) { continue; }
-        if (prefer && p != prefer && p->fam == prefer->fam && p->port == prefer->port &&
+        if (p == exclude || !p->in_use || p->selftest || p->via_hub ||
+            (!p->dns && !peer_addr_set(p))) { continue; }
+        if (prefer && p != prefer && !p->dns && !prefer->dns &&
+            p->fam == prefer->fam && p->port == prefer->port &&
             (p->fam == 6 ? !memcmp(p->ip6, prefer->ip6, 16) : p->ip == prefer->ip)) { continue; }
+        if (p->dns) { state->hosts[state->peer_count] = p->dns->config; }
         peer_record(p, &state->peers[state->peer_count++]);
     }
     state->denied_count = s_denied_count;
     memcpy(state->denied, s_denied, sizeof(s_denied));
-    size_t size = np_access_encode(state, blob, NP_ACCESS_BYTES);
+    size_t size = np_access_encode(state, blob, NP_ACCESS_V2_BYTES);
     nvs_handle_t h;
     err = size ? nvs_open(NVS_NS, NVS_READWRITE, &h) : ESP_ERR_INVALID_ARG;
     if (err == ESP_OK) {
         /* Legacy keys remain intact for deliberate rollback, never read over the new key. */
-        err = nvs_set_blob(h, KEY_ACCESS, blob, size);
-        if (err == ESP_OK) { err = nvs_set_u8(h, KEY_HUB, s_hub_on ? 1 : 0); }
+        err = nvs_set_u8(h, KEY_HUB, s_hub_on ? 1 : 0);
         if (err == ESP_OK) { err = nvs_set_str(h, KEY_STUN, s_stun_str); }
+        if (err == ESP_OK) { err = nvs_set_blob(h, KEY_ACCESS2, blob, size); }
         if (err == ESP_OK) { err = nvs_commit(h); }
         nvs_close(h);
     }
@@ -851,6 +902,7 @@ static void peer_audio_free(rt_peer_t *p)
 static void peer_clear(rt_peer_t *p)
 {
     peer_audio_free(p);
+    heap_caps_free(p->dns);
     memset(p, 0, sizeof(*p));
 }
 /* Allocated on first audio, never for idle configured peers. Caller holds the
@@ -913,7 +965,7 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
         rt_peer_t *candidate = NULL; unsigned candidates = 0;
         for (int i = 0; i < SLOT_MAX; ++i) {
             rt_peer_t *c = &s_peer[i];
-            if (!c->in_use || c->selftest) { continue; }
+            if (!c->in_use || c->selftest || c->dns) { continue; }
             if (c->mac[0] || c->mac[1] || c->mac[2] || c->mac[3] || c->mac[4] ||
                 c->mac[5]) {
                 continue;                       /* already bound to a MAC */
@@ -945,7 +997,7 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
     if (src && np_addr_set(src) && src->port) {
         for (int i = 0; i < SLOT_MAX; ++i) {
             rt_peer_t *c = &s_peer[i];
-            if (!c->in_use || c->selftest) { continue; }
+            if (!c->in_use || c->selftest || c->dns) { continue; }
             if (c->port != src->port) { continue; }
             if (c->fam == 6 || src->fam == 6) {
                 if (c->fam != src->fam || memcmp(c->ip6, src->ip6, 16) != 0) { continue; }
@@ -997,6 +1049,18 @@ static rt_peer_t *peer_ensure(const uint8_t mac[6], const np_addr_t *src)
     return p;
 }
 
+static rt_peer_t *peer_dns_source(const np_addr_t *src)
+{
+    for (int i = 0; i < PEER_MAX; ++i) {
+        rt_peer_t *p = &s_peer[i];
+        if (p->in_use && p->dns && p->fam == src->fam && p->port == src->port &&
+            (src->fam == 6 ? !memcmp(p->ip6, src->ip6, 16) : p->ip == src->ip)) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
 static rt_peer_t *peer_for_frame(const uint8_t mac[6], const np_addr_t *src,
                                 uint8_t type, uint8_t flags)
 {
@@ -1028,7 +1092,24 @@ static rt_peer_t *peer_for_frame(const uint8_t mac[6], const np_addr_t *src,
         p->last_linked_ms = now_ms();
         return p;
     }
-    p = peer_ensure(mac, src);
+    rt_peer_t *candidate = peer_dns_source(src);
+    if (candidate && !candidate->linked) {
+        /* A DNS reply is only an address proposal. Accept it through the
+         * authenticated KNOCK exchange, and keep a previously bound MAC. */
+        if ((type != F_KNOCK && type != F_KNOCK_ACK) ||
+            (origin && origin != candidate) ||
+            (np_access_has_mac(candidate->mac) && memcmp(candidate->mac, mac, 6))) {
+            return NULL;
+        }
+        if (!np_access_has_mac(candidate->mac)) {
+            peer_bind_identity(candidate, mac);
+            s_peers_dirty = true;
+        }
+    } else if ((candidate && candidate != origin) ||
+               (origin && origin->dns && !origin->linked)) {
+        return NULL;
+    }
+    p = candidate ? candidate : peer_ensure(mac, src);
     if (!p) { ++s_drop_full; }
     if (p) {
         if (p->via_hub) {
@@ -1189,8 +1270,10 @@ static void handle_control(rt_peer_t *p, const uint8_t *pkt, int len,
     const uint8_t type = pkt[13];
     switch (type) {
     case F_KNOCK:    /* we are the target: open the hole and answer */
+        p->handshake_verified = true;
         link_peer(p, src);
         (void)frame_send_to(p, F_KNOCK_ACK, 0, false, NULL);
+        if (p->dns) { break; } /* DNS supplies this peer's configured endpoint. */
         if (len >= NP_CTR_KNOCK_LEN) {
             const uint32_t pub_ip = htonl(be32(pkt + NP_CTR_BASE + 2));
             const uint16_t pub_port = be16(pkt + NP_CTR_BASE + 6);
@@ -1251,6 +1334,7 @@ static void handle_control(rt_peer_t *p, const uint8_t *pkt, int len,
         }
         break;
     case F_KNOCK_ACK:   /* our knock was accepted, the hole is open */
+        p->handshake_verified = true;
         link_peer(p, src);
         break;
     case F_PING:
@@ -1526,6 +1610,66 @@ static bool stun_response(uint8_t *pkt, int len)
 
 /* --------------------------------------------------------------- engine task */
 
+static void dns_reset_locked(rt_peer_t *p, uint32_t epoch)
+{
+    peer_dns_t *dns = p->dns;
+    dns->ticket = ++s_dns_ticket;
+    dns->wifi_epoch = epoch;
+    dns->state = DNS_WAIT;
+    dns->retry_at = dns->switch_at = 0;
+    dns->count = dns->current = dns->failures = 0;
+    p->fam = 0;
+    p->ip = 0;
+    memset(p->ip6, 0, sizeof(p->ip6));
+    p->port = 0;
+    p->rx_src_ms = 0;
+    p->knock_tx_ms = p->last_knock_ms = 0;
+}
+
+static void dns_candidate_locked(rt_peer_t *p, int64_t now)
+{
+    peer_dns_t *dns = p->dns;
+    p->fam = 0;
+    p->ip = 0;
+    memset(p->ip6, 0, sizeof(p->ip6));
+    p->port = 0;
+    p->rx_src_ms = 0;
+    p->knock_tx_ms = p->last_knock_ms = 0;
+    for (unsigned n = 0; n < dns->count; ++n) {
+        const np_addr_t *address = &dns->addresses[dns->current];
+        dns->current = (dns->current + 1) % dns->count;
+        rt_peer_t *other = peer_by_source(address);
+        if (denied_find(p->mac, address) >= 0) { continue; }
+        if (other && other != p) {
+            /* A remote may knock before our DNS query completes. Adopt a
+             * matching auto-learned link once its audio has drained. */
+            if (other->dns || other->manual || !other->linked || !other->handshake_verified ||
+                (np_access_has_mac(p->mac) && memcmp(p->mac, other->mac, 6)) ||
+                denied_find(other->mac, address) >= 0) { continue; }
+            if (now - other->last_rx_ms < 2000 ||
+                net_rx_order_keyed(&other->order, now, NP_RX_PTT_TIMEOUT_MS)) {
+                dns->retry_at = now + 2000;
+                continue;
+            }
+            char name[8];
+            memcpy(name, p->name, sizeof(name));
+            peer_audio_free(p);
+            *p = *other;
+            memset(other, 0, sizeof(*other));
+            memcpy(p->name, name, sizeof(p->name));
+            p->dns = dns;
+            p->manual = true;
+            s_peers_dirty = true;
+        }
+        peer_take_addr(p, address);
+        dns->state = DNS_CANDIDATE;
+        dns->switch_at = now + 4500;
+        return;
+    }
+    dns->state = DNS_FAILED;
+    dns->switch_at = 0;
+}
+
 static void engine_tick_timers(void)
 {
     const int64_t now = now_ms();
@@ -1533,6 +1677,11 @@ static void engine_tick_timers(void)
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest) { continue; }
+        if (p->dns && p->dns->wifi_epoch != net_wifi_ip_epoch()) {
+            p->linked = false;
+            peer_reset_stream(p);
+            dns_reset_locked(p, net_wifi_ip_epoch());
+        }
         if (p->via_hub) {
             const rt_peer_t *upstream = peer_by_mac(p->hub_mac);
             if (p->linked && (!upstream || !upstream->linked
@@ -1568,8 +1717,13 @@ static void engine_tick_timers(void)
                      (int)p->rx_drop);
             p->linked = false;
             peer_reset_stream(p);
+            if (p->dns) { p->dns->retry_at = 0; }
         }
         if (!p->linked) {
+            if (p->dns && p->dns->count && p->dns->switch_at && now >= p->dns->switch_at) {
+                dns_candidate_locked(p, now);
+            }
+            if (p->dns && !peer_addr_set(p)) { continue; }
             /* not linked (or the link went quiet for 90 s): re-knock. */
             if (now - p->last_knock_ms >= KNOCK_PERIOD_MS) {
                 (void)frame_send_to(p, F_KNOCK, 0, false, NULL);
@@ -1709,6 +1863,100 @@ static void stun_send(stun_pending_t *pd, int sock, const stun_srv_t *s,
     pd->pending = true;
     pd->sent_ms = now_ms();
     pd->server_idx = is_probe ? -1 : server_idx;
+}
+
+static bool dns_resolve_family(const np_access_host_t *config, int family, np_addr_t *addr)
+{
+    struct addrinfo hint = { .ai_family = family, .ai_socktype = SOCK_DGRAM };
+    struct addrinfo *answer = NULL;
+    if (getaddrinfo(config->host, NULL, &hint, &answer) != 0) { return false; }
+    *addr = (np_addr_t){ .port = config->port };
+    for (const struct addrinfo *a = answer; a; a = a->ai_next) {
+        if (a->ai_family == AF_INET && a->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            addr->fam = 4;
+            addr->ip = ((const struct sockaddr_in *)a->ai_addr)->sin_addr.s_addr;
+        } else if (a->ai_family == AF_INET6 && a->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            addr->fam = 6;
+            memcpy(addr->ip6, &((const struct sockaddr_in6 *)a->ai_addr)->sin6_addr, sizeof(addr->ip6));
+        }
+        if (np_addr_set(addr)) { break; }
+    }
+    freeaddrinfo(answer);
+    return np_addr_set(addr);
+}
+
+/* A DNS answer can arrive after deletion, reconnect or an engine restart. */
+static void dns_apply_result_locked(rt_peer_t *p, uint32_t ticket, uint32_t run, uint32_t epoch,
+                                    const np_addr_t *addresses, unsigned count, int64_t started)
+{
+    peer_dns_t *dns = p->dns;
+    if (!s_started || run != atomic_load(&s_dns_run) || epoch != net_wifi_ip_epoch() ||
+        !dns || dns->ticket != ticket || p->linked) { return; }
+    const int64_t now = now_ms();
+    if (count && now - started <= 20000) {
+        memcpy(dns->addresses, addresses, count * sizeof(addresses[0]));
+        dns->count = count;
+        dns->current = dns->failures = 0;
+        dns->retry_at = now + 30000;
+        dns_candidate_locked(p, now);
+    } else {
+        dns->state = DNS_FAILED;
+        /* Keep a usable candidate during a temporary DNS failure. */
+        dns->retry_at = now + (5000LL << dns->failures);
+        if (dns->failures < 3) { ++dns->failures; }
+    }
+}
+
+static void peer_dns_task(void *arg)
+{
+    (void)arg;
+    unsigned next = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        if (!s_started) { continue; }
+        const bool ipv4 = net_wifi_ip()[0] != 0;
+        const bool ipv6 = net_wifi_ip6()[0] != 0;
+        if (!ipv4 && !ipv6) { continue; }
+        const uint32_t run = atomic_load(&s_dns_run);
+        const uint32_t epoch = net_wifi_ip_epoch();
+        const int64_t started = now_ms();
+        unsigned slot = PEER_MAX;
+        uint32_t ticket = 0;
+        np_access_host_t config;
+        peer_lock();
+        for (unsigned i = 0; i < PEER_MAX; ++i) {
+            const unsigned index = (next + i) % PEER_MAX;
+            const rt_peer_t *p = &s_peer[index];
+            peer_dns_t *dns = p->dns;
+            if (!p->in_use || p->linked || !dns || dns->wifi_epoch != epoch || started < dns->retry_at) {
+                continue;
+            }
+            config = dns->config;
+            ticket = dns->ticket;
+            dns->state = DNS_QUERY;
+            slot = index;
+            break;
+        }
+        peer_unlock();
+        if (slot == PEER_MAX) { continue; }
+        next = (slot + 1) % PEER_MAX;
+
+        np_addr_t addresses[2];
+        unsigned count = 0;
+        if (ipv4 && dns_resolve_family(&config, AF_INET, &addresses[count])) { ++count; }
+        if (ipv6 && dns_resolve_family(&config, AF_INET6, &addresses[count])) { ++count; }
+
+        peer_lock();
+        dns_apply_result_locked(&s_peer[slot], ticket, run, epoch, addresses, count, started);
+        peer_unlock();
+    }
+}
+
+static bool dns_worker_start(void)
+{
+    if (s_dns_task) { return true; }
+    return s_peer_mux && xTaskCreatePinnedToCoreWithCaps(peer_dns_task, "np2p_dns", 4096, NULL, 2,
+                                          &s_dns_task, 0, MALLOC_CAP_SPIRAM) == pdPASS;
 }
 
 static void stun_task(void *arg)
@@ -2026,13 +2274,15 @@ static void netp2pnet_play_task(void *arg)
                 have && !source.local_tail, ready && dac_owned, block, now_ms());
         bridge_key_update(rendered, denoise.pending);
         int16_t *pcm = rendered ? block : silence;
-        if (!ptt_bridge_keyed()) { voice_speaker_apply(pcm, NP_PKT_SAMPLES); }
+        const bool on_rf = ptt_bridge_keyed();
+        if (!on_rf) { voice_speaker_apply(pcm, NP_PKT_SAMPLES); }
         if (voice_dac_held_by_talk()) {
             s_amp_on = false;
             vTaskDelay(pdMS_TO_TICKS(NP_PKT_MS));
         } else {
-            if (audio_i2s_write(pcm, NP_PKT_SAMPLES) == ESP_OK && have && rendered && !source.local_tail) {
-                network_audio_refill(&denoise, block, now_ms());
+            if (audio_i2s_write(pcm, NP_PKT_SAMPLES) == ESP_OK && rendered) {
+                audio_spectrum_tap(on_rf ? SPECTRUM_P2P_RF : SPECTRUM_P2P_SPEAKER, pcm, NP_PKT_SAMPLES);
+                if (have && !source.local_tail) { network_audio_refill(&denoise, block, now_ms()); }
             }
         }
     }
@@ -2353,6 +2603,11 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
         rt_peer_t *p = &s_peer[i];
         if (p->in_use) {
             p->linked = false;
+            p->handshake_verified = false;
+            if (p->dns) {
+                dns_reset_locked(p, net_wifi_ip_epoch());
+                if (!dns_worker_start()) { p->dns->state = DNS_FAILED; }
+            }
             peer_reset_stream(p);
             memset(&p->order, 0, sizeof(p->order));
             p->last_rx_ms = 0;
@@ -2398,6 +2653,7 @@ static esp_err_t netp2pnet_start(const netcom_cfg_t *cfg)
     board_amp_enable(false);
 
     s_tx_stop = false;
+    atomic_fetch_add(&s_dns_run, 1);
     s_started = true;
     s_play_stop = false;
     /* Stacks in PSRAM: internal RAM is already tight (the WiFi driver logs
@@ -2613,6 +2869,57 @@ void netp2pnet_init(void)
 
 /* --------------------------------------------------------------- public API */
 
+static esp_err_t peer_add_dns_locked(const char *name, const net_endpoint_t *endpoint,
+                                     bool restore, char out_id[56])
+{
+    if (s_access_error) { return ESP_ERR_INVALID_STATE; }
+    const uint64_t key = np_access_dns_key(endpoint->host, endpoint->port);
+    int denied = -1;
+    for (size_t i = 0; i < s_denied_count; ++i) {
+        if (s_denied[i].dns_key == key) { denied = (int)i; break; }
+    }
+    if (denied >= 0 && !restore) { return ESP_ERR_INVALID_STATE; }
+    rt_peer_t *p = NULL;
+    for (int i = 0; i < PEER_MAX; ++i) {
+        if (s_peer[i].in_use && s_peer[i].dns && s_peer[i].dns->key == key) {
+            p = &s_peer[i];
+            break;
+        }
+    }
+    const bool existing = p != NULL;
+    if (existing && (strcmp(p->dns->config.host, endpoint->host) ||
+        p->dns->config.port != endpoint->port)) { return ESP_ERR_INVALID_STATE; }
+    if (!p) { p = peer_free_slot(); }
+    if (!p) { return ESP_ERR_NOT_FOUND; }
+    if (!dns_worker_start()) { return ESP_ERR_NO_MEM; }
+    char previous_name[8];
+    memcpy(previous_name, p->name, sizeof(previous_name));
+    if (!existing) {
+        np_access_host_t config = { .port = endpoint->port };
+        memcpy(config.host, endpoint->host, sizeof(config.host));
+        p->dns = dns_create(&config);
+        if (!p->dns) { return ESP_ERR_NO_MEM; }
+        p->in_use = p->manual = true;
+    }
+    snprintf(p->name, sizeof(p->name), "%s", name);
+    np_access_record_t restored = {0};
+    if (denied >= 0) { restored = s_denied[denied]; denied_remove((size_t)denied); }
+    if (!existing && np_access_has_mac(restored.mac)) { memcpy(p->mac, restored.mac, 6); }
+    const esp_err_t err = peers_save_ex(NULL, p);
+    if (err != ESP_OK) {
+        if (existing) { memcpy(p->name, previous_name, sizeof(p->name)); }
+        else { peer_clear(p); }
+        if (denied >= 0) { s_denied[s_denied_count++] = restored; }
+        return err;
+    }
+    if (out_id) {
+        np_access_record_t ref;
+        peer_record(p, &ref);
+        np_access_id(&ref, out_id, 56);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t peer_add_confirmed_inner(const char *name, const char *ip, uint16_t port, bool restore, char out_id[56])
 {
     if (!name || !name[0] || !ip || !port || strlen(name) >= 8) {
@@ -2631,8 +2938,12 @@ static esp_err_t peer_add_confirmed_inner(const char *name, const char *ip, uint
         a.fam = 4;
         a.ip = a4.s_addr;
     } else {
+        net_endpoint_t endpoint;
+        const esp_err_t err = net_endpoint_parse(ip, port, &endpoint) &&
+            endpoint.kind == NET_HOST_DNS && endpoint.port == port
+            ? peer_add_dns_locked(name, &endpoint, restore, out_id) : ESP_ERR_INVALID_ARG;
         peer_unlock();
-        return ESP_ERR_INVALID_ARG;
+        return err;
     }
     if (!np_addr_set(&a)) { peer_unlock(); return ESP_ERR_INVALID_ARG; }
     if (s_access_error) { peer_unlock(); return ESP_ERR_INVALID_STATE; }
@@ -2642,7 +2953,7 @@ static esp_err_t peer_add_confirmed_inner(const char *name, const char *ip, uint
     rt_peer_t *p = NULL;
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *c = &s_peer[i];
-        if (!c->in_use || c->selftest || c->port != port) { continue; }
+        if (!c->in_use || c->selftest || c->dns || c->port != port) { continue; }
         if (c->fam == 6 || a.fam == 6) {
             if (c->fam == a.fam && memcmp(c->ip6, a.ip6, 16) == 0) { p = c; break; }
         } else if (c->ip == a.ip) {
@@ -2706,7 +3017,7 @@ static esp_err_t peer_add_confirmed_inner(const char *name, const char *ip, uint
      * every audio frame would then be transmitted twice. */
     for (int i = 0; i < SLOT_MAX; ++i) {
         rt_peer_t *c = &s_peer[i];
-        if (c != p && c->in_use && !c->selftest &&
+        if (c != p && c->in_use && !c->selftest && !c->dns &&
             ((c->fam == 6 || a.fam == 6) ? (c->fam == a.fam && memcmp(c->ip6, a.ip6, 16) == 0)
                                          : (c->ip == a.ip)) && c->port == port) {
             ESP_LOGW(TAG, "peer add: dropping duplicate slot %d for %s:%u",
@@ -2787,7 +3098,7 @@ esp_err_t netp2pnet_peer_del(int index)
         rt_peer_t *p = &s_peer[i];
         if (!p->in_use || p->selftest || n++ != index) { continue; }
         np_access_record_t record; peer_record(p, &record);
-        if (!np_access_has_mac(record.mac) && !peer_addr_set(p)) {
+        if (!record.dns_key && !np_access_has_mac(record.mac) && !peer_addr_set(p)) {
             peer_unlock(); return ESP_ERR_INVALID_STATE;
         }
         if (s_denied_count == NP_DENY_LIMIT) { peer_unlock(); return ESP_ERR_NO_MEM; }
@@ -2840,6 +3151,12 @@ esp_err_t netp2pnet_peer_knock(int index)
                 if (!s_started) {
                     peer_unlock();
                     return ESP_ERR_INVALID_STATE;
+                }
+                if (p->dns && !p->linked) {
+                    if (!dns_worker_start()) { peer_unlock(); return ESP_ERR_NO_MEM; }
+                    p->dns->retry_at = 0;
+                    peer_unlock();
+                    return ESP_OK;
                 }
                 if (!peer_addr_set(p)) {
                     peer_unlock();
@@ -2900,6 +3217,10 @@ static const char *peer_state_str(const rt_peer_t *p)
     }
     if (p->linked) {
         return "linked";
+    }
+    if (p->dns) {
+        if (p->dns->state == DNS_FAILED) { return "dns_error"; }
+        if (p->dns->state != DNS_CANDIDATE) { return "resolving"; }
     }
     return "knocking";
 }
@@ -3165,7 +3486,7 @@ void netp2pnet_status_json(char *buf, size_t n)
         "\"hub\":%s,\"hub_offline\":%s,\"hub_quiet_s\":%lld,\"links\":%d,"
         "\"g6\":%s,\"peer_limit\":%d,\"peer_count\":%d,\"jbuf_bytes\":%u,\"drop_full\":%u,\"save_pending\":%s,"
         "\"access_version\":1,\"access_ready\":%s,\"denied_count\":%u,\"denied_limit\":%u,"
-        "\"labels_version\":1,\"labels_ready\":%s,\"label_revision\":%lu,"
+        "\"labels_version\":1,\"labels_ready\":%s,\"label_revision\":%lu,\"hostnames\":true,"
         "\"hub_role\":\"%s\",\"hub_conflict\":%s,\"direct_count\":%d,\"indirect_count\":%d,\"peers\":[",
         pub, (unsigned)s_pub_port, nat, stun_esc,
         (long long)age, s_last_rtt_ms, s_last_send_rc, (unsigned)s_bye_rx,
@@ -3208,12 +3529,13 @@ void netp2pnet_status_json(char *buf, size_t n)
         off += (size_t)snprintf(buf + off, n - off,
             "%s{\"id\":\"%s\",\"name\":\"%s\",\"custom_label\":%s,\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
             "\"rtt_ms\":%d,\"rx\":%u,\"tx\":%u,\"drop\":%u,\"audio_idle_s\":%lld,"
-            "\"route\":\"%s\",\"via\":\"%s\",\"hub\":%s}",
+            "\"route\":\"%s\",\"via\":\"%s\",\"hub\":%s,\"host\":\"%s\",\"host_port\":%u}",
             first ? "" : ",", id, name_esc, label[0] ? "true" : "false", ipb, (unsigned)p->port,
             peer_state_str(p), p->rtt_ms,
             (unsigned)p->rx_msgs, (unsigned)p->tx_msgs, (unsigned)p->rx_drop,
             (long long)(p->last_rx_ms ? (now_ms() - p->last_rx_ms) / 1000 : -1),
-            p->via_hub ? "hub" : "direct", via_esc, p->hub ? "true" : "false");
+            p->via_hub ? "hub" : "direct", via_esc, p->hub ? "true" : "false",
+            p->dns ? p->dns->config.host : "", p->dns ? (unsigned)p->dns->config.port : 0);
         first = false;
         if (off >= n) { off = n - 1; }
     }

@@ -11,6 +11,7 @@ PRE=r'''
 #include <stdio.h>
 #include <string.h>
 #include "monitor_rx.h"
+#define audio_spectrum_tap(...) ((void)0)
 #include "net_audio_denoise.h"
 static net_rf_close_t s_rf_close;
 static int64_t s_rf_speech_us;

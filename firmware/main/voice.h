@@ -115,6 +115,8 @@ void   voice_bridge_inject(const int16_t *pcm, size_t n);
  * Physical-key notification starts a separate 300ms TX lead; no audio is
  * consumed during that lead. Pending includes the final I2S write. */
 void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_epoch, uint16_t first_seq);
+uint32_t voice_bridge_network_session(void);
+uint32_t voice_bridge_last_network_session(void);
 void voice_bridge_network_keyed(bool keyed);
 bool voice_bridge_network_ready(void);
 bool voice_bridge_network_pending(void);

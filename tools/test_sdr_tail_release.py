@@ -12,6 +12,7 @@ SIMULATION = r"""
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#define audio_spectrum_tap(...) ((void)0)
 #include <stdio.h>
 #include <string.h>
 

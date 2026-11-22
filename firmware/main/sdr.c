@@ -3,6 +3,7 @@
  * monotonic transmission ID isolate delayed HTTP/WS traffic. See sdr.h. */
 #include "sdr.h"
 #include "audio_i2s.h"   /* AUDIO_SAMPLE_RATE_HZ / AUDIO_PKT_SAMPLES */
+#include "audio_spectrum.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -176,16 +177,24 @@ void sdr_rx_push(const int16_t *pcm, size_t n, bool enabled)
     if (!s_on) { return; }
     const int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_mux);
+    const uint32_t before = s_monitor.rf_samples;
     if (s_on) { monitor_rx_rf(&s_monitor, pcm, n, enabled, now); }
+    const bool delivered = s_monitor.rf_samples != before;
     portEXIT_CRITICAL(&s_mux);
+    if (delivered) { audio_spectrum_tap(SPECTRUM_RF_MONITOR, pcm, n); }
 }
 void sdr_rx_network_push(uint8_t mode, const int16_t *pcm, size_t n)
 {
     if (!s_on) { return; }
     const int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_mux);
+    const uint32_t before = s_monitor.network_samples;
     if (s_on) { monitor_rx_network(&s_monitor, mode, pcm, n, now); }
+    const bool delivered = s_monitor.network_samples != before;
     portEXIT_CRITICAL(&s_mux);
+    if (delivered) {
+        audio_spectrum_tap(mode == NETCOM_MODE_NETP2P ? SPECTRUM_P2P_MONITOR : SPECTRUM_MQTT_MONITOR, pcm, n);
+    }
 }
 void sdr_rx_network_mode(uint8_t mode)
 {
@@ -349,14 +358,28 @@ bool sdr_session_valid(uint32_t sid)
     return ok;
 }
 
-bool sdr_tx_received(uint32_t sid, uint32_t tx, uint32_t *samples)
+bool sdr_tx_ack(uint32_t sid, uint32_t tx, sdr_tx_ack_t *ack)
 {
-    if (!s_key || !samples) { return false; }
+    if (!s_key || !tx || !ack) { return false; }
     xSemaphoreTake(s_key, portMAX_DELAY);
     const bool ok = session_locked(sid) && tx == s_tx_id;
-    if (ok) { *samples = s_tx_received_samples; }
+    if (ok) {
+        *ack = (sdr_tx_ack_t){
+            .samples = s_tx_received_samples,
+            .keyed = s_ptt_hold,
+            .reason = s_end_reason,
+        };
+    }
     xSemaphoreGive(s_key);
     return ok;
+}
+
+bool sdr_tx_received(uint32_t sid, uint32_t tx, uint32_t *samples)
+{
+    sdr_tx_ack_t ack;
+    if (!samples || !sdr_tx_ack(sid, tx, &ack)) { return false; }
+    *samples = ack.samples;
+    return true;
 }
 
 void sdr_tail_upload_pause(bool active)
@@ -571,6 +594,8 @@ static void sdr_tx_drain_locked(int16_t *pcm)
         if (netcom_tx_room(take, false, deadline)) {
             const size_t n = tx_ring_read(s_tx_net_read, pending, pcm);
             if (netcom_tx_sample_until(pcm, n, false, deadline)) {
+                audio_spectrum_tap(netcom_mode() == NETCOM_MODE_NETP2P ?
+                    SPECTRUM_REMOTE_P2P : SPECTRUM_REMOTE_MQTT, pcm, n);
                 s_tx_net_read += n;
                 s_tx_net_submitted += (uint32_t)n;
             }
@@ -611,6 +636,8 @@ static void finish_net_locked(int64_t now, int16_t *pcm)
     const size_t n = voice_sdr_tail_read(s_net_tail_pos, pcm, take);
     if (!n) { stop_net_locked("tail_unavailable"); return; }
     if (netcom_tx_sample_until(pcm, n, true, deadline)) {
+        audio_spectrum_tap(netcom_mode() == NETCOM_MODE_NETP2P ?
+            SPECTRUM_REMOTE_P2P : SPECTRUM_REMOTE_MQTT, pcm, n);
         s_net_tail_pos += n;
         s_net_tail_due_us = now + (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
         mark_tail_locked();

@@ -1,4 +1,5 @@
 #include "device_maintenance.h"
+#include "netcom.h"
 #include "maintenance_clock.h"
 #include "factory_reset.h"
 #include <stdio.h>
@@ -356,6 +357,7 @@ void device_maintenance_tick(void)
         (void)peer_labels_flush();
         s_label_flush_at = now + 30000;
     }
+    if (!reboot && !busy) { netcom_apply_pending_broker(); }
     app_control_end();
 }
 

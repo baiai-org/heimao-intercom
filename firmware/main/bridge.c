@@ -29,6 +29,7 @@
 
 #include "channels.h"
 #include "audio_i2s.h"
+#include "audio_spectrum.h"
 #include "channel_control.h"
 #include "netcom.h"
 #include "ptt.h"
@@ -46,6 +47,7 @@ static const char *TAG = "bridge";
 #define KEY_DENOISE_CONFIG "auddn_cfg2"
 #define KEY_DENOISE_LEVELS "auddn_lvl1"
 #define KEY_DENOISE_SELECTION "auddn_sel1"
+#define KEY_DENOISE_V2 "auddn_sel2"
 #define DENOISE_MODES ((1u << NETCOM_MODE_NETP2P) | (1u << NETCOM_MODE_RELAY))
 #define KEY_LOCAL_DENOISE "auddn_local1"
 #define DENOISE_LOCAL ((1u << DENOISE_SETTING_SPEAKER) | (1u << DENOISE_SETTING_HANDSET_TX))
@@ -64,9 +66,11 @@ static SemaphoreHandle_t s_state_mux;
  */
 static SemaphoreHandle_t s_rx_tx_mux;
 static bridge_rx_stats_t s_rx;
-/* Keep the user's selected level even when every path is off. The lower
- * thirty bits retain the effective per-path levels, including old mixed data. */
+/* The DSP reads only the atomic effective levels. Settings readers also
+ * need a coherent snapshot of the selection, including when it is OFF. */
 static atomic_uint s_denoise_config;
+static portMUX_TYPE s_denoise_mux = portMUX_INITIALIZER_UNLOCKED;
+static bridge_denoise_config_t s_denoise_selection;
 static uint32_t s_rx_generation;
 static uint8_t s_rx_mode;
 static uint8_t s_rx_denoise_mode;
@@ -195,17 +199,18 @@ uint32_t bridge_denoise_levels(void)
 
 bridge_denoise_config_t bridge_denoise_config(void)
 {
-    const uint32_t packed = atomic_load(&s_denoise_config);
-    return (bridge_denoise_config_t){
-        .levels = packed & DENOISE_LEVELS_MAX,
-        .selection_level = (packed >> (DENOISE_LEVEL_BITS * DENOISE_SETTING_COUNT)) + RF_DENOISE_LEVEL_LIGHT,
-    };
+    portENTER_CRITICAL(&s_denoise_mux);
+    const bridge_denoise_config_t config = s_denoise_selection;
+    portEXIT_CRITICAL(&s_denoise_mux);
+    return config;
 }
 
-static uint32_t pack_denoise(uint32_t levels, rf_denoise_level_t level)
+static void publish_denoise(bridge_denoise_config_t config)
 {
-    return levels | ((uint32_t)(level - RF_DENOISE_LEVEL_LIGHT) <<
-                     (DENOISE_LEVEL_BITS * DENOISE_SETTING_COUNT));
+    portENTER_CRITICAL(&s_denoise_mux);
+    s_denoise_selection = config;
+    atomic_store(&s_denoise_config, config.levels);
+    portEXIT_CRITICAL(&s_denoise_mux);
 }
 
 rf_denoise_level_t bridge_denoise_level(uint32_t levels, uint8_t setting)
@@ -267,19 +272,25 @@ static void prepare_denoise(uint32_t levels, uint32_t mask)
     }
 }
 
-static esp_err_t save_denoise_locked(uint32_t next, uint32_t mask)
+static bool same_denoise(bridge_denoise_config_t a, bridge_denoise_config_t b)
 {
-    if (next != atomic_load(&s_denoise_config)) {
-        nvs_handle_t h;
-        esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
-        if (err != ESP_OK) { return err; }
-        err = nvs_set_u32(h, KEY_DENOISE_SELECTION, next);
-        if (err == ESP_OK) { err = nvs_commit(h); }
-        nvs_close(h);
-        if (err != ESP_OK) { return err; }
-    }
-    prepare_denoise(next & DENOISE_LEVELS_MAX, mask);
-    atomic_store(&s_denoise_config, next);
+    return a.levels == b.levels && a.paths == b.paths && a.selection_level == b.selection_level;
+}
+
+static esp_err_t save_denoise_locked(bridge_denoise_config_t next, bridge_denoise_config_t before)
+{
+    if (same_denoise(next, before)) { return ESP_OK; }
+    next.revision = before.revision + 1;
+    const uint32_t record[] = { 2, next.revision, next.levels, next.paths, next.selection_level };
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) { return err; }
+    err = nvs_set_blob(h, KEY_DENOISE_V2, record, sizeof(record));
+    if (err == ESP_OK) { err = nvs_commit(h); }
+    nvs_close(h);
+    if (err != ESP_OK) { return err; }
+    prepare_denoise(next.levels, bridge_denoise_flags(next.levels));
+    publish_denoise(next);
     return ESP_OK;
 }
 
@@ -298,10 +309,34 @@ esp_err_t bridge_denoise_save_selection(rf_denoise_level_t level, uint32_t paths
     if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
         return ESP_ERR_INVALID_STATE;
     }
-    const uint32_t before = atomic_load(&s_denoise_config);
-    const uint32_t next = pack_denoise(denoise_levels_from_flags(paths, level), level);
-    const esp_err_t err = (before == next || before == pack_denoise(expected.levels, expected.selection_level))
-        ? save_denoise_locked(next, paths) : ESP_ERR_INVALID_STATE;
+    const bridge_denoise_config_t before = bridge_denoise_config();
+    const rf_denoise_level_t compatible = before.selection_level ? before.selection_level : RF_DENOISE_LEVEL_STANDARD;
+    const bridge_denoise_config_t next = {
+        .levels = denoise_levels_from_flags(paths, level), .selection_level = level, .paths = paths,
+    };
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (compatible == level && next.levels == before.levels) {
+        /* Legacy clients cannot see or edit the remembered checks in OFF. */
+        err = ESP_OK;
+    } else if (before.levels == expected.levels && compatible == expected.selection_level) {
+        err = save_denoise_locked(next, before);
+    }
+    xSemaphoreGive(s_state_mux);
+    return err;
+}
+
+esp_err_t bridge_denoise_save_config(rf_denoise_level_t level, uint32_t paths, uint32_t expected_revision)
+{
+    if (level > RF_DENOISE_LEVEL_EXTREME || (paths & ~DENOISE_CONFIG_MASK)) { return ESP_ERR_INVALID_ARG; }
+    if (!s_state_mux || xSemaphoreTake(s_state_mux, pdMS_TO_TICKS(2500)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const bridge_denoise_config_t before = bridge_denoise_config();
+    const bridge_denoise_config_t next = {
+        .levels = denoise_levels_from_flags(paths, level), .selection_level = level, .paths = paths,
+    };
+    const esp_err_t err = before.revision == expected_revision || same_denoise(before, next)
+        ? save_denoise_locked(next, before) : ESP_ERR_INVALID_STATE;
     xSemaphoreGive(s_state_mux);
     return err;
 }
@@ -336,9 +371,13 @@ static esp_err_t denoise_update(uint8_t mode, uint32_t mask, uint32_t expected,
         const uint32_t level = legacy && requested ? RF_DENOISE_LEVEL_STANDARD : requested;
         updated = (updated & ~(DENOISE_LEVEL_FIELD << shift)) | (level << shift);
     }
-    if (err == ESP_OK) {
+    if (err == ESP_OK && updated != before) {
         const rf_denoise_level_t common = denoise_selection_level(updated);
-        err = save_denoise_locked(pack_denoise(updated, common ? common : config.selection_level), mask);
+        const rf_denoise_level_t fallback = config.selection_level ? config.selection_level : RF_DENOISE_LEVEL_STANDARD;
+        err = save_denoise_locked((bridge_denoise_config_t){
+            .levels = updated, .paths = bridge_denoise_flags(updated),
+            .selection_level = updated ? (common ? common : fallback) : RF_DENOISE_LEVEL_OFF,
+        }, config);
     }
     xSemaphoreGive(s_state_mux);
     return err;
@@ -397,12 +436,26 @@ static bool want_active(void)
         && netcom_engine_running();
 }
 
-static uint32_t load_denoise_config(nvs_handle_t h)
+static bridge_denoise_config_t load_denoise_config(nvs_handle_t h)
 {
+    uint32_t record[5];
+    size_t len = sizeof(record);
+    if (nvs_get_blob(h, KEY_DENOISE_V2, record, &len) == ESP_OK && len == sizeof(record) &&
+        record[0] == 2 && record[4] <= RF_DENOISE_LEVEL_EXTREME &&
+        denoise_levels_valid(record[2], DENOISE_CONFIG_MASK) && !(record[3] & ~DENOISE_CONFIG_MASK) &&
+        (record[4] ? bridge_denoise_flags(record[2]) == record[3] : !record[2])) {
+        return (bridge_denoise_config_t){
+            .levels = record[2], .selection_level = record[4], .paths = record[3], .revision = record[1],
+        };
+    }
     uint32_t packed;
     const esp_err_t selection = nvs_get_u32(h, KEY_DENOISE_SELECTION, &packed);
     if (selection == ESP_OK && denoise_levels_valid(packed & DENOISE_LEVELS_MAX, DENOISE_CONFIG_MASK)) {
-        return packed;
+        const uint32_t levels = packed & DENOISE_LEVELS_MAX;
+        return (bridge_denoise_config_t){
+            .levels = levels, .paths = bridge_denoise_flags(levels),
+            .selection_level = (packed >> (DENOISE_LEVEL_BITS * DENOISE_SETTING_COUNT)) + RF_DENOISE_LEVEL_LIGHT,
+        };
     }
     uint32_t levels = 0, flags = 0;
     const esp_err_t saved_levels = nvs_get_u32(h, KEY_DENOISE_LEVELS, &levels);
@@ -416,13 +469,16 @@ static uint32_t load_denoise_config(nvs_handle_t h)
             if (selection == ESP_ERR_NVS_NOT_FOUND && saved_levels == ESP_ERR_NVS_NOT_FOUND &&
                 saved_flags == ESP_ERR_NVS_NOT_FOUND && saved_network == ESP_ERR_NVS_NOT_FOUND &&
                 saved_local == ESP_ERR_NVS_NOT_FOUND) {
-                flags = DENOISE_CONFIG_MASK;
+                return (bridge_denoise_config_t){ .paths = DENOISE_CONFIG_MASK };
             }
         }
         levels = denoise_levels_from_flags(flags, RF_DENOISE_LEVEL_STANDARD);
     }
     const rf_denoise_level_t common = denoise_selection_level(levels);
-    return pack_denoise(levels, common ? common : RF_DENOISE_LEVEL_STANDARD);
+    return (bridge_denoise_config_t){
+        .levels = levels, .paths = bridge_denoise_flags(levels),
+        .selection_level = common ? common : RF_DENOISE_LEVEL_STANDARD,
+    };
 }
 
 void bridge_init(void)
@@ -438,7 +494,7 @@ void bridge_init(void)
     if (!s_rx_tx_mux) {
         ESP_LOGE(TAG, "RF->NET edge mutex allocation failed");
     }
-    uint32_t config = pack_denoise(0, RF_DENOISE_LEVEL_STANDARD);
+    bridge_denoise_config_t config = { .paths = DENOISE_CONFIG_MASK };
     nvs_handle_t h;
     const esp_err_t opened = nvs_open(NVS_NS, NVS_READONLY, &h);
     if (opened == ESP_OK) {
@@ -451,12 +507,9 @@ void bridge_init(void)
         }
         config = load_denoise_config(h);
         nvs_close(h);
-    } else if (opened == ESP_ERR_NVS_NOT_FOUND) {
-        config = pack_denoise(denoise_levels_from_flags(DENOISE_CONFIG_MASK, RF_DENOISE_LEVEL_STANDARD),
-                              RF_DENOISE_LEVEL_STANDARD);
     }
-    prepare_denoise(config & DENOISE_LEVELS_MAX, DENOISE_CONFIG_MASK);
-    atomic_store(&s_denoise_config, config);
+    prepare_denoise(config.levels, DENOISE_CONFIG_MASK);
+    publish_denoise(config);
     ESP_LOGI(TAG, "init: en=%d chan=%d", s_en ? 1 : 0, s_chan);
 }
 
@@ -561,6 +614,9 @@ static const char *bridge_rx_interrupt_reason(void)
 static bool bridge_rx_submit_speech_locked(const int16_t *pcm, size_t n)
 {
     if (netcom_tx_sample_until(pcm, n, false, s_rx_window.release_us)) {
+        audio_spectrum_tap_session(
+            s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT,
+            s_rx_generation, pcm, n);
         s_rx.submitted_samples += (uint32_t)n;
         return true;
     }
@@ -604,6 +660,9 @@ static void bridge_rx_tail_step_locked(int64_t now)
         return;
     }
     if (netcom_tx_sample_until(tail, n, true, s_rx_window.release_us)) {
+        audio_spectrum_tap_session(
+            s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT,
+            s_rx_generation, tail, n);
         s_rx_tail_pos += n;
         const int64_t interval = (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
         const int64_t next = s_rx_tail_next_us + interval;

@@ -67,7 +67,8 @@ function runtime() {
       on: q.get('on') !== '0', ptt: q.get('on') === '1', reason: 'test'};
     const response = {ok: true, json: async () => data, arrayBuffer: async () => new ArrayBuffer(0)};
     if (u.pathname==='/api/sdr_tx' && options?.body) {
-      response.headers={get:()=>String(+q.get('offset') + options.body.byteLength / 2)};
+      response.headers={get:name=>name==='X-ORL-TX-Samples' ?
+        String(+q.get('offset') + options.body.byteLength / 2) : null};
     }
     return response;
   };
@@ -149,6 +150,29 @@ async function audioTests() {
     player.port.onmessage({data: {type: 'push', samples: new Int16Array(16000).fill(10000)}});
     const output = new Float32Array(128); player.process([], [[output]]);
     assert(output.some(v => v > 0.1));
+    player.port.onmessage({data: {type:'preview', id:9}});
+    let frame = 0;
+    for (; frame < 2 * rate; frame += 128) {
+      worker.currentTime = frame / rate;
+      player.process([], [[output]]);
+    }
+    const previews = () => messages.filter(msg => msg.type === 'playback');
+    assert.equal(previews().length, 1, 'the worklet must not queue previews while the UI is blocked');
+    assert.equal(previews()[0].first, 0);
+    assert.equal(previews()[0].samples.length, 640);
+    assert(previews()[0].samples.slice(300).every(v => Math.abs(v - 10000) <= 1));
+    player.port.onmessage({data: {type:'previewAck', id:9}});
+    for (const end = frame + rate * 0.08; frame < end; frame += 128) {
+      worker.currentTime = frame / rate;
+      player.process([], [[output]]);
+    }
+    assert.equal(previews().length, 2);
+    assert(previews()[1].first >= 32000, 'the preview clock continues while audio is starved');
+    assert.equal(previews()[1].samples, null);
+    assert.equal(previews()[1].underruns, 1);
+    player.port.onmessage({data: {type:'preview', id:0}});
+    player.process([], [[output]]);
+    assert.equal(player.audio.previewPcm, null);
   }
   const p = new r.SdrPlayback(16000, 48000);
   const out = new Float32Array(128);
@@ -383,7 +407,8 @@ async function stateRetryTests() {
         return {ok:true, json:async()=>({sid,tx,on:true,ptt:true,pcm:1280})};
       }
       const response=r.response(url);
-      if (url.startsWith('/api/sdr_tx?')) response.headers={get:()=>String(r.SDR.txCaptured)};
+      if (url.startsWith('/api/sdr_tx?')) response.headers={get:name=>
+        name==='X-ORL-TX-Samples' ? String(r.SDR.txCaptured) : null};
       return response;
     };
     const capture=(first)=>r.SDR.micSp.port.onmessage({data:{epoch,first,
@@ -445,8 +470,102 @@ async function partialHttpRetryTest() {
   assert(await r.sdrPttFinish());
   console.log('PASS: HTTP partial request is retried at the same offset and released after exact confirmation');
 }
+
+async function httpStatusAckTest() {
+  const r=runtime(); await r.ready(); await r.sdrPttDown();
+  const {sid,activeTx:tx,txEpoch:epoch}=r.SDR;
+  const accepted=[];
+  let stop=false, calls=0;
+  r.fetch=async (url,options)=>{
+    const response=r.response(url,options);
+    if (!url.startsWith('/api/sdr_tx?')) return response;
+    const params=new URL(url,'https://board').searchParams;
+    assert.equal(params.get('ack'),'2');
+    const offset=Number(params.get('offset'));
+    assert.equal(offset,accepted.length);
+    const pcm=new Int16Array(options.body);
+    if (!stop) accepted.push(...(calls===0 ? pcm.slice(0,211) : pcm));
+    calls++;
+    response.headers={get:name=>name==='X-ORL-TX-Samples' ? String(accepted.length) :
+      name==='X-ORL-TX-State' ? sid+':'+tx+(stop ? ':0:hold_limit' : ':1:transmitting') : null};
+    return response;
+  };
+  const emit=(first, samples)=>r.SDR.micSp.port.onmessage({data:{epoch,first,samples,stamp:0,peak:640}});
+  const pcm=Int16Array.from({length:640},(_,i)=>i+1);
+  emit(0,pcm); await r.SDR.txIdle;
+  assert.equal(calls,2); assert.deepEqual(accepted,Array.from(pcm));
+  assert.equal(r.SDR.txConfirmed,640);
+  stop=true;
+  emit(640,pcm); await r.SDR.txIdle;
+  assert.equal(calls,3); assert.equal(r.SDR.txConfirmed,640);
+  assert(!r.SDR.keyed && !r.SDR.ptt && r.SDR.txReason==='hold_limit');
+  assert(await r.SDR.releasePending);
+  assert(!r.requests.some(row=>row.url.startsWith('/api/sdr_ptt?on=0')));
+  console.log('PASS: Matching HTTP state ACK retries the known suffix and honors board stop');
+}
+
+async function httpDrainDeadlineTest() {
+  for (const recover of [true,false]) {
+    const r=runtime(); await r.ready(); await r.sdrPttDown();
+    const {txEpoch:epoch}=r.SDR;
+    const pending=deferred();
+    const delivered=[];
+    let tries=0, aborted=0;
+    const off=()=>r.requests.filter(row=>row.url.startsWith('/api/sdr_ptt?on=0'));
+    const emit=(first,pcm,node=r.SDR.micSp)=>node.port.onmessage({data:{epoch,first,
+      samples:new Int16Array(pcm),stamp:r.now/1000,peak:2}});
+    r.flushCapture=(node,msg)=>{
+      emit(640,new Array(160).fill(2),node);
+      node.port.onmessage({data:{epoch:msg.epoch,flushed:true}});
+    };
+    r.fetch=async (url,options)=>{
+      if (!url.startsWith('/api/sdr_tx?')) return r.response(url,options);
+      const offset=+new URL(url,'https://board').searchParams.get('offset');
+      const pcm=new Int16Array(options.body);
+      const lost=()=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{
+        aborted++;reject(new Error('aborted'));
+      },{once:true}));
+      if (++tries===1) {
+        delivered.push(...pcm.slice(0,256));
+        return lost();
+      }
+      if (tries===2) {
+        if (!recover) return lost();
+        await pending.promise;
+      }
+      delivered.push(...pcm.slice(delivered.length-offset));
+      return r.response(url,options);
+    };
+    emit(0,new Array(640).fill(1));await flush();
+    const finishing=r.sdrPttFinish();await flush();
+    const invoke=async (ms,now)=>{
+      const [id,timer]=[...r.timers].find(([,t])=>!t.interval && t.ms===ms);
+      r.timers.delete(id);r.now=now;timer.fn();await flush();
+    };
+    await invoke(300,300);
+    assert.equal(tries,2);
+    r.now=800;
+    assert.equal(off().length,0);
+    if (recover) {
+      pending.resolve();
+      assert(await finishing);
+      assert.equal(r.SDR.txReason,'released');
+      assert.equal(r.SDR.txConfirmed,800);
+      assert.deepEqual(delivered,[...new Array(640).fill(1),...new Array(160).fill(2)]);
+    } else {
+      await invoke(1400,1400);
+      assert(await finishing);
+      assert.equal(r.SDR.txReason,'排空语音超时');
+      assert.equal(aborted,2);
+      assert.equal(tries,2);
+    }
+    assert.equal(off().length,1);
+  }
+  console.log('PASS: Normal HTTP release recovers past 600 ms and cancels pending PCM at the drain deadline');
+}
+
 (async()=>{
   await audioTests();await lifecycleTests();await clickTests();await transportTests();await finalCaptureTests();await stateRetryTests();
-  await partialHttpRetryTest();
+  await partialHttpRetryTest();await httpStatusAckTest();await httpDrainDeadlineTest();
   console.log('PASS: production worklets, sid/TX ACK, PCM framing, PTT button click/manual stop/board timeout, cancellation and HTTP queues');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -23,6 +23,8 @@ static bool s_net_feeding,s_net_rf_required,s_net_rf_keyed,s_net_write_pending;
 static bool s_net_short_cushion,s_net_resume_pending;
 static uint64_t s_net_sender_epoch;
 static uint16_t s_net_first_seq;
+static uint32_t s_net_spectrum_session;
+static volatile uint32_t s_last_bridge_network_session;
 typedef struct {uint32_t underruns,resumes;int64_t last_underrun_us,last_resume_us;} voice_network_playout_t;
 static voice_network_playout_t s_net_playout;
 typedef struct {uint32_t token,written_samples,write_errors,underruns,resumes;int64_t last_resume_us;} voice_sdr_playout_t;

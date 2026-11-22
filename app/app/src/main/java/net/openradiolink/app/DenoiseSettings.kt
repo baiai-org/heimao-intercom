@@ -12,13 +12,16 @@ internal data class DenoisePath(val setting:Int,val label:String) {
     val shift get()=(setting-1)*3
 }
 
-internal data class DenoiseSettings(val mode:Int,val levels:Int,val selectionLevel:DenoiseLevel?=null) {
+internal data class DenoiseSettings(
+    val mode:Int,val levels:Int,val selectionLevel:DenoiseLevel?=null,
+    val selectionPaths:Int?=null,val configRevision:Long?=null,
+) {
     val paths get()=paths(mode)
     val localPaths get()=local
     val networkPaths get()=paths.filterNot(local::contains)
     fun level(path:DenoisePath)=DenoiseLevel.entries[(levels shr path.shift) and 7]
     val selection get()=selectionLevel?.let { strength ->
-        DenoiseSelection(strength,allPaths.fold(0){mask,path->
+        DenoiseSelection(strength,selectionPaths ?: allPaths.fold(0){mask,path->
             if(level(path)!=DenoiseLevel.OFF)mask or (1 shl path.setting) else mask
         })
     }
@@ -61,6 +64,17 @@ internal data class DenoiseSettings(val mode:Int,val levels:Int,val selectionLev
             if((0..9).any{((levels shr (it*3)) and 7)>DenoiseLevel.EXTREME.ordinal}) {
                 throw IOException("手台降噪档位无效")
             }
+            if(body.has("config_revision") || body.has("selected_level") || body.has("selected_paths")) {
+                val selected=DenoiseLevel.entries[exactInt(body,"selected_level",4)]
+                val paths=exactInt(body,"selected_paths",0x7fe)
+                val revision=(body.opt("config_revision") as? Number)?.toDouble()
+                if(paths and 1!=0 || revision==null || revision !in 0.0..4294967295.0 ||
+                    revision.toLong().toDouble()!=revision ||
+                    (selected==DenoiseLevel.OFF && levels!=0)) {
+                    throw IOException("手台降噪选择无效")
+                }
+                return DenoiseSettings(mode,levels,selected,paths,revision.toLong())
+            }
             val selection=if(body.has("selection_level")) {
                 DenoiseLevel.entries[exactInt(body,"selection_level",4)].also {
                     if(it==DenoiseLevel.OFF)throw IOException("手台降噪档位无效")
@@ -94,7 +108,7 @@ internal data class DenoiseSelection(val level:DenoiseLevel,val paths:Int) {
     fun toggle(path:DenoisePath)=copy(paths=paths xor (1 shl path.setting))
 
     fun matches(settings:DenoiseSettings):Boolean =
-        settings.selectionLevel==level && DenoiseSettings.allPaths.all { path ->
+        settings.selection==this && DenoiseSettings.allPaths.all { path ->
             settings.level(path)==if(includes(path))level else DenoiseLevel.OFF
         }
 }
@@ -103,9 +117,13 @@ internal data class DenoiseSelectionWrite(
     val selection:DenoiseSelection,
     val expected:DenoiseSettings,
 ):DenoiseUpdate {
-    override fun body()=JSONObject().put("selection_level",selection.level.ordinal)
-        .put("paths",selection.paths).put("expected_levels",expected.levels)
-        .put("expected_selection_level",checkNotNull(expected.selectionLevel).ordinal)
+    override fun body():JSONObject =
+        expected.configRevision?.let { revision ->
+            JSONObject().put("selected_level",selection.level.ordinal)
+                .put("selected_paths",selection.paths).put("config_revision",revision)
+        } ?: JSONObject().put("selection_level",selection.level.ordinal)
+            .put("paths",selection.paths).put("expected_levels",expected.levels)
+            .put("expected_selection_level",checkNotNull(expected.selectionLevel).ordinal)
 
     override fun confirmed(settings:DenoiseSettings)=selection.matches(settings)
 }

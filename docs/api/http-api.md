@@ -74,6 +74,12 @@ r11-84 新增发射后接收抑制：`/api/set` 的 `rx_guard_p2p` / `rx_guard_r
 
 源码位置：`firmware/main/net_http.c:2817-2866`（路由表）、`firmware/main/net_http.c:2870-2895`（控制权判定与分发）、`firmware/main/app_control.c:139-179`（`/api/control`）。
 
+## HTTP 发话确认
+
+带 `offset` 的 `/api/sdr_tx` 以样本为单位定位到同一 `sid/tx` 的音频。重发已接纳的前缀不会产生重复音频。`X-ORL-TX-Samples` 是该话段板端已连续接纳的总样本数。遇到断开的请求，客户端可按原偏移重发同一块。
+
+带 `offset` 的请求可增加 `ack=2`。应答保持空正文，并附 `X-ORL-TX-State`，格式为 `sid:tx:ptt:reason`，其中 `ptt` 为 `1` 或 `0`。客户端先匹配 `sid/tx`，再使用同一应答的累计样本数或结束原因。仅返回样本头的旧固件适用原确认方式。
+
 ## 常用请求/响应字段
 
 ### `/api/device`

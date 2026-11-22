@@ -28,6 +28,7 @@ def function(source,name):
  raise RuntimeError('unclosed '+name)
 PRE=r'''
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,6 +55,7 @@ typedef int esp_err_t;typedef void opus_link_dec_t;typedef int nvs_handle_t;
 #define ESP_ERR_INVALID_STATE 5
 #define ESP_ERR_NVS_NOT_FOUND 6
 #define KEY_ACCESS "np_state1"
+#define KEY_ACCESS2 "np_state2"
 #define MALLOC_CAP_SPIRAM 1
 #define NETCOM_MODE_NETP2P 1
 #define STREAM_IDLE_MS 500
@@ -61,6 +63,7 @@ typedef int esp_err_t;typedef void opus_link_dec_t;typedef int nvs_handle_t;
 #define KNOCK_PERIOD_MS 1000
 #define PING_PERIOD_MS 10000
 #define F_KNOCK 1
+#define F_KNOCK_ACK 2
 #define F_AUDIO 0
 #define NP_FLAG_HUB 4u
 #define NP_FLAG_FORWARDED 8u
@@ -86,6 +89,10 @@ typedef int esp_err_t;typedef void opus_link_dec_t;typedef int nvs_handle_t;
 #define pdMS_TO_TICKS(n) (n)
 static void vTaskDelay(int n){(void)n;}
 static bool s_started=true;
+static atomic_uint s_dns_run;
+static uint32_t s_dns_ticket,wifi_epoch;
+static uint32_t net_wifi_ip_epoch(void){return wifi_epoch;}
+static bool dns_worker_start(void){return true;}
 static void test_log(const char *tag,const char *fmt,...){(void)tag;(void)fmt;}
 #define ESP_LOGI(...) test_log(__VA_ARGS__)
 #define ESP_LOGW(...) test_log(__VA_ARGS__)
@@ -103,6 +110,7 @@ static void peer_unlock(void){}
 static unsigned allocations,frees;static bool oom;
 static void *tracked[32];
 static void *heap_caps_malloc(size_t n,int caps){(void)caps;if(oom)return NULL;void *p=malloc(n);if(p && n==128*(80+2+1)){allocations++;for(int i=0;i<32;i++)if(!tracked[i]){tracked[i]=p;break;}}return p;}
+static void *heap_caps_calloc(size_t n,size_t size,int caps){(void)caps;return oom?NULL:calloc(n,size);}
 static void heap_caps_free(void *p){if(p){for(int i=0;i<32;i++)if(tracked[i]==p){frees++;tracked[i]=NULL;break;}free(p);}}
 static void opus_link_dec_free(void *p){free(p);}
 static void tomb_clear(const uint8_t *m){(void)m;}
@@ -110,17 +118,17 @@ static void radio_led_note_net_rx(int mode){(void)mode;}
 static void radio_led_note_net_tx(int mode){(void)mode;}
 static bool s_peers_dirty,s_hub_on;
 static char s_stun_str[128];
-static unsigned char saved[NP_ACCESS_BYTES],legacy[108];static size_t saved_size;
+static unsigned char saved[NP_ACCESS_V2_BYTES],legacy[108];static size_t saved_size;
 static bool save_fail;
 static esp_err_t nvs_open(const char *s,int mode,nvs_handle_t *h){(void)s;(void)mode;*h=1;return 0;}
 static void nvs_close(nvs_handle_t h){(void)h;}
 static esp_err_t nvs_get_blob(nvs_handle_t h,const char *key,void *out,size_t *n){
  (void)h;const void *data=NULL;size_t size=0;
- if(!strcmp(key,KEY_ACCESS)){data=saved;size=saved_size;}else if(!strcmp(key,KEY_PEERS2)){data=legacy;size=sizeof(legacy);}
+ if(!strcmp(key,KEY_ACCESS2)){data=saved;size=saved_size;}else if(!strcmp(key,KEY_PEERS2)){data=legacy;size=sizeof(legacy);}
  if(!size)return ESP_ERR_NVS_NOT_FOUND;if(*n<size)return ESP_FAIL;memcpy(out,data,size);*n=size;return 0;
 }
 static esp_err_t nvs_set_blob(nvs_handle_t h,const char *k,const void *data,size_t n){
- (void)h;assert(!strcmp(k,KEY_ACCESS));if(save_fail)return ESP_FAIL;assert(n<=sizeof(saved));memcpy(saved,data,n);saved_size=n;return 0;
+ (void)h;assert(!strcmp(k,KEY_ACCESS2));if(save_fail)return ESP_FAIL;assert(n<=sizeof(saved));memcpy(saved,data,n);saved_size=n;return 0;
 }
 static esp_err_t nvs_get_u8(nvs_handle_t h,const char *k,uint8_t *v){(void)h;(void)k;*v=1;return 0;}
 static esp_err_t nvs_set_u8(nvs_handle_t h,const char *k,uint8_t v){(void)h;(void)k;(void)v;return 0;}
@@ -332,7 +340,47 @@ int main(void){
  for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);one->in_use=two->in_use=true;one->fam=two->fam=4;one->ip=two->ip=shared.ip;one->port=1000;two->port=2000;shared.port=3000;
  rt_peer_t *separate=peer_ensure(shared_mac,&shared);assert(separate&&separate!=one&&separate!=two&&!np_access_has_mac(one->mac)&&!np_access_has_mac(two->mac));
  for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);
- puts("PASS: actual 16-peer admission/full rejection/incoming lookup/lazy allocation/cleanup/NVS migration; hub origin/transport separation, indirect no-ping/no-NVS, promotion, accurate hub expiry and single-hop forwarding");
+ for(int i=0;i<SLOT_MAX;i++)peer_clear(&s_peer[i]);
+ s_access_error=false;s_denied_count=0;
+ assert(netp2pnet_peer_add_confirmed("ridge","HILL.Example.NET.",55000,false)==ESP_OK);
+ const uint8_t expected_mac[6]={3,9,8,7,6,5},wrong_mac[6]={8,9,8,7,6,5};
+ np_addr_t dns_addresses[2]={{.fam=4,.port=55000},{.fam=6,.port=55000}};
+ assert(inet_pton(AF_INET,"192.0.2.25",&dns_addresses[0].ip)==1);
+ assert(inet_pton(AF_INET6,"2001:db8::25",dns_addresses[1].ip6)==1);
+ rt_peer_t *hostname=&s_peer[0];assert(hostname->dns&&!strcmp(hostname->dns->config.host,"hill.example.net"));
+ np_access_record_t ref;char id_before[56],id_after[56];
+ peer_record(hostname,&ref);np_access_id(&ref,id_before,sizeof(id_before));
+ uint32_t ticket=hostname->dns->ticket;
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses,2,clock_ms-20001);
+ assert(hostname->dns->state==DNS_FAILED&&!peer_addr_set(hostname));
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses,2,clock_ms);
+ assert(hostname->fam==4&&!hostname->linked);
+ assert(!peer_for_frame(expected_mac,&dns_addresses[0],F_AUDIO,0));
+ assert(peer_for_frame(expected_mac,&dns_addresses[0],F_KNOCK_ACK,0)==hostname);
+ link_peer(hostname,&dns_addresses[0]);
+ peer_record(hostname,&ref);np_access_id(&ref,id_after,sizeof(id_after));assert(!strcmp(id_before,id_after));
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses+1,1,clock_ms);
+ assert(hostname->fam==4&&hostname->linked);
+ const uint32_t previous_epoch=wifi_epoch++;
+ engine_tick_timers();assert(!hostname->linked&&!peer_addr_set(hostname));
+ dns_apply_result_locked(hostname,ticket,0,previous_epoch,dns_addresses,2,clock_ms);
+ assert(!peer_addr_set(hostname));
+ ticket=hostname->dns->ticket;
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses,2,clock_ms);
+ assert(!peer_for_frame(wrong_mac,&dns_addresses[0],F_KNOCK_ACK,0));
+ clock_ms+=5000;engine_tick_timers();assert(hostname->fam==6);
+ assert(netp2pnet_peer_del(0)==ESP_OK&&s_denied_count==1);
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses,2,clock_ms);
+ assert(!hostname->in_use);
+ peers_load();assert(s_denied_count==1);
+ assert(netp2pnet_peer_add_confirmed("ridge","hill.example.net",55000,false)==ESP_ERR_INVALID_STATE);
+ assert(netp2pnet_peer_add_confirmed("ridge","hill.example.net",55000,true)==ESP_OK);
+ dns_apply_result_locked(hostname,ticket,0,wifi_epoch,dns_addresses,2,clock_ms);
+ assert(!peer_addr_set(hostname));
+ peer_clear(hostname);peers_load();
+ assert(hostname->dns&&!peer_addr_set(hostname)&&!memcmp(hostname->mac,expected_mac,6));
+ peer_record(hostname,&ref);np_access_id(&ref,id_after,sizeof(id_after));assert(!strcmp(id_before,id_after));
+ puts("PASS: 16 peers, legacy migration, Hub and denial rules, durable DNS identity, dual-stack handoff, timed-out and stale DNS results");
 }
 '''
 LABEL_STUBS=r'''
@@ -349,13 +397,14 @@ static void peer_labels_bind(const np_access_record_t*a,const np_access_record_t
 '''
 def main():
  source=(ROOT/'firmware/main/netp2pnet.c').read_text(encoding='utf-8')
- types=''
- for name in ('np_addr_t','np_header_t','rt_peer_t'):
+ types=next(line for line in source.splitlines() if line.startswith('typedef enum { DNS_WAIT'))+'\n'
+ for name in ('np_addr_t','np_header_t','peer_dns_t','rt_peer_t'):
   end=source.index('} '+name+';')+len('} '+name+';');start=source.rfind('typedef struct {',0,end);types+=source[start:end]+'\n'
- names=['be32','put_be32','put_be16','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_bind_identity','peer_ensure','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','hub_send_audio','hub_send_cutoff','engine_tick_timers','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','peer_add_confirmed_inner','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json','netp2pnet_cleanup_idle']
+ names=['be32','put_be32','put_be16','peer_record','denied_find','denied_address','denied_remove','np_addr_set','peer_addr_set','peer_take_addr','peer_addr_text','peer_by_mac','peer_free_slot','peer_by_source','peer_audio_free','peer_clear','peer_jbuf_alloc','peer_bind_identity','peer_ensure','peer_dns_source','peer_for_frame','peer_reset_stream','jbuf_audio','link_peer','hub_send_audio','hub_send_cutoff','dns_reset_locked','dns_candidate_locked','engine_tick_timers','dns_apply_result_locked','hub_quiet_ms','peer_state_str','hub_forward_audio','frame_admitted','dns_create','peers_load','peers_save_ex','peers_save','netp2pnet_hub_set','peer_add_dns_locked','peer_add_confirmed_inner','netp2pnet_peer_add_confirmed','netp2pnet_peer_add','netp2pnet_peer_del','netp2pnet_unblock','netp2pnet_denied_json','netp2pnet_status_json','netp2pnet_cleanup_idle']
  reserve=next(x for x in (ROOT/'firmware/main/netp2pnet.h').read_text().splitlines() if x.startswith('#define NETP2PNET_STATUS_RESERVE'))
  harness=HARNESS.replace('char json[5120]','char json[NETP2PNET_STATUS_RESERVE]').replace('struct {char json[NETP2PNET_STATUS_RESERVE]', 'max_labels=true;struct {char json[NETP2PNET_STATUS_RESERVE]')
- code=PRE+LABEL_STUBS+reserve+'\n'+types+'\nstatic rt_peer_t s_peer[SLOT_MAX];\n'+POST+''.join(function(source,n) for n in names)+harness
+ endpoint='\n'.join(line for line in (ROOT/'firmware/main/net_endpoint.c').read_text(encoding='utf-8').splitlines() if not line.startswith('#include'))+'\n'
+ code=PRE+endpoint+LABEL_STUBS+reserve+'\n'+types+'\nstatic rt_peer_t s_peer[SLOT_MAX];\n'+POST+''.join(function(source,n) for n in names)+harness
  (ROOT/'.tmp').mkdir(exist_ok=True)
  with tempfile.TemporaryDirectory(prefix='np-runtime-',dir=ROOT/'.tmp') as temp:
   d=Path(temp);(d/'esp_err.h').write_text('typedef int esp_err_t;\n');(d/'test.c').write_text(code,encoding='utf-8');exe=d/'test.exe';env=dict(os.environ,TEMP=temp,TMP=temp,TMPDIR=temp)

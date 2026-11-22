@@ -64,6 +64,13 @@ bool sdr_ws_client_attached(void);
 bool sdr_tx_push_bytes(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len);
 bool sdr_tx_push_bytes_at(uint32_t sid, uint32_t tx, const uint8_t *bytes, size_t len, uint32_t offset);
 bool sdr_tx_received(uint32_t sid, uint32_t tx, uint32_t *samples);
+typedef struct {
+    uint32_t samples;
+    bool keyed;
+    const char *reason;
+} sdr_tx_ack_t;
+/* The sample watermark and key state belong to the same session and press. */
+bool sdr_tx_ack(uint32_t sid, uint32_t tx, sdr_tx_ack_t *ack);
 
 /* RF-audio tap, called from the monitor task once per output block.
  * `enabled` is false for audio that must not leave the board (module squelch

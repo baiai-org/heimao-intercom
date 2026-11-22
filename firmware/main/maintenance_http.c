@@ -5,6 +5,7 @@
 #include "radio_activity.h"
 #include "peer_labels.h"
 #include "netp2pnet.h"
+#include "netcom.h"
 #include "app_control.h"
 #include "cJSON.h"
 #include <string.h>
@@ -100,28 +101,25 @@ esp_err_t maintenance_http(httpd_req_t *req)
     }
     return reply(req, maintenance_snapshot(), 200);
 }
-static bool endpoint_parse(const char *input, char ip[64], uint16_t *port)
+esp_err_t broker_http(httpd_req_t *req)
 {
-    if (!input || !*input || strlen(input) >= 80) { return false; }
-    char text[80]; strcpy(text, input); char *host = text, *port_text = NULL;
-    if (*host == '[') {
-        char *end = strchr(++host, ']'); if (!end) { return false; }
-        if (end[1]) { if (end[1] != ':') { return false; } port_text = end + 2; }
-        *end = 0;
-    } else {
-        char *colon = strchr(host, ':');
-        if (colon && colon == strrchr(host, ':')) { *colon = 0; port_text = colon + 1; }
+    if (!identity_matches(req)) { return ESP_FAIL; }
+    cJSON *body = app_read_json(req);
+    if (!body) { return ESP_FAIL; }
+    const cJSON *address = cJSON_GetObjectItemCaseSensitive(body, "address");
+    const esp_err_t err = cJSON_IsString(address) ? netcom_set_broker(address->valuestring) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(body);
+    if (err != ESP_OK) {
+        return err == ESP_ERR_INVALID_ARG ? error(req, "请输入有效的域名或 IP，端口范围为 1–65535", 400) :
+            error(req, "中继服务器未保存，请重试", 503);
     }
-    *port = 54321;
-    if (port_text) {
-        if (!*port_text) { return false; }
-        for (char *p = port_text; *p; ++p) { if (*p < '0' || *p > '9') { return false; } }
-        char *end; long n = strtol(port_text, &end, 10);
-        if (*end || n < 1 || n > 65535) { return false; } *port = (uint16_t)n;
-    }
-    struct in_addr a4; struct in6_addr a6;
-    if (strlen(host) >= 64 || (inet_pton(AF_INET, host, &a4) != 1 && inet_pton(AF_INET6, host, &a6) != 1)) { return false; }
-    strcpy(ip, host); return true;
+    char configured[NET_ENDPOINT_SIZE];
+    netcom_broker_address(configured, sizeof(configured));
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddBoolToObject(out, "ok", true);
+    cJSON_AddBoolToObject(out, "scheduled", netcom_broker_pending());
+    cJSON_AddStringToObject(out, "address", configured);
+    return reply(req, out, 200);
 }
 esp_err_t peer_labels_http(httpd_req_t *req)
 {
@@ -137,9 +135,11 @@ esp_err_t peer_labels_http(httpd_req_t *req)
         } else if (!strcmp(op->valuestring, "add")) {
             const cJSON *address = cJSON_GetObjectItemCaseSensitive(body, "address");
             const cJSON *restore = cJSON_GetObjectItemCaseSensitive(body, "restore");
-            char ip[64]; uint16_t port;
-            if (cJSON_IsString(address) && cJSON_IsBool(restore) && endpoint_parse(address->valuestring, ip, &port)) {
-                err = netp2pnet_peer_add_named(name->valuestring, ip, port, cJSON_IsTrue(restore), revision, &added);
+            net_endpoint_t endpoint;
+            if (cJSON_IsString(address) && cJSON_IsBool(restore) &&
+                net_endpoint_parse(address->valuestring, 54321, &endpoint)) {
+                err = netp2pnet_peer_add_named(name->valuestring, endpoint.host, endpoint.port,
+                                              cJSON_IsTrue(restore), revision, &added);
             }
         }
     }
@@ -149,7 +149,7 @@ esp_err_t peer_labels_http(httpd_req_t *req)
     cJSON_AddNumberToObject(out, "label_revision", peer_labels_revision());
     if (err != ESP_OK) {
         cJSON_AddStringToObject(out, "err", added ? "对端已添加，但名称未确认保存；请保留草稿并在列表中重试改名" :
-            err == ESP_ERR_INVALID_ARG ? "名称最多24个字符/96字节；地址须为有效IP与端口" :
+            err == ESP_ERR_INVALID_ARG ? "名称最多24个字符/96字节；请输入有效域名或 IP，端口范围为 1–65535" :
             err == ESP_ERR_NOT_FOUND ? "对端不存在或名额已满，请刷新列表" :
             err == ESP_ERR_INVALID_STATE ? "对端、名称版本或拒绝规则已变化，请重新读取；草稿已保留" : "名称保存失败，原有名称保留，请重试");
     }

@@ -56,6 +56,8 @@ idf_component_register(
         "app_control.c"
         "net_http.c"
         "netcom.c"
+        "net_endpoint.c"
+        "audio_spectrum.c"
         "g711.c"
         "g722.c"     # ITU G.722 64 kbit/s, public domain (relay codec)
         "opus_link.c"   # Opus for the audio link (see opus_link.h)
@@ -80,6 +82,7 @@ idf_component_register(
         "maintenance.js"
         "release_update_public.pem"
         "rf_denoise.js"
+        "audio_spectrum.js"
         "eq_presets.js"
         "speaker_debug.html"
         "servercert.pem"    # self-signed LAN cert: HTTPS page -> microphone
@@ -149,6 +152,12 @@ if(NOT https_replaced EQUAL 1)
 endif()
 set_property(TARGET ${https_lib} PROPERTY SOURCES "${https_new_sources}")
 
+option(HEIMAO_SDR_HTTP_TIMING "Record bounded HTTPS PCM timing for a lab build" OFF)
+if(HEIMAO_SDR_HTTP_TIMING)
+    target_compile_definitions(${https_lib} PRIVATE ORL_SDR_HTTP_TIMING)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE ORL_SDR_HTTP_TIMING)
+endif()
+
 # Apply the exact ADC sample clock inside the driver's start sequence, before
 # conversion is enabled, without modifying the SDK shared with the original.
 target_link_options(${COMPONENT_LIB} INTERFACE
@@ -156,6 +165,9 @@ target_link_options(${COMPONENT_LIB} INTERFACE
 
 set_source_files_properties(device_maintenance.c maintenance_http.c factory_reset.c peer_labels.c release_update.c
     PROPERTIES COMPILE_OPTIONS "-Werror=frame-larger-than=6144;-fstack-usage")
+
+set_source_files_properties(audio_spectrum.c PROPERTIES
+    COMPILE_OPTIONS "-O2")
 
 # HTTP tasks have 10 KB stacks. Reserve at least 4 KB beyond each local frame
 # for routing, TLS and newlib formatting, and retain compiler stack reports.

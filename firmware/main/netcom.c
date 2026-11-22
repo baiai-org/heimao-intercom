@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -28,6 +29,7 @@
 #include "voice.h"
 #include "radio_led.h"
 #include "sdr.h"
+#include "device_maintenance.h"
 
 static const char *TAG = "netcom";
 #define NVS_NS      "orl"
@@ -35,12 +37,16 @@ static const char *TAG = "netcom";
 #define KEY_MODE_V  "ncmodev"   /* mode-numbering stamp, see netcom_cfg_load */
 #define KEY_ROOM    "ncroom"
 #define KEY_BROKER  "ncbrkr"
+#define KEY_BROKER2 "ncbrkr2"
 #define KEY_USER    "ncuser"
 #define KEY_PASS    "ncpass"
 #define KEY_PSK     "ncpsk"
 #define KEY_RF      "ncrf"      /* network talk also keys the local radio */
 
 static netcom_cfg_t s_cfg;
+static portMUX_TYPE s_broker_mux = portMUX_INITIALIZER_UNLOCKED;
+static atomic_bool s_broker_pending;
+static int64_t s_broker_retry_at;
 static const netcom_engine_t *s_engine[NETCOM_MODE_MAX + 1];  /* NULL = no engine */
 static bool s_engine_up;                     /* last engine start succeeded */
 static portMUX_TYPE s_ptt_diag_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -107,8 +113,9 @@ void netcom_cfg_defaults(netcom_cfg_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     cfg->mode = NETCOM_MODE_LOCAL;
     cfg->room = NETCOM_ROOM_MIN;
-    cfg->broker_port = 1883;
-    snprintf(cfg->broker, sizeof(cfg->broker), "127.0.0.1");
+    cfg->broker = (net_endpoint_t){
+        .host = "127.0.0.1", .port = NETCOM_BROKER_DEFAULT_PORT, .kind = NET_HOST_IPV4,
+    };
 }
 
 /* -------------------------------------------------------------------- NVS */
@@ -127,9 +134,6 @@ esp_err_t netcom_cfg_save(const netcom_cfg_t *cfg)
     }
     if (err == ESP_OK) {
         err = nvs_set_u16(h, KEY_ROOM, cfg->room);
-    }
-    if (err == ESP_OK && cfg->broker[0]) {
-        err = nvs_set_str(h, KEY_BROKER, cfg->broker);
     }
     if (err == ESP_OK) {
         if (cfg->user[0]) {
@@ -161,6 +165,35 @@ esp_err_t netcom_cfg_save(const netcom_cfg_t *cfg)
         ESP_LOGW(TAG, "save: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+static void load_broker(nvs_handle_t h, net_endpoint_t *broker)
+{
+    uint8_t blob[3 + NET_HOST_SIZE];
+    size_t len = sizeof(blob);
+    if (nvs_get_blob(h, KEY_BROKER2, blob, &len) == ESP_OK && len >= 5 && blob[0] == 1 &&
+        memchr(blob + 3, 0, len - 3) == blob + len - 1) {
+        const uint16_t port = (uint16_t)((blob[1] << 8) | blob[2]);
+        if (port && net_endpoint_parse((const char *)blob + 3, port, broker)) { return; }
+    }
+    char legacy[32];
+    len = sizeof(legacy);
+    if (nvs_get_str(h, KEY_BROKER, legacy, &len) != ESP_OK) { return; }
+    /* Older builds stored even IPv6 as unbracketed host:port. */
+    char *last = strrchr(legacy, ':');
+    if (last && last != strchr(legacy, ':') && legacy[0] != '[' && last[1]) {
+        char *end;
+        long port = strtol(last + 1, &end, 10);
+        *last = 0;
+        net_endpoint_t endpoint;
+        if (!*end && port > 0 && port <= UINT16_MAX &&
+            net_endpoint_parse(legacy, (uint16_t)port, &endpoint) && endpoint.kind == NET_HOST_IPV6) {
+            *broker = endpoint;
+            return;
+        }
+        *last = ':';
+    }
+    (void)net_endpoint_parse(legacy, NETCOM_BROKER_DEFAULT_PORT, broker);
 }
 
 esp_err_t netcom_cfg_load(netcom_cfg_t *cfg)
@@ -216,18 +249,8 @@ esp_err_t netcom_cfg_load(netcom_cfg_t *cfg)
         room >= NETCOM_ROOM_MIN && room <= NETCOM_ROOM_MAX) {
         cfg->room = room;
     }
-    size_t len = sizeof(cfg->broker);
-    if (nvs_get_str(h, KEY_BROKER, cfg->broker, &len) == ESP_OK) {
-        /* re-parse the port out of "host:port" */
-        char *colon = strrchr(cfg->broker, ':');
-        if (colon && colon > cfg->broker) {
-            int p = atoi(colon + 1);
-            if (p >= 1 && p <= 65535) {
-                cfg->broker_port = (uint16_t)p;
-            }
-        }
-    }
-    len = sizeof(cfg->psk);
+    load_broker(h, &cfg->broker);
+    size_t len = sizeof(cfg->psk);
     if (nvs_get_blob(h, KEY_PSK, cfg->psk, &len) == ESP_OK &&
         len == sizeof(cfg->psk)) {
         cfg->psk_set = true;
@@ -262,70 +285,65 @@ static esp_err_t engine_start(const netcom_engine_t *e);
 
 esp_err_t netcom_set_broker(const char *host_port)
 {
-    if (!host_port || !host_port[0]) {
+    net_endpoint_t next;
+    if (!net_endpoint_parse(host_port, NETCOM_BROKER_DEFAULT_PORT, &next)) {
         return ESP_ERR_INVALID_ARG;
     }
-    char buf[NETCOM_BROKER_LEN];
-    size_t n = strlen(host_port);
-    if (n >= sizeof(buf)) {
-        return ESP_ERR_INVALID_ARG;
+    if (!app_control_generation_begin(0)) { return ESP_ERR_INVALID_STATE; }
+    if (!device_maintenance_write_begin()) {
+        app_control_end();
+        return ESP_ERR_INVALID_STATE;
     }
-    memcpy(buf, host_port, n + 1);
+    const bool changed = strcmp(next.host, s_cfg.broker.host) || next.port != s_cfg.broker.port;
+    esp_err_t err = ESP_OK;
+    if (changed) {
+        uint8_t blob[3 + NET_HOST_SIZE] = { 1, (uint8_t)(next.port >> 8), (uint8_t)next.port };
+        const size_t host_bytes = strlen(next.host) + 1;
+        memcpy(blob + 3, next.host, host_bytes);
+        nvs_handle_t h;
+        err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+        if (err == ESP_OK) {
+            err = nvs_set_blob(h, KEY_BROKER2, blob, 3 + host_bytes);
+            if (err == ESP_OK) { err = nvs_commit(h); }
+            nvs_close(h);
+        }
+        if (err == ESP_OK) {
+            portENTER_CRITICAL(&s_broker_mux);
+            s_cfg.broker = next;
+            portEXIT_CRITICAL(&s_broker_mux);
+            if (s_cfg.mode == NETCOM_MODE_RELAY) {
+                atomic_store(&s_broker_pending, true);
+                s_broker_retry_at = 0;
+            }
+        }
+    }
+    device_maintenance_write_end();
+    app_control_end();
+    return err;
+}
 
-    uint16_t port = s_cfg.broker_port ? s_cfg.broker_port : 1883;
-    /*
-     * Accept IPv4 "host:port", IPv6 "[addr]:port" and a bare IPv6 literal.
-     * Splitting on the LAST colon (the old code) shreds every IPv6 address, so
-     * an EMQX broker on an IPv6 network could never be entered.
-     */
-    if (buf[0] == '[') {
-        char *rb = strchr(buf, ']');
-        if (!rb) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        *rb = '\0';
-        memmove(buf, buf + 1, strlen(buf));      /* drop the '[' */
-        if (rb[1] == ':') {
-            int p = atoi(rb + 2);
-            if (p < 1 || p > 65535) {
-                return ESP_ERR_INVALID_ARG;
-            }
-            port = (uint16_t)p;
-        }
-    } else if (strchr(buf, ':') != NULL && strchr(buf, ':') == strrchr(buf, ':')) {
-        /* exactly one colon -> host:port (a bare IPv6 has several) */
-        char *colon = strrchr(buf, ':');
-        if (colon > buf) {
-            *colon = '\0';
-            int p = atoi(colon + 1);
-            if (p < 1 || p > 65535) {
-                return ESP_ERR_INVALID_ARG;
-            }
-            port = (uint16_t)p;
-        }
+bool netcom_broker_pending(void)
+{
+    return atomic_load(&s_broker_pending);
+}
+
+/* Called by the maintenance tick with the control lock held, after the
+ * audio engines are idle. Starting MQTT schedules its own connect task. */
+void netcom_apply_pending_broker(void)
+{
+    const int64_t now = esp_timer_get_time();
+    if (!netcom_broker_pending() || now < s_broker_retry_at ||
+        now - ptt_last_activity_us() < 300000) { return; }
+    if (s_cfg.mode != NETCOM_MODE_RELAY) {
+        atomic_store(&s_broker_pending, false);
+        return;
     }
-    if (!buf[0]) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    /* Assemble "host:port" in a wide local buffer first so the 31-char
-     * config field can never be truncated mid-write. */
-    char hostport[40];
-    snprintf(hostport, sizeof(hostport), "%s:%u", buf, port);
-    if (strlen(hostport) + 1 > sizeof(s_cfg.broker)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    memcpy(s_cfg.broker, hostport, strlen(hostport) + 1);
-    s_cfg.broker_port = port;
-    esp_err_t err = netcom_cfg_save(&s_cfg);
-    ESP_LOGI(TAG, "broker -> %s", s_cfg.broker);
-    if (s_cfg.mode == NETCOM_MODE_RELAY && s_engine_up) {
-        const netcom_engine_t *e = active_engine();
-        err = engine_stop(e);
-        if (err != ESP_OK) { return err; }
-        err = engine_start(e);
+    s_broker_retry_at = now + 2000000;
+    const netcom_engine_t *engine = active_engine();
+    if (engine_stop(engine) == ESP_OK) {
+        (void)engine_start(engine);
         bridge_mode_changed();
     }
-    return err;
 }
 
 /* -------------------------------------------------- MQTT credentials (relay) */
@@ -465,6 +483,9 @@ static esp_err_t engine_start(const netcom_engine_t *e)
     sdr_rx_network_mode(s_cfg.mode);
     const esp_err_t err = e->start(&s_cfg);
     s_engine_up = (err == ESP_OK);
+    if (err == ESP_OK && s_cfg.mode == NETCOM_MODE_RELAY) {
+        atomic_store(&s_broker_pending, false);
+    }
     if (err != ESP_OK) { sdr_rx_network_mode(NETCOM_MODE_LOCAL); }
     return err;
 }
@@ -563,14 +584,13 @@ uint16_t netcom_room(void)
     return s_cfg.room;
 }
 
-const char *netcom_broker_str(void)
+void netcom_broker_address(char *out, size_t size)
 {
-    return s_cfg.broker;
-}
-
-uint16_t netcom_broker_port(void)
-{
-    return s_cfg.broker_port;
+    net_endpoint_t endpoint;
+    portENTER_CRITICAL(&s_broker_mux);
+    endpoint = s_cfg.broker;
+    portEXIT_CRITICAL(&s_broker_mux);
+    net_endpoint_format(&endpoint, out, size);
 }
 
 void netcom_psk(uint8_t *out, bool *set)
@@ -745,7 +765,7 @@ esp_err_t netcom_init(void)
 
     ESP_LOGI(TAG, "init: mode=%s room=%u broker=%s psk=%s",
              netcom_mode_name(s_cfg.mode), s_cfg.room,
-             s_cfg.broker,
+             s_cfg.broker.host,
              s_cfg.psk_set ? "set" : "off");
 
     return engine_start(active_engine());

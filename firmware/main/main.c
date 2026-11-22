@@ -484,7 +484,9 @@ static void console_run_line(char *line)
                     netp2pnet_console(np, sizeof(np));
                     printf("%s\n", np);
                 } else {
-                    printf("  relay  : %s   (mode 2 only)\n", netcom_broker_str());
+                    char broker[NET_ENDPOINT_SIZE];
+                    netcom_broker_address(broker, sizeof(broker));
+                    printf("  relay  : %s   (mode 2 only)\n", broker);
                 }
             }
             printf("  usage: mode 0|1|2   (0 local / 1 net-p2p / 2 relay)\n");
@@ -554,13 +556,16 @@ static void console_run_line(char *line)
         printf("  room -> %u   (%s)\n", netcom_room(), esp_err_to_name(err));
         return;
     } else if (!strcmp(argv[0], "broker")) {
+        char broker[NET_ENDPOINT_SIZE];
         if (argc < 2) {
+            netcom_broker_address(broker, sizeof(broker));
             printf("  relay broker: %s   (usage: broker host[:port])\n",
-                   netcom_broker_str());
+                   broker);
             return;
         }
         esp_err_t err = netcom_set_broker(argv[1]);
-        printf("  broker -> %s   (%s)\n", netcom_broker_str(), esp_err_to_name(err));
+        netcom_broker_address(broker, sizeof(broker));
+        printf("  broker -> %s   (%s)\n", broker, esp_err_to_name(err));
         return;
     } else if (!strcmp(argv[0], "bridge")) {
         /*

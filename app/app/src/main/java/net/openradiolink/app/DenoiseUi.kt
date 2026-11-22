@@ -148,7 +148,8 @@ internal fun DenoiseEditor(manager: DeviceManager, profile: DeviceProfile, state
                 else DenoiseSelectionWrite(value, selectionDraft?.expected ?: current)
             feedback = ""
         }
-        DenoiseLevelRow("降噪档位", shown.level, editable, DenoiseLevel.entries.drop(1)) {
+        val choices = if (current.configRevision != null) DenoiseLevel.entries else DenoiseLevel.entries.drop(1)
+        DenoiseLevelRow("降噪档位", shown.level, editable, choices) {
             edit(shown.copy(level = it))
         }
         if (mixed) Text("手台保存了不同的线路档位。保存后，已勾选的线路会统一使用所选档位。",

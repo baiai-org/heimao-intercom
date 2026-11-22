@@ -16,6 +16,7 @@
 
 #include "audio_codec.h"
 #include "audio_i2s.h"
+#include "audio_spectrum.h"
 #include "adc_audio_clock.h"
 #include "bridge.h"
 #include "rx_guard.h"
@@ -364,6 +365,8 @@ static bool s_net_feeding, s_net_rf_required, s_net_rf_keyed, s_net_write_pendin
 static bool s_net_short_cushion, s_net_resume_pending;
 static uint64_t s_net_sender_epoch;
 static uint16_t s_net_first_seq;
+static uint32_t s_net_spectrum_session;
+static volatile uint32_t s_last_bridge_network_session;
 static voice_network_playout_t s_net_playout;
 static voice_sdr_playout_t s_sdr_playout;
 static bool s_sdr_refill, s_sdr_resume_pending, s_sdr_pcm_draining;
@@ -1707,8 +1710,25 @@ static void monitor_task(void *arg)
 
             const int64_t write_start = esp_timer_get_time();
             const int64_t write_deadline = net_tailing ? write_start + 80000 : denoise.close_us;
+            audio_spectrum_path_t spectrum_path = SPECTRUM_AUTO;
+            uint32_t spectrum_session = 0;
+            if (injected && ptt_owner() == PTT_OWNER_SDR && ptt_rf_keying_enabled()) {
+                spectrum_path = SPECTRUM_REMOTE_RF;
+            } else if (injected && netcom_mode() != NETCOM_MODE_LOCAL) {
+                const bool on_rf = ptt_bridge_keyed();
+                spectrum_session = net_tailing ? voice_bridge_network_session() :
+                    voice_bridge_last_network_session();
+                spectrum_path = netcom_mode() == NETCOM_MODE_NETP2P ?
+                    (on_rf ? SPECTRUM_P2P_RF : SPECTRUM_P2P_SPEAKER) :
+                    (on_rf ? SPECTRUM_MQTT_RF : SPECTRUM_MQTT_SPEAKER);
+            } else if (diag_receive && !speaker_settling && !speaker_guard) {
+                spectrum_path = SPECTRUM_RF_SPEAKER;
+            }
             const esp_err_t write_err = write_deadline ?
                 audio_i2s_write_until(out, (size_t)m, write_deadline) : audio_i2s_write(out, (size_t)m);
+            if (write_err == ESP_OK && spectrum_path != SPECTRUM_AUTO) {
+                audio_spectrum_tap_session(spectrum_path, spectrum_session, out, (size_t)m);
+            }
             if (net_tailing && write_err != ESP_OK) { voice_net_tail_stop(); }
             if ((denoise.close_us && denoise.finished && !denoise.dma_left &&
                  !rf_denoise_play_pending(RF_DENOISE_SPEAKER)) ||
@@ -1859,11 +1879,13 @@ static bool talk_tail_sink(int16_t *b, size_t n, void *ctx)
     if (!ptt_owned(PTT_OWNER_TALK, c->token) || ptt_extend(1000) != ESP_OK) { return false; }
     if (netcom_mode() != c->mode || (c->network && netcom_room() != c->room)) { return false; }
     (void)tx_gain_apply(b, n);
-    if (c->network) {
-        netcom_tx_sample_until(b, n, true, ptt_release_deadline_us(PTT_OWNER_TALK, c->token));
+    if (c->network && netcom_tx_sample_until(b, n, true, ptt_release_deadline_us(PTT_OWNER_TALK, c->token))) {
+        audio_spectrum_tap(c->mode == NETCOM_MODE_NETP2P ? SPECTRUM_MIC_P2P : SPECTRUM_MIC_MQTT, b, n);
     }
     if (!c->network || c->rf_also) {
-        return audio_i2s_write_until(b, n, esp_timer_get_time() + 80000) == ESP_OK;
+        const bool written = audio_i2s_write_until(b, n, esp_timer_get_time() + 80000) == ESP_OK;
+        if (written) { audio_spectrum_tap(SPECTRUM_MIC_RF, b, n); }
+        return written;
     }
     /* No sample clock here: pace against the wall clock. */
     if (!c->next_us) { c->next_us = esp_timer_get_time(); }
@@ -2029,7 +2051,9 @@ static bool talk_network_emit(const int16_t *pcm, size_t n, void *context)
     memcpy(shaped, pcm, n * sizeof(*pcm));
     const int peak = voice_apply_tx_processing(shaped, n);
     if (peak > tx->peak) { tx->peak = peak; }
-    netcom_tx_sample_until(shaped, n, false, ptt_release_deadline_us(PTT_OWNER_TALK, tx->generation));
+    if (netcom_tx_sample_until(shaped, n, false, ptt_release_deadline_us(PTT_OWNER_TALK, tx->generation))) {
+        audio_spectrum_tap(tx->mode == NETCOM_MODE_NETP2P ? SPECTRUM_MIC_P2P : SPECTRUM_MIC_MQTT, shaped, n);
+    }
     return true;
 }
 
@@ -2043,6 +2067,7 @@ static bool talk_denoise_drain(uint32_t generation, int16_t *buf, eq6_t *eq, tx_
         if (!talk_denoise_owned(generation) || audio_i2s_write_until(buf, n, deadline) != ESP_OK) {
             return false;
         }
+        audio_spectrum_tap(SPECTRUM_MIC_RF, buf, n);
     }
     return true;
 }
@@ -2122,7 +2147,9 @@ static void talk_task(void *arg)
         } else if (network || !denoising) {
             out_peak = voice_apply_tx_processing(buf, got);
             if (network && netcom_mode() == tx.mode && ptt_get_state() == PTT_TX) {
-                netcom_tx_sample_until(buf, got, false, ptt_release_deadline_us(PTT_OWNER_TALK, generation));
+                if (netcom_tx_sample_until(buf, got, false, ptt_release_deadline_us(PTT_OWNER_TALK, generation))) {
+                    audio_spectrum_tap(tx.mode == NETCOM_MODE_NETP2P ? SPECTRUM_MIC_P2P : SPECTRUM_MIC_MQTT, buf, got);
+                }
             }
         }
         if (denoising) {
@@ -2141,10 +2168,11 @@ static void talk_task(void *arg)
                 break;
             }
             captured_for_denoise = true;
+            audio_spectrum_tap(SPECTRUM_MIC_RF, rf_pcm, got);
         } else if (to_rf && netcom_mode() == tx.mode) {
             if (split) { (void)talk_shape(rf_pcm, got, dac_eq, dac_history); }
             if (!net_denoising || talk_denoise_owned(generation)) {
-                (void)audio_i2s_write(rf_pcm, got);
+                if (audio_i2s_write(rf_pcm, got) == ESP_OK) { audio_spectrum_tap(SPECTRUM_MIC_RF, rf_pcm, got); }
             }
         }
         if (out_peak > s_stats.peak_in) { s_stats.peak_in = out_peak; }
@@ -2795,6 +2823,9 @@ void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_
     if (!feeding || !s_net_feeding || s_net_sender_epoch != sender_epoch || s_net_first_seq != first_seq) {
         s_net_short_cushion = s_net_resume_pending = false;
     }
+    if (feeding && (!s_net_feeding || s_net_sender_epoch != sender_epoch || s_net_first_seq != first_seq)) {
+        if (++s_net_spectrum_session == 0) { ++s_net_spectrum_session; }
+    }
     s_net_sender_epoch = sender_epoch;
     s_net_first_seq = first_seq;
     s_net_rf_required = rf_required;
@@ -2804,6 +2835,19 @@ void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_
     }
     s_net_feeding = feeding;
     ptt_control_unlock();
+}
+
+uint32_t voice_bridge_network_session(void)
+{
+    ptt_control_lock();
+    const uint32_t session = s_net_spectrum_session;
+    ptt_control_unlock();
+    return session;
+}
+
+uint32_t voice_bridge_last_network_session(void)
+{
+    return s_last_bridge_network_session;
 }
 
 void voice_bridge_network_keyed(bool keyed)
@@ -3191,6 +3235,7 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     const bool browser = s_inject_owner == PTT_OWNER_SDR && ptt_owned(PTT_OWNER_SDR, s_inject_token);
     const bool network = s_inject_owner == PTT_OWNER_NETWORK;
     s_last_bridge_tx_processed = false;
+    s_last_bridge_network_session = 0;
     const size_t lvl = voice_bridge_level();
     if (network && !voice_bridge_network_ready()) {
         ptt_control_unlock(); return 0;
@@ -3210,6 +3255,7 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     if (network && !s_net_feeding && lvl > 0 && lvl < 2) {
         const size_t got = voice_bridge_take(out, n);
         s_net_write_pending = got != 0;
+        if (got) { s_last_bridge_network_session = s_net_spectrum_session; }
         ptt_control_unlock(); return got;
     }
     if (network && !s_net_feeding && lvl >= 2) { s_inj_primed = true; }
@@ -3231,7 +3277,10 @@ size_t voice_bridge_play(int16_t *out, size_t n)
         got = voice_bridge_take_resampled(out, n, ratio);
         if (got > 0) {
             s_last_bridge_tx_processed = browser && s_inject_tx_processed;
-            if (network) { s_net_write_pending = true; }
+            if (network) {
+                s_net_write_pending = true;
+                s_last_bridge_network_session = s_net_spectrum_session;
+            }
             if (browser) { s_sdr_pcm_write_pending = got; }
         }
         if (lvl > target + 2600 || lvl + 1200 < target) { ++s_bridge_trim; }
