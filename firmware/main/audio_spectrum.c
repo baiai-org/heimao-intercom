@@ -9,22 +9,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-enum { PCM_CAPACITY = 24000, JOIN_SAMPLES = 2560, LEASE_MS = 1000, ACTIVE_MS = 180 };
+enum { PCM_CAPACITY = 24000, JOIN_SAMPLES = 2560, LEASE_MS = 2400, ACTIVE_MS = 180,
+       SEGMENT_CAPACITY = 32, REPLY_OVERRUN = 1, REPLY_GAP = 2 };
 _Static_assert(AUDIO_SAMPLE_RATE_HZ == 16000 && SPECTRUM_PATH_COUNT < 32,
                "Update the PCM protocol when the audio format changes");
 
 typedef struct {
+    uint32_t first, end, stamp;
+} spectrum_segment_t;
+
+typedef struct {
     uint32_t path_time[SPECTRUM_PATH_COUNT];
     audio_spectrum_path_t path, selected;
-    uint32_t boot, generation, next, stamp;
-    unsigned head, count;
+    uint32_t boot, generation, next, stamp, dropped, pauses, renewals;
+    unsigned head, segment_head, segment_count;
+    spectrum_segment_t segments[SEGMENT_CAPACITY];
     int16_t pcm[PCM_CAPACITY];
 } spectrum_state_t;
 
 static StaticSemaphore_t s_mutex_storage;
 static SemaphoreHandle_t s_mutex;
 static spectrum_state_t *s_state;
-static atomic_uint s_lease_until, s_missed, s_contention;
+static atomic_uint s_lease_until, s_missed[SPECTRUM_PATH_COUNT], s_contention;
 
 /* A reader pins the physical span only while it copies into its HTTP
  * response. Route changes keep the write index moving around the ring. */
@@ -81,7 +87,21 @@ static unsigned priority(audio_spectrum_path_t path)
 static void reset_stream(spectrum_state_t *s)
 {
     if (++s->generation == 0) { ++s->generation; }
-    s->count = s->next = 0;
+    s->segment_head = s->segment_count = s->next = 0;
+}
+
+/* Gaps occupy logical time in the ring without writing fabricated samples.
+ * Each reply covers at most one uninterrupted segment. */
+static spectrum_segment_t *append_segment(spectrum_state_t *s, uint32_t gap)
+{
+    if (gap || !s->segment_count) {
+        s->next += gap;
+        s->head = (s->head + gap % PCM_CAPACITY) % PCM_CAPACITY;
+        s->segments[s->segment_head] = (spectrum_segment_t){.first = s->next};
+        s->segment_head = (s->segment_head + 1) % SEGMENT_CAPACITY;
+        if (s->segment_count < SEGMENT_CAPACITY) { ++s->segment_count; }
+    }
+    return &s->segments[(s->segment_head + SEGMENT_CAPACITY - 1) % SEGMENT_CAPACITY];
 }
 
 static bool pinned(unsigned head, unsigned count)
@@ -109,44 +129,56 @@ void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t s
     if (path <= SPECTRUM_AUTO || path >= SPECTRUM_PATH_COUNT || !pcm || !samples) { return; }
     const uint32_t now = now_ms();
     if (!leased(now)) { return; }
-    const unsigned bit = 1u << path;
     if (xSemaphoreTake(s_mutex, 0) != pdTRUE) {
-        atomic_fetch_or_explicit(&s_missed, bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&s_missed[path], samples, memory_order_relaxed);
         atomic_fetch_add_explicit(&s_contention, 1, memory_order_relaxed);
         return;
     }
     spectrum_state_t *s = s_state;
-    const uint32_t gap = now - s->path_time[path];
     s->path_time[path] = now ? now : 1;
     if (s->selected == path || (!path_active(s, s->selected, now) &&
         (!path_active(s, s->path, now) || priority(path) > priority(s->path)))) {
         use_path(s, path);
     }
-    const bool missed = atomic_fetch_and_explicit(&s_missed, ~bit, memory_order_relaxed) & bit;
+    const uint32_t missed = atomic_exchange_explicit(&s_missed[path], 0, memory_order_relaxed);
     if (s->path == path) {
+        uint64_t gap = s->segment_count ? missed : 0;
+        const uint32_t interval = now - s->stamp;
+        const bool pause = s->segment_count && interval > ACTIVE_MS;
+        if (pause) {
+            const uint64_t elapsed = (uint64_t)interval * (AUDIO_SAMPLE_RATE_HZ / 1000);
+            if (elapsed > samples && elapsed - samples > gap) { gap = elapsed - samples; }
+        }
+        uint32_t trimmed = 0;
         if (samples > PCM_CAPACITY) {
-            pcm += samples - PCM_CAPACITY;
+            trimmed = samples - PCM_CAPACITY;
+            pcm += trimmed;
             samples = PCM_CAPACITY;
-            reset_stream(s);
+            gap += trimmed;
         }
-        if (s->count && (gap > ACTIVE_MS || missed || samples > UINT32_MAX - s->next)) {
+        if ((uint64_t)s->next + gap + samples > UINT32_MAX) {
             reset_stream(s);
+            gap = 0;
         }
-        if (pinned(s->head, samples)) {
-            atomic_fetch_or_explicit(&s_missed, bit, memory_order_relaxed);
+        const unsigned next_head = gap ? (s->head + gap % PCM_CAPACITY) % PCM_CAPACITY : s->head;
+        if (pinned(next_head, samples)) {
+            atomic_fetch_add_explicit(&s_missed[path], missed + trimmed + samples, memory_order_relaxed);
             atomic_fetch_add_explicit(&s_contention, 1, memory_order_relaxed);
             xSemaphoreGive(s_mutex);
             return;
         }
+        s->dropped += missed + trimmed;
+        if (pause) { ++s->pauses; }
+        spectrum_segment_t *segment = append_segment(s, (uint32_t)gap);
         const size_t room = PCM_CAPACITY - s->head;
         const size_t first = samples < room ? samples : room;
         memcpy(s->pcm + s->head, pcm, first * sizeof(*pcm));
         memcpy(s->pcm, pcm + first, (samples - first) * sizeof(*pcm));
         s->head = (s->head + samples) % PCM_CAPACITY;
-        const unsigned filled = s->count + samples;
-        s->count = filled < PCM_CAPACITY ? filled : PCM_CAPACITY;
         s->next += samples;
         s->stamp = now;
+        segment->end = s->next;
+        segment->stamp = now;
     }
     xSemaphoreGive(s_mutex);
 }
@@ -178,10 +210,8 @@ size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, aud
     if (!start_locked()) { xSemaphoreGive(s_mutex); return 0; }
     const uint32_t now = now_ms();
     spectrum_state_t *s = s_state;
-    if (!leased(now)) {
-        use_path(s, SPECTRUM_AUTO);
-        memset(s->path_time, 0, sizeof(s->path_time));
-        s->selected = SPECTRUM_AUTO;
+    if (!leased(now) && atomic_load_explicit(&s_lease_until, memory_order_relaxed)) {
+        ++s->renewals;
     }
     atomic_store_explicit(&s_lease_until, now + LEASE_MS, memory_order_relaxed);
     if (select && path < SPECTRUM_PATH_COUNT) {
@@ -193,15 +223,29 @@ size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, aud
     for (audio_spectrum_path_t p = 1; p < SPECTRUM_PATH_COUNT; ++p) {
         if (path_active(s, p, now)) { active |= 1u << p; }
     }
-    /* Allow a delayed reader to drain the end of a short transmission. */
-    if (!active && s->path && now - s->stamp > LEASE_MS) { use_path(s, SPECTRUM_AUTO); }
-
-    const uint32_t oldest = s->next - s->count;
-    uint32_t first = after;
-    if (generation != s->generation || after > s->next || after < oldest) {
-        first = s->count > JOIN_SAMPLES ? s->next - JOIN_SAMPLES : oldest;
+    uint32_t oldest = s->next > PCM_CAPACITY ? s->next - PCM_CAPACITY : 0;
+    unsigned segment_index = (s->segment_head + SEGMENT_CAPACITY - s->segment_count) % SEGMENT_CAPACITY;
+    if (s->segment_count && oldest < s->segments[segment_index].first) {
+        oldest = s->segments[segment_index].first;
     }
-    unsigned count = s->next - first;
+    uint32_t first = after;
+    uint32_t flags = 0;
+    if (generation != s->generation || after > s->next || after < oldest) {
+        if (generation == s->generation && after < oldest) { flags |= REPLY_OVERRUN; }
+        first = s->next - oldest > JOIN_SAMPLES ? s->next - JOIN_SAMPLES : oldest;
+    }
+    uint32_t end = s->next, stamp = s->stamp;
+    unsigned count = 0;
+    for (unsigned i = 0; i < s->segment_count && first < s->next; ++i) {
+        const spectrum_segment_t *segment = &s->segments[segment_index];
+        segment_index = (segment_index + 1) % SEGMENT_CAPACITY;
+        if (segment->end <= first) { continue; }
+        if (first < segment->first) { first = segment->first; flags |= REPLY_GAP; }
+        end = segment->end;
+        stamp = segment->stamp;
+        count = end - first;
+        break;
+    }
     if (count > SPECTRUM_MAX_SAMPLES) { count = SPECTRUM_MAX_SAMPLES; }
     const unsigned index = (s->head + PCM_CAPACITY - (s->next - first)) % PCM_CAPACITY;
     spectrum_pin_t *pin = NULL;
@@ -217,11 +261,12 @@ size_t audio_spectrum_read(uint32_t after, uint32_t generation, bool select, aud
         }
         if (!pin) { xSemaphoreGive(s_mutex); return 0; }
     }
-    const uint32_t header[] = { s->boot, s->generation, active, now, s->stamp, first,
-        s->next, count, s->path, atomic_load_explicit(&s_contention, memory_order_relaxed) };
+    const uint32_t header[] = { s->boot, s->generation, active, now, stamp, first,
+        s->next, count, s->path, atomic_load_explicit(&s_contention, memory_order_relaxed),
+        end, flags, s->dropped, s->pauses, s->renewals };
     xSemaphoreGive(s_mutex);
 
-    memcpy(out, "APC\x01", 4);
+    memcpy(out, "APC\x02", 4);
     _Static_assert(4 + sizeof(header) == SPECTRUM_HEADER_BYTES, "PCM header size");
     for (unsigned i = 0; i < sizeof(header) / sizeof(header[0]); ++i) { le32(out + 4 * (i + 1), header[i]); }
     if (pin) {

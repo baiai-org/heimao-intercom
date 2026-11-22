@@ -51,7 +51,7 @@ int main(void)
     audio_spectrum_tap(SPECTRUM_RF_SPEAKER, block, 320);
     assert(!s_state);
     assert(audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    assert(!memcmp(reply, "APC\x01", 4) && !read_le32(reply + 36));
+    assert(!memcmp(reply, "APC\x02", 4) && !read_le32(reply + 36));
     for (audio_spectrum_path_t path = 1; path < SPECTRUM_PATH_COUNT; ++path) {
         audio_spectrum_tap(path, block, 320);
     }
@@ -69,7 +69,7 @@ int main(void)
         audio_spectrum_tap(SPECTRUM_MIC_RF, block, 320);
         if (frame % 10 == 0) { audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply); }
     }
-    assert(s_state->next == 28800 && s_state->count == PCM_CAPACITY);
+    assert(s_state->next == 28800 && s_state->segment_count == 1);
     /* Check a complete contiguous reply crossing physical ring wrap. */
     size_t len = audio_spectrum_read(23995, gen, false, SPECTRUM_AUTO, reply);
     assert(len == SPECTRUM_HEADER_BYTES + 2 * 4805);
@@ -80,21 +80,40 @@ int main(void)
     }
     audio_spectrum_read(10, gen, false, SPECTRUM_AUTO, reply);
     assert(read_le32(reply + 24) == 28800 - JOIN_SAMPLES);
+    assert(read_le32(reply + 48) == REPLY_OVERRUN);
     assert(audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    /* A missed tap creates a discontinuity instead of joining unrelated samples. */
+    /* A miss needs a new FFT segment, while unread older PCM stays available. */
     assert(xSemaphoreTake(s_mutex, 0));
+    clock_ms += 20;
     audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
     xSemaphoreGive(s_mutex);
     clock_ms += 20;
     audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    audio_spectrum_read(27840, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 8) == gen && read_le32(reply + 32) == 960 &&
+           read_le32(reply + 44) == 28800 && read_le32(reply + 48) == 0);
     audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply);
-    assert(read_le32(reply + 8) != gen && read_le32(reply + 32) == 320 && read_le32(reply + 40) == 1);
-    clock_ms += 1500;
+    assert(read_le32(reply + 24) == 29120 && read_le32(reply + 32) == 320 &&
+           read_le32(reply + 40) == 1 && read_le32(reply + 48) == REPLY_GAP && read_le32(reply + 52) == 320);
+    for (unsigned i = 0; i < 60; ++i) {
+        clock_ms += 20;
+        audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    }
+    audio_spectrum_read(29440, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 8) == gen && read_le32(reply + 24) == 29440 &&
+           read_le32(reply + 28) == 48640 && read_le32(reply + 32) == SPECTRUM_MAX_SAMPLES);
+    clock_ms += 2500;
     audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
-    assert(s_state->next == 320);
-    audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply);
-    assert(read_le32(reply + 36) == SPECTRUM_AUTO);
-    puts("PASS: all routes, priority and manual selection, exact PCM, wrap, missed taps and subscription expiry");
+    assert(s_state->next == 48640);
+    audio_spectrum_read(43520, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 36) == SPECTRUM_MQTT_RF && read_le32(reply + 32) == 5120 &&
+           read_le32(reply + 60) == 1);
+    clock_ms += 20;
+    audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
+    audio_spectrum_read(48640, gen, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 8) == gen && read_le32(reply + 48) & REPLY_OVERRUN);
+    assert(read_le32(reply + 56) == 1);
+    puts("PASS: routing, ring wrap, 960 samples preserved across a 20 ms miss, 1200 ms catch-up and lease recovery");
     return 0;
 }
 """

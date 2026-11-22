@@ -63,7 +63,8 @@
         return Math.round(255 * Math.min(1, Math.max(0, (db - minimumDb) / (maximumDb - minimumDb))));
       });
     }
-    const headerBytes = 44;
+    const legacyHeaderBytes = 44;
+    const pcmHeaderBytes = 64;
     const maxSamples = 5120;
     const window = new Int16Array(fftSize);
     let fill = 0;
@@ -91,8 +92,12 @@
     }
 
     function decode(buffer, current, received, rtt) {
-      if (buffer.byteLength < headerBytes) throw new Error('format');
+      if (buffer.byteLength < legacyHeaderBytes) throw new Error('format');
       const view = new DataView(buffer);
+      const version = view.getUint32(0, true);
+      const extended = version === 0x02435041;
+      const headerBytes = extended ? pcmHeaderBytes : legacyHeaderBytes;
+      if ((!extended && version !== 0x01435041) || buffer.byteLength < headerBytes) throw new Error('format');
       const boot = view.getUint32(4, true);
       const generation = view.getUint32(8, true);
       const mask = view.getUint32(12, true);
@@ -103,13 +108,16 @@
       const count = view.getUint32(32, true);
       const path = view.getUint32(36, true);
       const contention = view.getUint32(40, true);
-      if (view.getUint32(0, true) !== 0x01435041 || !generation || path > 16 ||
-          count > maxSamples || first + count > latest || (count && !path) ||
+      const segmentEnd = extended ? view.getUint32(44, true) : latest;
+      const flags = extended ? view.getUint32(48, true) : 0;
+      if (!generation || path > 16 || segmentEnd > latest ||
+          count > maxSamples || first + count > segmentEnd || (count && !path) ||
           buffer.byteLength !== headerBytes + count * 2) throw new Error('format');
 
       const reboot = current.boot !== boot;
       const restart = reboot || current.generation !== generation;
-      const gap = !restart && first !== current.after;
+      const previous = current.after;
+      const gap = !restart && first !== previous;
       const elapsed = reboot || current.boardNow === null ? now : current.boardElapsed + ((now - current.boardNow) >>> 0);
       current.boardNow = now;
       current.boardElapsed = elapsed;
@@ -124,33 +132,31 @@
         fill = 0;
         current.anchor = null;
       }
-      let clockGap = false;
+      let clockAdjusted = false;
       if (count) {
-        const measured = elapsed + current.clockOffset - ((now - stamp) >>> 0) - latest / (sampleRate / 1000);
+        const measured = elapsed + current.clockOffset - ((now - stamp) >>> 0) - segmentEnd / (sampleRate / 1000);
         if (current.anchor === null) current.anchor = measured;
-        else {
-          const drift = measured - current.anchor;
-          // A source can pause briefly without ending its route. Move forward
-          // if those gaps accumulate, preserving the order of existing rows.
-          if (drift > 80) {
-            current.anchor = measured;
-            clockGap = true;
-          } else if (drift > 8) current.anchor += Math.min(4, drift / 8);
+        else if (Math.abs(measured - current.anchor) > 8) {
+          current.anchor += Math.max(-4, Math.min(4, (measured - current.anchor) / 8));
+          clockAdjusted = true;
         }
       }
       const pcm = new Int16Array(buffer, headerBytes, count);
       const started = performance.now();
       const output = count ? rows(pcm, current.anchor + first / (sampleRate / 1000), first) : [];
       const fftMs = output.length ? (performance.now() - started) / output.length : 0;
-      const reset = reboot || (current.path && path && current.path !== path);
       current.boot = boot;
       current.generation = generation;
-      if (path) current.path = path;
       current.after = first + count;
       current.selection = null;
-      reply(current, output, {boot, generation, mask, path, gap: clockGap || gap || (restart && !reset && !!count),
+      reply(current, output, {boot, generation, mask, path, clockAdjusted, gap: gap || !!(flags & 3),
+        missing: gap && first > previous ? first - previous : 0,
         samples: count, rtt, fftMs, contention,
-        sourceLag: count ? ((now - stamp) >>> 0) + (latest - first - count) / (sampleRate / 1000) : 0});
+        dropped: extended ? view.getUint32(52, true) : 0,
+        pauses: extended ? view.getUint32(56, true) : 0,
+        renewals: extended ? view.getUint32(60, true) : 0,
+        overrun: !!(flags & 1),
+        sourceLag: count ? ((now - stamp) >>> 0) + (segmentEnd - first - count) / (sampleRate / 1000) : 0});
       return {mask, behind: latest - current.after};
     }
 
@@ -172,13 +178,12 @@
         const {mask, behind} = decode(buffer, current, performance.timeOrigin + performance.now(), elapsed);
         current.errors = 0;
         current.lastGood = performance.now();
-        interval = behind > hop ? 0 : mask ? 100 : 240;
+        interval = behind ? 0 : mask ? 100 : 240;
       } catch (error) {
         if (session !== current) return;
         const reason = error.message === 'format' || error.message === 'busy' ? error.message : 'network';
-        if (++current.errors > 1 && performance.now() - current.lastGood >= 1000) {
-          reply(current, [], {problem: reason});
-        }
+        const persistent = ++current.errors > 1 && performance.now() - current.lastGood >= 1000;
+        reply(current, [], {fault: reason, problem: persistent ? reason : null});
         interval = Math.min(800, 200 * current.errors);
       } finally {
         clearTimeout(timeout);
@@ -306,7 +311,7 @@
 
   let lastRow = null;
 
-  function addRow(bins, at, sampleEnd, stream) {
+  function addRow(bins, at, sampleEnd, stream, sourceInfo) {
     let step = Math.round(at / rowMs);
     if (lastRow?.stream === stream) {
       if (sampleEnd <= lastRow.sampleEnd) return false;
@@ -316,7 +321,8 @@
     if (history[index]?.step >= step || (lastRow && step <= lastRow.step)) return false;
     let peak = 0;
     for (const value of bins) peak = Math.max(peak, value);
-    const row = {bins, step, at: step * rowMs, sampleEnd, stream, peak, index};
+    const boundary = !!lastRow && lastRow.sourceInfo?.key !== sourceInfo?.key;
+    const row = {bins, step, at: step * rowMs, sampleEnd, stream, peak, index, sourceInfo, boundary};
     history[index] = row;
     lastRow = row;
     return true;
@@ -378,10 +384,12 @@
     event.preventDefault();
     mesh = false;
     ++stats.contextLosses;
+    record('webgl-lost');
     redraw();
   });
   layer.addEventListener('webglcontextrestored', () => {
     mesh = null;
+    record('webgl-restored');
     redraw();
   });
 
@@ -645,12 +653,20 @@
   }
 
   function timeLines(draw) {
-    const offset = ((playhead % 500) + 500) % 500;
+    const offset = ((gridTime % 500) + 500) % 500;
     ctx.strokeStyle = 'rgba(117, 166, 200, 0.21)';
     ctx.lineWidth = 1;
     for (let ms = offset; ms < historyCount * rowMs; ms += 500) {
       const age = ms / (historyCount * rowMs);
       draw(age, !!occupied[Math.floor(ms / rowMs)]);
+    }
+  }
+
+  function sourceBoundaries(draw) {
+    ctx.strokeStyle = 'rgba(237, 175, 95, 0.75)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < historyCount; ++i) {
+      if (occupied[i]?.boundary) draw(historyAge(i));
     }
   }
 
@@ -686,6 +702,10 @@
       const right = project(plot, 1, age);
       if (!hasData) segment(...left, ...right);
       segment(...right, right[0] + 3, right[1]);
+    });
+    sourceBoundaries(age => {
+      const right = project(plot, 1, age);
+      segment(...right, right[0] + 6, right[1]);
     });
     if (front >= 0) drawRidges(plot, prepared ? new Set(geometry.ridges) : null);
 
@@ -737,6 +757,8 @@
     ctx.restore();
     timeLines(age => segment(plot.left + plot.span, top + age * depth,
       plot.left + plot.span + 3, top + age * depth));
+    sourceBoundaries(age => segment(plot.left + plot.span, top + age * depth,
+      plot.left + plot.span + 6, top + age * depth));
     ctx.strokeStyle = gridColor;
     ctx.strokeRect(plot.left, top, plot.span, depth);
     ctx.fillStyle = textColor;
@@ -785,10 +807,21 @@
   let animation = 0;
   let idleTimer = 0;
   let lastDraw = 0;
+  let lastCommit = 0;
   let playhead = -Infinity;
-  let boardBoot = null;
-  let boardPath = 0;
-  let lead = 185;
+  let gridTime = 0;
+  let lead = 220;
+  let mask = 0;
+  let radioKnown = false;
+  let captureActive = false;
+  let acceptedSource = null;
+  let presentedSource = null;
+  let candidate = null;
+  let micTurn = 0;
+  let transition = '';
+  let transitionStarted = 0;
+  let holdStarted = null;
+  const events = [];
   let forceDraw = true;
   let retries = 0;
   let workerRetry = 0;
@@ -796,15 +829,24 @@
   let streamProblem = '';
   let drawProblem = false;
   const stats = {samples:0, rows:0, drawn:0, idleDrawn:0, gaps:0, contention:0, fftMs:0, rtt:0, sourceLag:0,
-    networkErrors:0, busyErrors:0, formatErrors:0, drawErrors:0, contextLosses:0, workerErrors:0};
+    networkErrors:0, busyErrors:0, formatErrors:0, drawErrors:0, contextLosses:0, workerErrors:0,
+    missingSamples:0, boardDropped:0, boardPauses:0, leaseRenewals:0, overruns:0, clockAdjustments:0,
+    sourceChanges:0, waits:0, maxWaitMs:0, maxDrawIntervalMs:0};
+
+  function record(type, detail = {}) {
+    events.push({type, at: Math.round(performance.now()), ...detail});
+    if (events.length > 64) events.shift();
+  }
 
   function visible() {
     return onScreen && !document.hidden && root.getClientRects().length > 0;
   }
 
-  function updateProblem() {
-    const message = streamProblem || (drawProblem ? '频谱绘制异常' : '');
-    errorLabel.textContent = message;
+  function updateProblem(now = performance.now()) {
+    const waiting = holdStarted !== null && now - holdStarted >= 100;
+    const message = streamProblem || (drawProblem ? '频谱绘制异常' : '') ||
+      transition || (waiting ? '频谱补帧中' : '');
+    if (errorLabel.textContent !== message) errorLabel.textContent = message;
     errorLabel.hidden = !message;
   }
 
@@ -818,9 +860,53 @@
       pathSelect.replaceChildren(new Option('自动跟随', '0'), ...options);
       pathSelect.hidden = options.length < 2;
     }
-    if (document.activeElement !== pathSelect) pathSelect.value = String(path || 0);
+    if (document.activeElement !== pathSelect && pathSelect.value !== String(path || 0)) {
+      pathSelect.value = String(path || 0);
+    }
     sourceLabel.hidden = !pathSelect.hidden;
-    if (!sourceLabel.hidden) sourceLabel.textContent = message || pathNames[path] || '等待语音';
+    const label = message || pathNames[path] || '等待语音';
+    if (sourceLabel.textContent !== label) sourceLabel.textContent = label;
+  }
+
+  function publishSource(now) {
+    const row = occupied.find(Boolean);
+    const info = row?.sourceInfo;
+    if (info && info.key !== presentedSource?.key) {
+      if (presentedSource) {
+        ++stats.sourceChanges;
+        record('source', {from:presentedSource.key, to:info.key});
+      }
+      presentedSource = info;
+    }
+    if (transition === '正在切换音源' && info?.key === acceptedSource &&
+        row.at >= transitionStarted - rowMs) transition = '';
+    const idle = mode === 'radio' && !captureActive && !transition &&
+      lastRow && now - lastRow.at > lead + 250;
+    if (idle || (!lastRow && mode === 'radio' && !captureActive && radioKnown)) {
+      source(0, 0, '守听中 · 暂无语音');
+    } else {
+      const path = presentedSource?.path || 0;
+      source(mode === 'radio' && mask ? mask | (path ? 1 << path : 0) : 0,
+        path, presentedSource?.message);
+    }
+  }
+
+  function advance(now, elapsed) {
+    gridTime = now - lead;
+    let target = gridTime;
+    const expected = mode === 'microphone' || (mode === 'radio' && captureActive);
+    const waiting = expected && lastRow && target - lastRow.at >= rowMs;
+    if (waiting) {
+      if (holdStarted === null) { holdStarted = now; ++stats.waits; }
+      stats.maxWaitMs = Math.max(stats.maxWaitMs, Math.round(now - holdStarted));
+      if (now - holdStarted < 350) target = lastRow.at + rowMs / 2;
+    } else if (holdStarted !== null) {
+      const duration = Math.round(now - holdStarted);
+      if (duration >= 40) record('front-wait', {ms:duration});
+      holdStarted = null;
+    }
+    playhead = Math.max(playhead, Math.min(target, playhead + Math.max(elapsed * 2, rowMs)));
+    if (!Number.isFinite(playhead)) playhead = target;
   }
 
   function paint() {
@@ -830,17 +916,29 @@
     const live = lastRow && now - lastRow.at < lead + 350;
     const interval = canvas.clientWidth < 600 || mesh === false ? 32 : 15;
     if (forceDraw || now - lastDraw >= (live ? interval : 44)) {
+      const elapsed = now - lastDraw;
       forceDraw = false;
       lastDraw = now;
-      playhead = Math.max(playhead, now - lead);
+      advance(now, elapsed);
       try {
         if (render(playhead)) {
+          if (lastCommit && live) {
+            const dt = Math.round(now - lastCommit);
+            stats.maxDrawIntervalMs = Math.max(stats.maxDrawIntervalMs, dt);
+            if (dt >= 85) record('draw-interval', {ms:dt});
+          }
+          lastCommit = now;
           ++stats.drawn;
           if (!live) ++stats.idleDrawn;
-          if (drawProblem) { drawProblem = false; updateProblem(); }
+          drawProblem = false;
+          publishSource(now);
+          updateProblem(now);
         }
       } catch (error) {
-        if (!drawProblem) console.warn('频谱绘制异常', error);
+        if (!drawProblem) {
+          console.warn('频谱绘制异常', error);
+          record('draw-error');
+        }
         drawProblem = true;
         ++stats.drawErrors;
         updateProblem();
@@ -860,52 +958,70 @@
     if (!animation && visible()) animation = requestAnimationFrame(paint);
   }
 
-  function clearHistory() {
-    history.fill(null);
-    lastRow = null;
-    redraw();
-  }
-
   function received({data}) {
     if (data.epoch !== epoch || !watching || !visible()) return;
     retries = 0;
-    if (data.problem) {
-      ++stats[data.problem + 'Errors'];
-      streamProblem = {network:'频谱取流超时', busy:'板端频谱暂忙', format:'频谱帧格式异常'}[data.problem];
-      updateProblem();
+    if (data.fault) {
+      ++stats[data.fault + 'Errors'];
+      record('fetch', {reason:data.fault});
+      if (data.problem) {
+        streamProblem = {network:'频谱取流超时', busy:'板端频谱暂忙', format:'频谱帧格式异常'}[data.problem];
+        updateProblem();
+      }
       return;
     }
     if (data.boot !== undefined) {
-      if ((boardBoot !== null && boardBoot !== data.boot) || (boardPath && data.path && boardPath !== data.path)) {
-        clearHistory();
-        boardPath = 0;
-      }
-      boardBoot = data.boot;
-      if (data.path) boardPath = data.path;
-      source(data.mask, data.mask ? data.path : 0, data.mask ? '' : '守听中 · 暂无语音');
+      radioKnown = true;
+      mask = data.mask;
+      captureActive = !!mask || !!data.samples;
+      if (!captureActive && transition === '正在切换音源') transition = '';
     }
     if (data.rtt !== undefined) {
       stats.rtt = data.rtt;
       stats.contention = data.contention;
       stats.sourceLag = data.sourceLag;
+      stats.boardDropped = data.dropped;
+      stats.boardPauses = data.pauses;
+      stats.leaseRenewals = data.renewals;
+      if (data.rtt >= 250) record('fetch-delay', {ms:Math.round(data.rtt)});
       if (data.rows.length) {
         stats.fftMs = data.fftMs;
-        // Move the playout delay gradually so normal RTT jitter does not shift the time grid.
-        const target = Math.max(155, Math.min(320, 119 + data.rtt * 0.8));
-        lead += Math.max(-2, Math.min(4, target - lead));
+        const target = Math.max(200, Math.min(280, 155 + data.rtt * 0.8));
+        const queued = lastRow ? lastRow.at - playhead : lead;
+        lead += Math.max(-2, Math.min(4, target + (queued < rowMs ? 20 : 0) - lead));
       }
     }
-    if (data.gap) ++stats.gaps;
+    if (data.clockAdjusted) ++stats.clockAdjustments;
+    if (data.gap) {
+      ++stats.gaps;
+      stats.missingSamples += data.missing;
+      if (data.overrun) ++stats.overruns;
+      record('pcm-gap', {samples:data.missing, overrun:data.overrun});
+    }
     if (data.samples) stats.samples += data.samples;
     if (streamProblem) { streamProblem = ''; updateProblem(); }
-    const stream = data.boot === undefined ? 'microphone' : [data.boot, data.path, data.generation].join('/');
-    for (const row of data.rows) {
+    if (data.boot !== undefined && !data.path) { candidate = null; return; }
+    const key = data.boot === undefined ? 'mic/' + micTurn : data.boot + '/' + data.path;
+    const stream = key + '/' + (data.generation ?? data.epoch);
+    const info = {key, path:data.path || 0, message:data.boot === undefined ? '浏览器麦克风预览' : ''};
+    let rows = data.rows;
+    if (key !== acceptedSource) {
+      if (candidate?.stream !== stream) candidate = {stream, samples:0, rows:[]};
+      candidate.samples += data.samples || 0;
+      candidate.rows.push(...rows);
+      if (!candidate.rows.length || (acceptedSource && data.boot !== undefined &&
+          Number(selection) !== data.path && candidate.samples < 2560)) return;
+      rows = candidate.rows;
+      acceptedSource = key;
+    }
+    candidate = null;
+    for (const row of rows) {
       const at = row.at - performance.timeOrigin;
-      if (addRow(new Uint8Array(row.buffer), at, row.sampleEnd, stream)) {
+      if (addRow(new Uint8Array(row.buffer), at, row.sampleEnd, stream, info)) {
         ++stats.rows;
       }
     }
-    if (data.rows.length) redraw(false);
+    if (rows.length) redraw(false);
   }
 
   function ensureWorker() {
@@ -944,6 +1060,8 @@
       clearTimeout(idleTimer);
       cancelAnimationFrame(animation);
       idleTimer = animation = 0;
+      lastCommit = 0;
+      holdStarted = null;
       return;
     }
     if (mode === 'releasing') { stop(); redraw(); return; }
@@ -961,12 +1079,14 @@
       worker.postMessage({type:'pcm', epoch, buffer, first, at:performance.timeOrigin + stamp}, [buffer]);
     },
     microphoneReady() { return mode === 'microphone' && watching && visible(); },
-    diagnostics() { return {...stats}; },
+    diagnostics() { return {...stats, events:events.slice()}; },
     beginMicrophone() {
       stop();
       mode = 'microphone';
-      clearHistory();
-      source(0, 0, '浏览器麦克风预览');
+      ++micTurn;
+      candidate = null;
+      transition = '正在切换音源';
+      transitionStarted = performance.now();
       sync();
     },
     releaseMicrophone(confirm) {
@@ -974,13 +1094,16 @@
       stop();
       mode = 'releasing';
       const token = ++epoch;
-      source(0, 0, '正在确认松键');
+      candidate = null;
+      transition = '正在确认松键';
+      redraw();
       void Promise.resolve(confirm).then(ok => {
         if (epoch !== token) return;
-        if (!ok) { source(0, 0, '等待松键确认'); return; }
-        clearHistory();
+        if (!ok) { transition = '等待松键确认'; redraw(); return; }
         mode = 'radio';
-        source(0, 0);
+        captureActive = radioKnown = false;
+        transition = '正在切换音源';
+        transitionStarted = performance.now();
         sync();
       });
     }

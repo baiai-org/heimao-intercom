@@ -30,17 +30,18 @@ vm.runInNewContext(source, {
   }
 });
 
-function packet(first, count, generation = 1, pathId = 1) {
-  const buffer = new ArrayBuffer(44 + 2 * count);
+function packet(first, count, generation = 1, pathId = 1, flags = 0) {
+  const buffer = new ArrayBuffer(64 + 2 * count);
   const view = new DataView(buffer);
-  const fields = [0x01435041, 1, generation, 1 << pathId, clock - 100, clock - 100,
-    first, first + count, count, pathId, 0];
+  const stamp = 800 + Math.floor((first + count) / 16);
+  const fields = [0x02435041, 1, generation, 1 << pathId, Math.max(stamp, clock - 100), stamp,
+    first, first + count, count, pathId, 0, first + count, flags, 0, 0, 0];
   fields.forEach((value, index) => view.setUint32(4 * index, value, true));
   for (let i = 0; i < count; i++) {
     const t = (i + first) / 16000;
     const pcm = 6000 * Math.sin(2 * Math.PI * 1000 * t) +
                 4200 * Math.sin(2 * Math.PI * 1046.875 * t);
-    view.setInt16(44 + 2 * i, Math.round(pcm), true);
+    view.setInt16(64 + 2 * i, Math.round(pcm), true);
   }
   return buffer;
 }
@@ -74,14 +75,17 @@ async function poll(buffer) {
     for (const peak of [112,118]) assert(bins[peak] > Math.max(bins[peak-1], bins[peak+1]));
   }
   assert.equal(requests.at(-1).searchParams.get('after'), '16000');
-  const seen = replies.length;
   await poll(new ArrayBuffer(12));
-  assert.equal(replies.length, seen, 'isolated malformed response changed status');
+  assert.equal(replies.at(-1).fault, 'format');
+  assert.equal(replies.at(-1).problem, null, 'isolated malformed response changed visible status');
   await poll(packet(17600, 1600));
   assert.equal(requests.at(-1).searchParams.get('after'), '17600');
-  await poll(packet(19600, 1280));
+  await poll(packet(19600, 1280, 1, 1, 2));
   assert(replies.at(-1).gap);
+  assert.equal(replies.at(-1).missing, 400);
   assert.equal(replies.at(-1).rows.length, 0);
+  await poll(packet(20880, 768));
+  assert.equal(replies.at(-1).rows[0].sampleEnd, 21648);
   await poll(packet(0, 1000, 2, 2));
   assert.equal(replies.at(-1).path, 2);
   assert.equal(replies.at(-1).generation, 2);
