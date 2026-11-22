@@ -51,7 +51,15 @@ int main(void)
     audio_spectrum_tap(SPECTRUM_RF_SPEAKER, block, 320);
     assert(!s_state);
     assert(audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    assert(!memcmp(reply, "APC\x02", 4) && !read_le32(reply + 36));
+    assert(!memcmp(reply, "APC\x03", 4) && !read_le32(reply + 36));
+    clock_ms += 20;
+    audio_spectrum_tap(SPECTRUM_RF_SPEAKER, block, 320);
+    clock_ms += 20;
+    audio_spectrum_tap_session(SPECTRUM_RF_MQTT, 42, block, 320);
+    audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply);
+    assert(read_le32(reply + 36) == SPECTRUM_RF_MQTT);
+    assert(read_le32(reply + 64) == 42 && read_le32(reply + 84) == 1);
+    clock_ms += 250;
     for (audio_spectrum_path_t path = 1; path < SPECTRUM_PATH_COUNT; ++path) {
         audio_spectrum_tap(path, block, 320);
     }
@@ -69,6 +77,7 @@ int main(void)
         audio_spectrum_tap(SPECTRUM_MIC_RF, block, 320);
         if (frame % 10 == 0) { audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply); }
     }
+    audio_spectrum_read(0, 0, false, SPECTRUM_AUTO, reply);
     assert(s_state->next == 28800 && s_state->segment_count == 1);
     /* Check a complete contiguous reply crossing physical ring wrap. */
     size_t len = audio_spectrum_read(23995, gen, false, SPECTRUM_AUTO, reply);
@@ -82,11 +91,12 @@ int main(void)
     assert(read_le32(reply + 24) == 28800 - JOIN_SAMPLES);
     assert(read_le32(reply + 48) == REPLY_OVERRUN);
     assert(audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply) == SPECTRUM_HEADER_BYTES);
-    /* A miss needs a new FFT segment, while unread older PCM stays available. */
-    assert(xSemaphoreTake(s_mutex, 0));
+    /* Queue overflow produces one explicit gap without losing preceding PCM. */
+    const unsigned tail = atomic_load_explicit(&s_tap_tail, memory_order_relaxed);
+    atomic_store_explicit(&s_tap_head, tail + TAP_SLOT_COUNT, memory_order_relaxed);
     clock_ms += 20;
     audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
-    xSemaphoreGive(s_mutex);
+    atomic_store_explicit(&s_tap_head, tail, memory_order_relaxed);
     clock_ms += 20;
     audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);
     audio_spectrum_read(27840, gen, false, SPECTRUM_AUTO, reply);
@@ -94,7 +104,9 @@ int main(void)
            read_le32(reply + 44) == 28800 && read_le32(reply + 48) == 0);
     audio_spectrum_read(28800, gen, false, SPECTRUM_AUTO, reply);
     assert(read_le32(reply + 24) == 29120 && read_le32(reply + 32) == 320 &&
-           read_le32(reply + 40) == 1 && read_le32(reply + 48) == REPLY_GAP && read_le32(reply + 52) == 320);
+           read_le32(reply + 40) == 1 && read_le32(reply + 48) == REPLY_GAP &&
+           read_le32(reply + 52) == 320 && read_le32(reply + 76) == 320 &&
+           read_le32(reply + 80) == 1);
     for (unsigned i = 0; i < 60; ++i) {
         clock_ms += 20;
         audio_spectrum_tap(SPECTRUM_MQTT_RF, block, 320);

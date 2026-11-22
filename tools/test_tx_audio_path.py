@@ -16,6 +16,9 @@ ENV = r'''
 #include <assert.h>
 #include <stdint.h>
 #define audio_spectrum_tap(...) ((void)0)
+#define audio_spectrum_tap_session(...) ((void)0)
+typedef int audio_spectrum_path_t;
+enum { SPECTRUM_RF_P2P = 3, SPECTRUM_RF_MQTT = 4 };
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

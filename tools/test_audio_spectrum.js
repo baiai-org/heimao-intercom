@@ -30,18 +30,20 @@ vm.runInNewContext(source, {
   }
 });
 
-function packet(first, count, generation = 1, pathId = 1, flags = 0) {
-  const buffer = new ArrayBuffer(64 + 2 * count);
+function packet(first, count, generation = 1, pathId = 1, flags = 0,
+                session = 0, gap = [0, 0, 0]) {
+  const buffer = new ArrayBuffer(96 + 2 * count);
   const view = new DataView(buffer);
   const stamp = 800 + Math.floor((first + count) / 16);
-  const fields = [0x02435041, 1, generation, 1 << pathId, Math.max(stamp, clock - 100), stamp,
-    first, first + count, count, pathId, 0, first + count, flags, 0, 0, 0];
+  const fields = [0x03435041, 1, generation, 1 << pathId, Math.max(stamp, clock - 100), stamp,
+    first, first + count, count, pathId, 0, first + count, flags, 0, 0, 0,
+    session, gap[0], gap[1], gap[2], gap[2] ? 1 : 0, session ? 1 : 0, 0];
   fields.forEach((value, index) => view.setUint32(4 * index, value, true));
   for (let i = 0; i < count; i++) {
     const t = (i + first) / 16000;
     const pcm = 6000 * Math.sin(2 * Math.PI * 1000 * t) +
                 4200 * Math.sin(2 * Math.PI * 1046.875 * t);
-    view.setInt16(64 + 2 * i, Math.round(pcm), true);
+    view.setInt16(96 + 2 * i, Math.round(pcm), true);
   }
   return buffer;
 }
@@ -80,9 +82,13 @@ async function poll(buffer) {
   assert.equal(replies.at(-1).problem, null, 'isolated malformed response changed visible status');
   await poll(packet(17600, 1600));
   assert.equal(requests.at(-1).searchParams.get('after'), '17600');
-  await poll(packet(19600, 1280, 1, 1, 2));
+  await poll(packet(19600, 1280, 1, 1, 10, 77, [19600, 20000, 400]));
   assert(replies.at(-1).gap);
   assert.equal(replies.at(-1).missing, 400);
+  assert.equal(replies.at(-1).bridgeSession, 77);
+  assert.equal(replies.at(-1).gapFirst, 19600);
+  assert.equal(replies.at(-1).gapEnd, 20000);
+  assert.equal(replies.at(-1).gapReason, 1);
   assert.equal(replies.at(-1).rows.length, 0);
   await poll(packet(20880, 768));
   assert.equal(replies.at(-1).rows[0].sampleEnd, 21648);

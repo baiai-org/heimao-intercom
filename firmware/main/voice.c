@@ -365,6 +365,8 @@ static bool s_net_feeding, s_net_rf_required, s_net_rf_keyed, s_net_write_pendin
 static bool s_net_short_cushion, s_net_resume_pending;
 static uint64_t s_net_sender_epoch;
 static uint16_t s_net_first_seq;
+static uint32_t s_net_spectrum_session;
+static volatile uint32_t s_last_bridge_network_session;
 static voice_network_playout_t s_net_playout;
 static voice_sdr_playout_t s_sdr_playout;
 static bool s_sdr_refill, s_sdr_resume_pending, s_sdr_pcm_draining;
@@ -1709,10 +1711,13 @@ static void monitor_task(void *arg)
             const int64_t write_start = esp_timer_get_time();
             const int64_t write_deadline = net_tailing ? write_start + 80000 : denoise.close_us;
             audio_spectrum_path_t spectrum_path = SPECTRUM_AUTO;
+            uint32_t spectrum_session = 0;
             if (injected && ptt_owner() == PTT_OWNER_SDR && ptt_rf_keying_enabled()) {
                 spectrum_path = SPECTRUM_REMOTE_RF;
             } else if (injected && netcom_mode() != NETCOM_MODE_LOCAL) {
                 const bool on_rf = ptt_bridge_keyed();
+                spectrum_session = net_tailing ? voice_bridge_network_session() :
+                    voice_bridge_last_network_session();
                 spectrum_path = netcom_mode() == NETCOM_MODE_NETP2P ?
                     (on_rf ? SPECTRUM_P2P_RF : SPECTRUM_P2P_SPEAKER) :
                     (on_rf ? SPECTRUM_MQTT_RF : SPECTRUM_MQTT_SPEAKER);
@@ -1722,7 +1727,7 @@ static void monitor_task(void *arg)
             const esp_err_t write_err = write_deadline ?
                 audio_i2s_write_until(out, (size_t)m, write_deadline) : audio_i2s_write(out, (size_t)m);
             if (write_err == ESP_OK && spectrum_path != SPECTRUM_AUTO) {
-                audio_spectrum_tap(spectrum_path, out, (size_t)m);
+                audio_spectrum_tap_session(spectrum_path, spectrum_session, out, (size_t)m);
             }
             if (net_tailing && write_err != ESP_OK) { voice_net_tail_stop(); }
             if ((denoise.close_us && denoise.finished && !denoise.dma_left &&
@@ -2818,6 +2823,9 @@ void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_
     if (!feeding || !s_net_feeding || s_net_sender_epoch != sender_epoch || s_net_first_seq != first_seq) {
         s_net_short_cushion = s_net_resume_pending = false;
     }
+    if (feeding && (!s_net_feeding || s_net_sender_epoch != sender_epoch || s_net_first_seq != first_seq)) {
+        if (++s_net_spectrum_session == 0) { ++s_net_spectrum_session; }
+    }
     s_net_sender_epoch = sender_epoch;
     s_net_first_seq = first_seq;
     s_net_rf_required = rf_required;
@@ -2827,6 +2835,19 @@ void voice_bridge_network_state(bool feeding, bool rf_required, uint64_t sender_
     }
     s_net_feeding = feeding;
     ptt_control_unlock();
+}
+
+uint32_t voice_bridge_network_session(void)
+{
+    ptt_control_lock();
+    const uint32_t session = s_net_spectrum_session;
+    ptt_control_unlock();
+    return session;
+}
+
+uint32_t voice_bridge_last_network_session(void)
+{
+    return s_last_bridge_network_session;
 }
 
 void voice_bridge_network_keyed(bool keyed)
@@ -3214,6 +3235,7 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     const bool browser = s_inject_owner == PTT_OWNER_SDR && ptt_owned(PTT_OWNER_SDR, s_inject_token);
     const bool network = s_inject_owner == PTT_OWNER_NETWORK;
     s_last_bridge_tx_processed = false;
+    s_last_bridge_network_session = 0;
     const size_t lvl = voice_bridge_level();
     if (network && !voice_bridge_network_ready()) {
         ptt_control_unlock(); return 0;
@@ -3233,6 +3255,7 @@ size_t voice_bridge_play(int16_t *out, size_t n)
     if (network && !s_net_feeding && lvl > 0 && lvl < 2) {
         const size_t got = voice_bridge_take(out, n);
         s_net_write_pending = got != 0;
+        if (got) { s_last_bridge_network_session = s_net_spectrum_session; }
         ptt_control_unlock(); return got;
     }
     if (network && !s_net_feeding && lvl >= 2) { s_inj_primed = true; }
@@ -3254,7 +3277,10 @@ size_t voice_bridge_play(int16_t *out, size_t n)
         got = voice_bridge_take_resampled(out, n, ratio);
         if (got > 0) {
             s_last_bridge_tx_processed = browser && s_inject_tx_processed;
-            if (network) { s_net_write_pending = true; }
+            if (network) {
+                s_net_write_pending = true;
+                s_last_bridge_network_session = s_net_spectrum_session;
+            }
             if (browser) { s_sdr_pcm_write_pending = got; }
         }
         if (lvl > target + 2600 || lvl + 1200 < target) { ++s_bridge_trim; }

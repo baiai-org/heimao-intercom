@@ -614,7 +614,9 @@ static const char *bridge_rx_interrupt_reason(void)
 static bool bridge_rx_submit_speech_locked(const int16_t *pcm, size_t n)
 {
     if (netcom_tx_sample_until(pcm, n, false, s_rx_window.release_us)) {
-        audio_spectrum_tap(s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT, pcm, n);
+        audio_spectrum_tap_session(
+            s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT,
+            s_rx_generation, pcm, n);
         s_rx.submitted_samples += (uint32_t)n;
         return true;
     }
@@ -658,7 +660,9 @@ static void bridge_rx_tail_step_locked(int64_t now)
         return;
     }
     if (netcom_tx_sample_until(tail, n, true, s_rx_window.release_us)) {
-        audio_spectrum_tap(s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT, tail, n);
+        audio_spectrum_tap_session(
+            s_rx_mode == NETCOM_MODE_NETP2P ? SPECTRUM_RF_P2P : SPECTRUM_RF_MQTT,
+            s_rx_generation, tail, n);
         s_rx_tail_pos += n;
         const int64_t interval = (int64_t)n * 1000000 / AUDIO_SAMPLE_RATE_HZ;
         const int64_t next = s_rx_tail_next_us + interval;

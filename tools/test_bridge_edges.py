@@ -100,6 +100,9 @@ HARNESS = r'''
 #include "bridge.c"
 void audio_spectrum_tap(audio_spectrum_path_t path, const int16_t *pcm, size_t n)
 { (void)path; (void)pcm; (void)n; }
+void audio_spectrum_tap_session(audio_spectrum_path_t path, uint32_t session,
+                                const int16_t *pcm, size_t n)
+{ (void)path; (void)session; (void)pcm; (void)n; }
 static unsigned samples, ends, tunes, releases;
 static bool engine_up = true, keyed, probe_release, radio_ready = true, compatible = true;
 static esp_err_t tune_error;

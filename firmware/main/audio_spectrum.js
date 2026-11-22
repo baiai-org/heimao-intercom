@@ -63,7 +63,8 @@
       });
     }
     const legacyHeaderBytes = 44;
-    const pcmHeaderBytes = 64;
+    const pcmHeaderBytesV2 = 64;
+    const pcmHeaderBytesV3 = 96;
     const maxSamples = 5120;
     const window = new Int16Array(fftSize);
     let fill = 0;
@@ -94,8 +95,10 @@
       if (buffer.byteLength < legacyHeaderBytes) throw new Error('format');
       const view = new DataView(buffer);
       const version = view.getUint32(0, true);
-      const extended = version === 0x02435041;
-      const headerBytes = extended ? pcmHeaderBytes : legacyHeaderBytes;
+      const currentProtocol = version === 0x03435041;
+      const extended = currentProtocol || version === 0x02435041;
+      const headerBytes = currentProtocol ? pcmHeaderBytesV3 :
+        extended ? pcmHeaderBytesV2 : legacyHeaderBytes;
       if ((!extended && version !== 0x01435041) || buffer.byteLength < headerBytes) throw new Error('format');
       const boot = view.getUint32(4, true);
       const generation = view.getUint32(8, true);
@@ -109,8 +112,15 @@
       const contention = view.getUint32(40, true);
       const segmentEnd = extended ? view.getUint32(44, true) : latest;
       const flags = extended ? view.getUint32(48, true) : 0;
+      const bridgeSession = currentProtocol ? view.getUint32(64, true) : 0;
+      const gapFirst = currentProtocol ? view.getUint32(68, true) : 0;
+      const gapEnd = currentProtocol ? view.getUint32(72, true) : 0;
+      const gapSamples = currentProtocol ? view.getUint32(76, true) : 0;
+      const gapReason = currentProtocol ? view.getUint32(80, true) : 0;
+      const bridgeDirection = currentProtocol ? view.getUint32(84, true) : 0;
       if (!generation || path > 16 || segmentEnd > latest ||
           count > maxSamples || first + count > segmentEnd || (count && !path) ||
+          (gapSamples && (gapEnd < gapFirst || gapEnd - gapFirst !== gapSamples)) ||
           buffer.byteLength !== headerBytes + count * 2) throw new Error('format');
 
       const reboot = current.boot !== boot;
@@ -148,13 +158,16 @@
       current.generation = generation;
       current.after = first + count;
       current.selection = null;
-      reply(current, output, {boot, generation, mask, path, clockAdjusted, gap: gap || !!(flags & 3),
-        missing: gap && first > previous ? first - previous : 0,
+      reply(current, output, {boot, generation, mask, path, clockAdjusted,
+        gap: gap || !!(flags & 2) || !!gapSamples,
+        missing: gapSamples || (gap && first > previous ? first - previous : 0),
         samples: count, rtt, fftMs, contention,
         dropped: extended ? view.getUint32(52, true) : 0,
         pauses: extended ? view.getUint32(56, true) : 0,
         renewals: extended ? view.getUint32(60, true) : 0,
         overrun: !!(flags & 1),
+        bridgeSession, bridgeDirection, bridgeActive: !!(flags & 8),
+        gapFirst, gapEnd, gapSamples, gapReason,
         sourceLag: count ? ((now - stamp) >>> 0) + (segmentEnd - first - count) / (sampleRate / 1000) : 0});
       return {mask, behind: latest - current.after};
     }
@@ -1004,13 +1017,15 @@
       ++stats.gaps;
       stats.missingSamples += data.missing;
       if (data.overrun) ++stats.overruns;
-      record('pcm-gap', {samples:data.missing, overrun:data.overrun});
+      record('pcm-gap', {samples:data.missing, overrun:data.overrun,
+        first:data.gapFirst, end:data.gapEnd, reason:data.gapReason});
     }
     if (data.samples) stats.samples += data.samples;
     if (streamProblem) { streamProblem = ''; updateProblem(); }
     if (data.boot !== undefined && !data.path) { candidate = null; return; }
     const key = mode === 'playback' ? 'playback/' + receiveTurn :
-      data.boot === undefined ? 'mic/' + micTurn : data.boot + '/' + data.path;
+      data.boot === undefined ? 'mic/' + micTurn :
+        data.boot + '/' + data.path + '/' + (data.bridgeActive ? data.bridgeSession : 0);
     const stream = key + '/' + (data.generation ?? data.epoch);
     const info = {key, path:data.path || 0, message:mode === 'playback' ? '浏览器收听' :
       data.boot === undefined ? '浏览器麦克风预览' : ''};
@@ -1019,8 +1034,9 @@
       if (candidate?.stream !== stream) candidate = {stream, samples:0, rows:[]};
       candidate.samples += data.samples || 0;
       candidate.rows.push(...rows);
+      const minimum = data.bridgeActive ? 2048 : 2560;
       if (!candidate.rows.length || (acceptedSource && data.boot !== undefined &&
-          Number(selection) !== data.path && candidate.samples < 2560)) return;
+          Number(selection) !== data.path && candidate.samples < minimum)) return;
       rows = candidate.rows;
       acceptedSource = key;
     }
