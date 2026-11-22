@@ -11,8 +11,7 @@
   const minimumDb = -78;
   const maximumDb = -16;
 
-  // The browser PTT preview analyses the actual outgoing microphone frames
-  // off the UI thread and avoids HTTP polling during that PTT session.
+  // Browser audio uses the playback or microphone clock. Only board sources poll.
   if (typeof document === 'undefined') {
     const bitCount = Math.log2(fftSize);
     const reverse = Uint16Array.from({ length: fftSize }, (_, index) => {
@@ -195,7 +194,7 @@
 
     self.onmessage = ({data}) => {
       if (data.type === 'pcm') {
-        if (session?.mode !== 'microphone' || session.epoch !== data.epoch) return;
+        if (!session || session.epoch !== data.epoch || session.mode === 'radio') return;
         const pcm = new Int16Array(data.buffer);
         if (session.after !== data.first) {
           fill = 0;
@@ -818,6 +817,11 @@
   let presentedSource = null;
   let candidate = null;
   let micTurn = 0;
+  let receiveTurn = 0;
+  let listening = false;
+  let playbackPreview = null;
+  let playbackUnderruns = null;
+  let playbackSound = false;
   let transition = '';
   let transitionStarted = 0;
   let holdStarted = null;
@@ -880,6 +884,10 @@
     }
     if (transition === '正在切换音源' && info?.key === acceptedSource &&
         row.at >= transitionStarted - rowMs) transition = '';
+    if (mode === 'playback') {
+      source(0, 0, playbackSound ? '浏览器收听' : '浏览器收听 · 暂无播放音频');
+      return;
+    }
     const idle = mode === 'radio' && !captureActive && !transition &&
       lastRow && now - lastRow.at > lead + 250;
     if (idle || (!lastRow && mode === 'radio' && !captureActive && radioKnown)) {
@@ -892,7 +900,7 @@
   }
 
   function advance(now, elapsed) {
-    gridTime = now - lead;
+    gridTime = now - (mode === 'playback' ? rowMs + 20 : lead);
     let target = gridTime;
     const expected = mode === 'microphone' || (mode === 'radio' && captureActive);
     const waiting = expected && lastRow && target - lastRow.at >= rowMs;
@@ -1001,9 +1009,11 @@
     if (data.samples) stats.samples += data.samples;
     if (streamProblem) { streamProblem = ''; updateProblem(); }
     if (data.boot !== undefined && !data.path) { candidate = null; return; }
-    const key = data.boot === undefined ? 'mic/' + micTurn : data.boot + '/' + data.path;
+    const key = mode === 'playback' ? 'playback/' + receiveTurn :
+      data.boot === undefined ? 'mic/' + micTurn : data.boot + '/' + data.path;
     const stream = key + '/' + (data.generation ?? data.epoch);
-    const info = {key, path:data.path || 0, message:data.boot === undefined ? '浏览器麦克风预览' : ''};
+    const info = {key, path:data.path || 0, message:mode === 'playback' ? '浏览器收听' :
+      data.boot === undefined ? '浏览器麦克风预览' : ''};
     let rows = data.rows;
     if (key !== acceptedSource) {
       if (candidate?.stream !== stream) candidate = {stream, samples:0, rows:[]};
@@ -1030,6 +1040,7 @@
       worker = new Worker('/audio-spectrum.js');
       worker.onmessage = received;
       worker.onerror = () => {
+        playbackPreview?.(false);
         worker.terminate();
         worker = null;
         watching = false;
@@ -1049,6 +1060,7 @@
 
   function stop() {
     clearTimeout(workerRetry);
+    playbackPreview?.(false);
     if (!watching) return;
     watching = false;
     worker?.postMessage({type:'stop', epoch:++epoch});
@@ -1068,11 +1080,41 @@
     if (!watching && ensureWorker()) {
       watching = true;
       worker.postMessage({type: mode, epoch: ++epoch, selection});
+      if (mode === 'playback') playbackPreview?.(true);
     }
     redraw();
   }
 
   window.ORLAudioSpectrum = {
+    listen(on, preview) {
+      if (listening === on) return;
+      stop();
+      listening = on;
+      playbackPreview = on ? preview : null;
+      playbackUnderruns = null;
+      playbackSound = false;
+      if (on) ++receiveTurn;
+      mode = on ? 'playback' : 'radio';
+      captureActive = radioKnown = false;
+      streamProblem = transition = '';
+      candidate = null;
+      sync();
+    },
+    playback(pcm, first, stamp, underruns) {
+      if (mode !== 'playback' || !watching || !visible()) return;
+      if (playbackUnderruns !== null && underruns > playbackUnderruns) {
+        record('playback-underrun', {sample:first, count:underruns - playbackUnderruns});
+      }
+      playbackUnderruns = underruns;
+      if (playbackSound !== !!pcm) {
+        playbackSound = !!pcm;
+        if (!pcm && transition === '正在切换音源') transition = '';
+        redraw(false);
+      }
+      if (!pcm) return;
+      const buffer = pcm.buffer;
+      worker.postMessage({type:'pcm', epoch, buffer, first, at:performance.timeOrigin + stamp}, [buffer]);
+    },
     microphone(pcm, first, stamp) {
       if (mode !== 'microphone' || !watching || !visible()) return;
       const buffer = pcm.buffer;
@@ -1098,9 +1140,11 @@
       transition = '正在确认松键';
       redraw();
       void Promise.resolve(confirm).then(ok => {
-        if (epoch !== token) return;
+        if (epoch !== token || mode !== 'releasing') return;
         if (!ok) { transition = '等待松键确认'; redraw(); return; }
-        mode = 'radio';
+        mode = listening ? 'playback' : 'radio';
+        playbackUnderruns = null;
+        playbackSound = false;
         captureActive = radioKnown = false;
         transition = '正在切换音源';
         transitionStarted = performance.now();

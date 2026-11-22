@@ -2787,11 +2787,12 @@ const SDR = {
   wire: 16000, maxFrame: 2048, player: 'none', frames: 0, peak: 0,
   ptt: false, keyed: false, keyPending: false, txEpoch: 0, rxRun: 0,
   micCtx: null, micStream: null, micSp: null, micPeak: 0, micFrames: 0,
-  tick: null, txQueue: [], txQueued: 0, txBusy: false, txDrop: 0,
+  tick: null, wsOpening: null, txQueue: [], txQueued: 0, txBusy: false, txDrop: 0,
   txCaptured: 0, txSent: 0, txConfirmed: 0, txConfirmedAt: -Infinity, txInFlight: 0,
   txReason: 'idle', txFlush: null, txDrainDeadline: 0, txRequest: null,
   stateDeadline: null, txDeadline: 0, txOpenedAt: 0,
   rxStats: {ms: 0, underruns: 0, dropped: 0}, httpMs: 0,
+  rxRequest: null, rxConfirmedAt: -Infinity, rxPreview: 0, rxPreviewId: 0,
   control: Promise.resolve(), session: Promise.resolve(), releasePending: Promise.resolve(true),
   txIdle: Promise.resolve(), keyId: 0, keyAck: null,
   sid: 0, activeTx: 0, txId: 0, stateRun: 0,
@@ -2834,6 +2835,7 @@ class SdrPlayback {
     this.prime = Math.round(wire * 0.90); this.reprime = Math.round(wire * 0.30);
     this.need = this.prime; this.primed = false; this.underruns = 0; this.dropped = 0;
     this.lp = sdrLowPass4(native);
+    this.native = native; this.preview = false;
   }
   clear() {
     this.w = this.r = this.n = this.pos = 0;
@@ -2852,12 +2854,12 @@ class SdrPlayback {
   render(out) {
     out.fill(0);
     if (!this.primed) {
-      if (this.n < this.need) return;
+      if (this.n < this.need) return 0;
       this.primed = true;
     }
     for (let i = 0; i < out.length; i++) {
       if (this.n < 3) {
-        this.primed = false; this.need = this.reprime; this.underruns++; break;
+        this.primed = false; this.need = this.reprime; this.underruns++; return i;
       }
       const cap = this.cap, r = this.r, f = this.pos;
       const p0 = this.ring[(r-1+cap)%cap], p1 = this.ring[r];
@@ -2869,6 +2871,32 @@ class SdrPlayback {
       while (this.pos >= 1 && this.n > 0) {
         this.pos--; this.r = (this.r+1)%cap; this.n--;
       }
+    }
+    return out.length;
+  }
+  setPreview(on) {
+    this.preview = on;
+    this.previewPcm = on ? new Int16Array(Math.round(this.wire * 0.04)) : null;
+    this.previewPhase = this.previewFirst = this.previewFill = this.previewSound = 0;
+    this.previewLast = 0;
+  }
+  previewOutput(out, valid, start, publish) {
+    if (!this.preview) return;
+    for (let i = 0; i < out.length; ++i) {
+      const x = out[i];
+      this.previewPhase += this.wire;
+      while (this.previewPhase >= this.native) {
+        this.previewPhase -= this.native;
+        const y = x + (this.previewLast - x) * this.previewPhase / this.wire;
+        this.previewPcm[this.previewFill++] = Math.max(-32768, Math.min(32767, Math.round(y * 32768)));
+        if (i < valid) ++this.previewSound;
+        if (this.previewFill === this.previewPcm.length) {
+          publish(this.previewPcm, this.previewFirst, start + (i + 1) / this.native, this.previewSound > 0);
+          this.previewFirst += this.previewFill;
+          this.previewFill = this.previewSound = 0;
+        }
+      }
+      this.previewLast = x;
     }
   }
   stats() {
@@ -2882,15 +2910,29 @@ function sdrRegisterAudio() {
   class RadioPlayer extends AudioWorkletProcessor {
     constructor(options) {
       super(); this.audio = new SdrPlayback(options.processorOptions.wire, sampleRate);
-      this.elapsed = 0;
+      this.elapsed = 0; this.previewId = 0; this.previewPending = false;
       this.port.onmessage = e => {
         if (e.data.type === 'push') this.audio.push(e.data.samples);
         if (e.data.type === 'clear') this.audio.clear();
+        if (e.data.type === 'preview') {
+          this.previewId = e.data.id; this.previewPending = false;
+          this.audio.setPreview(!!this.previewId);
+        }
+        if (e.data.type === 'previewAck' && e.data.id === this.previewId) this.previewPending = false;
+      };
+      this.publish = (pcm, first, stamp, sound) => {
+        if (this.previewPending) return;
+        this.previewPending = true;
+        const samples = sound ? pcm.slice() : null;
+        this.port.postMessage({type:'playback', id:this.previewId, samples, first, stamp,
+          underruns:this.audio.underruns}, samples ? [samples.buffer] : []);
       };
     }
     process(inputs, outputs) {
       const out = outputs[0][0];
-      this.audio.render(out); this.elapsed += out.length;
+      const valid = this.audio.render(out);
+      this.audio.previewOutput(out, valid, currentTime, this.publish);
+      this.elapsed += out.length;
       if (this.elapsed >= sampleRate) {
         this.elapsed -= sampleRate; this.port.postMessage(this.audio.stats());
       }
@@ -2997,11 +3039,13 @@ async function sdrRequest(path, options = {}, type = 'json', timeoutMs = 3000) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(path, {...options, cache: 'no-store', signal: controller.signal});
+    if (type === 'rx' && r.status === 410) return {closed: true};
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = type === 'pcm' ? await r.arrayBuffer() :
       (type === 'json' || type === 'state') ? await r.json() : await r.arrayBuffer();
     if (type === 'json' && data.ok === false) throw new Error(data.err || data.reason || '设备拒绝操作');
     SDR.httpMs = Math.round(performance.now() - start);
+    if (type === 'rx') return {pcm: data, sid: Number(r.headers?.get('X-ORL-RX-Session'))};
     if (type === 'tx') {
       const samples = r.headers?.get('X-ORL-TX-Samples');
       const raw = r.headers?.get('X-ORL-TX-State');
@@ -3166,23 +3210,31 @@ function sdrHttpStart() {
   sdrFinishAck(new Error('音频连接已切换到 HTTP'));
   sdrPttUp();
   if (SDR.tick) { clearInterval(SDR.tick); SDR.tick = null; }
+  clearTimeout(SDR.wsOpening); SDR.wsOpening = null;
   if (ws) { try { ws.close(); } catch (e) {} }
   sdrBadge('HTTP 兼容通道 · 收听中', 'live'); sdrReport('http');
   const run = ++SDR.rxRun;
+  const sid = SDR.sid;
   const pump = async () => {
     if (!SDR.on || !SDR.http || SDR.rxRun !== run) return;
     let delay = 50;
     if (!SDR.ptt) {
       const start = performance.now();
+      const request = new AbortController(); SDR.rxRequest = request;
       try {
-        const b = await sdrRequest('/api/sdr_rx?sid=' + SDR.sid + '&t=' + Date.now(), {}, 'pcm');
+        const reply = await sdrRequest('/api/sdr_rx?sid=' + sid + '&compact=1',
+          {signal:request.signal}, 'rx', 1000);
         if (!SDR.on || !SDR.http || SDR.rxRun !== run) return;
+        if (reply.closed) { sdrApplyState({on:false}, sid); return; }
+        const b = reply.pcm;
         if (b.byteLength % 2) throw new Error('音频帧长度无效');
-        if (b.byteLength) sdrRxPush(new Int16Array(b));
+        if (reply.sid === sid) SDR.rxConfirmedAt = performance.now();
+        if (b.byteLength && !SDR.ptt) sdrRxPush(new Int16Array(b));
         /* A full response means backlog: fetch again immediately. Otherwise
          * target a 50 ms period INCLUDING the request, never request + 100 ms. */
         delay = b.byteLength/2 >= SDR.wire*0.14 ? 0 : Math.max(0, 50-(performance.now()-start));
-      } catch (e) { delay = 200; }
+      } catch (e) { delay = 60; }
+      finally { if (SDR.rxRequest === request) SDR.rxRequest = null; }
     }
     if (SDR.on && SDR.http && SDR.rxRun === run) setTimeout(pump, delay);
   };
@@ -3192,15 +3244,18 @@ function sdrConnect() {
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
     '/ws/sdr?sid=' + SDR.sid + '&txack=1');
   SDR.ws = ws; ws.binaryType = 'arraybuffer';
+  SDR.wsOpening = setTimeout(() => { if (SDR.ws === ws && ws.readyState === 0) sdrHttpStart(); }, 1800);
+  const tick = () => {
+    if (SDR.ws !== ws || ws.readyState !== 1 || SDR.keyed) return;
+    if (ws.bufferedAmount < SDR.wire/2) {
+      try { ws.send(new Uint8Array([0])); } catch (e) { ws.close(); }
+    }
+  };
   ws.onopen = () => {
     if (SDR.ws !== ws || !SDR.on) return;
+    clearTimeout(SDR.wsOpening); SDR.wsOpening = null;
     sdrBadge('已连接 · 收听中', 'live'); sdrReport('open');
-    SDR.tick = setInterval(() => {
-      if (SDR.ws !== ws || ws.readyState !== 1 || SDR.keyed) return;
-      if (ws.bufferedAmount < SDR.wire/2) {
-        try { ws.send(new Uint8Array([0])); } catch (e) { ws.close(); }
-      }
-    }, 50);
+    SDR.tick = setInterval(tick, 50);
   };
   ws.onclose = e => {
     if (SDR.ws !== ws || !SDR.on) return;
@@ -3252,14 +3307,25 @@ function sdrRxStart() {
       const node = new AudioWorkletNode(ctx, 'radio-player', {
         numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
         processorOptions: {wire: SDR.wire}});
-      node.port.onmessage = e => { if (SDR.worklet === node) SDR.rxStats = e.data; };
+      node.port.onmessage = ({data}) => {
+        if (SDR.worklet !== node) return;
+        if (data.type === 'playback') {
+          if (data.id === SDR.rxPreview) sdrRxPreview(data.samples, data.first, data.stamp, data.underruns);
+          node.port.postMessage({type:'previewAck', id:data.id});
+        } else SDR.rxStats = data;
+      };
       node.connect(SDR.rxGain); SDR.worklet = node; SDR.player = 'worklet';
     } catch (e) {
       if (SDR.ctx !== ctx || ctx.state === 'closed') return;
       /* HTTP pages may listen without microphone permission or a secure context. */
       const sp = ctx.createScriptProcessor(1024, 1, 1), audio = new SdrPlayback(SDR.wire, ctx.sampleRate);
+      const preview = (pcm, first, stamp, sound) => sdrRxPreview(sound ? pcm.slice() : null,
+        first, stamp, audio.underruns);
       sp.onaudioprocess = event => {
-        audio.render(event.outputBuffer.getChannelData(0)); SDR.rxStats = audio.stats();
+        const out = event.outputBuffer.getChannelData(0);
+        const valid = audio.render(out);
+        audio.previewOutput(out, valid, event.playbackTime, preview);
+        SDR.rxStats = audio.stats();
       };
       const quiet = ctx.createConstantSource(); quiet.offset.value = 0;
       quiet.connect(sp); quiet.start(); sp.connect(SDR.rxGain);
@@ -3268,6 +3334,17 @@ function sdrRxStart() {
   })();
   if (ctx.state === 'suspended') ctx.resume().catch(() => {});
   return SDR.audioReady;
+}
+function sdrRxPreview(pcm, first, stamp, underruns) {
+  if (!SDR.on || !SDR.rxPreview || !SDR.ctx) return;
+  const at = performance.now() + (stamp - SDR.ctx.currentTime) * 1000;
+  sdrSpectrum('playback', pcm, first, at, underruns);
+}
+function sdrRxPreviewOn(on) {
+  if (!!SDR.rxPreview === on) return;
+  SDR.rxPreview = on ? ++SDR.rxPreviewId : 0;
+  if (SDR.worklet) SDR.worklet.port.postMessage({type:'preview', id:SDR.rxPreview});
+  if (SDR.fallback) SDR.fallback.setPreview(on);
 }
 function sdrRxPush(pcm) {
   SDR.frames++;
@@ -3288,6 +3365,8 @@ async function sdrToggle() {
     await Promise.all([sdrSession(true), ready]);
     SDR.on = true; SDR.http = false; SDR.frames = SDR.peak = SDR.txDrop = 0;
     SDR.rxStats = {ms: 0, underruns: 0, dropped: 0};
+    SDR.rxConfirmedAt = -Infinity;
+    sdrSpectrum('listen', true, sdrRxPreviewOn);
     $('sdrBtn').textContent = '关闭网络通联'; $('sdrPtt').disabled = false;
     sdrBadge('连接中…'); sdrMicList(); sdrConnect(); sdrStateStart();
   } catch (e) { log('网络通联开启失败: ' + e, 'err'); await sdrStop(); }
@@ -3348,6 +3427,10 @@ function sdrStateStart() {
       setTimeout(poll, 500);
       return;
     }
+    if ((SDR.http && performance.now() - SDR.rxConfirmedAt < 1500) || SDR.ws?.readyState === 0) {
+      setTimeout(poll, 500);
+      return;
+    }
     const epoch = SDR.txEpoch;
     const activePoll = () => SDR.on && run === SDR.stateRun && sid === SDR.sid;
     const activeTx = () => activePoll() && SDR.ptt && epoch === SDR.txEpoch;
@@ -3372,6 +3455,10 @@ function sdrStateStart() {
 }
 function sdrStop(notify = true) {
   sdrPttUp(notify); SDR.on = false; SDR.http = false; SDR.rxRun++; SDR.stateRun++;
+  SDR.rxRequest?.abort(); SDR.rxRequest = null;
+  sdrSpectrum('listen', false);
+  sdrRxPreviewOn(false);
+  clearTimeout(SDR.wsOpening); SDR.wsOpening = null;
   if (SDR.tick) { clearInterval(SDR.tick); SDR.tick = null; }
   const ws = SDR.ws; SDR.ws = null;
   if (ws) { try { ws.close(); } catch (e) {} }

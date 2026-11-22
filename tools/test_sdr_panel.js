@@ -150,6 +150,29 @@ async function audioTests() {
     player.port.onmessage({data: {type: 'push', samples: new Int16Array(16000).fill(10000)}});
     const output = new Float32Array(128); player.process([], [[output]]);
     assert(output.some(v => v > 0.1));
+    player.port.onmessage({data: {type:'preview', id:9}});
+    let frame = 0;
+    for (; frame < 2 * rate; frame += 128) {
+      worker.currentTime = frame / rate;
+      player.process([], [[output]]);
+    }
+    const previews = () => messages.filter(msg => msg.type === 'playback');
+    assert.equal(previews().length, 1, 'the worklet must not queue previews while the UI is blocked');
+    assert.equal(previews()[0].first, 0);
+    assert.equal(previews()[0].samples.length, 640);
+    assert(previews()[0].samples.slice(300).every(v => Math.abs(v - 10000) <= 1));
+    player.port.onmessage({data: {type:'previewAck', id:9}});
+    for (const end = frame + rate * 0.08; frame < end; frame += 128) {
+      worker.currentTime = frame / rate;
+      player.process([], [[output]]);
+    }
+    assert.equal(previews().length, 2);
+    assert(previews()[1].first >= 32000, 'the preview clock continues while audio is starved');
+    assert.equal(previews()[1].samples, null);
+    assert.equal(previews()[1].underruns, 1);
+    player.port.onmessage({data: {type:'preview', id:0}});
+    player.process([], [[output]]);
+    assert.equal(player.audio.previewPcm, null);
   }
   const p = new r.SdrPlayback(16000, 48000);
   const out = new Float32Array(128);

@@ -2965,6 +2965,8 @@ static esp_err_t h_sdr_report(httpd_req_t *req)
  * Sized for the larger consumer (the HTTP poller: 8 packets = 232 ms).
  */
 #define SDR_BUF_PKTS 8
+#define SDR_RX_HEADER_ROOM 192
+#define SDR_BUF_BYTES (SDR_RX_HEADER_ROOM + SDR_WS_PKT * SDR_BUF_PKTS * 2 * sizeof(int16_t))
 static int16_t *s_sdr_pcm; /* allocated in PSRAM under s_sdr_buf_mux */
 static SemaphoreHandle_t s_sdr_buf_mux;
 
@@ -2982,7 +2984,7 @@ static int sdr_buf_lock(void)
      * wait longer than that before giving up on this tick. */
     if (xSemaphoreTake(s_sdr_buf_mux, pdMS_TO_TICKS(7000)) != pdTRUE) { return SDR_LOCK_FAIL; }
     if (!s_sdr_pcm) {
-        s_sdr_pcm = heap_caps_malloc(SDR_WS_PKT * SDR_BUF_PKTS * 2 * sizeof(*s_sdr_pcm),
+        s_sdr_pcm = heap_caps_malloc(SDR_BUF_BYTES,
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (!s_sdr_pcm) { xSemaphoreGive(s_sdr_buf_mux); return SDR_LOCK_FAIL; }
@@ -3002,7 +3004,7 @@ size_t net_http_cleanup_idle(void)
     size_t released = 0;
     if (!sdr_enabled() && s_sdr_pcm) {
         heap_caps_free(s_sdr_pcm); s_sdr_pcm = NULL;
-        released = SDR_WS_PKT * SDR_BUF_PKTS * 2 * sizeof(int16_t);
+        released = SDR_BUF_BYTES;
     }
     xSemaphoreGive(s_sdr_buf_mux); return released;
 }
@@ -3269,6 +3271,17 @@ static esp_err_t h_sdr_tx_trace(httpd_req_t *req)
 }
 #endif
 
+static esp_err_t sdr_http_send_all(httpd_req_t *req, const char *bytes, size_t len)
+{
+    while (len) {
+        const int n = httpd_send(req, bytes, len);
+        if (n <= 0) { return ESP_FAIL; }
+        bytes += n;
+        len -= n;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t sdr_http_ack_reply(httpd_req_t *req, const char *count, const char *state,
                                     const char *phases, bool compact)
 {
@@ -3280,12 +3293,7 @@ static esp_err_t sdr_http_ack_reply(httpd_req_t *req, const char *count, const c
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\nCache-Control: no-store\r\n"
             "X-ORL-TX-Samples: %s\r\nX-ORL-TX-State: %s\r\n\r\n", count, state);
         if (len < 0 || (size_t)len >= sizeof(response)) { return ESP_FAIL; }
-        for (int sent = 0; sent < len;) {
-            const int n = httpd_send(req, response + sent, len - sent);
-            if (n <= 0) { return ESP_FAIL; }
-            sent += n;
-        }
-        return ESP_OK;
+        return sdr_http_send_all(req, response, len);
     }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (count[0]) { httpd_resp_set_hdr(req, "X-ORL-TX-Samples", count); }
@@ -3404,44 +3412,62 @@ finish:
 
 #define SDR_HTTP_RX_PKTS 16     /* 320 ms catches up over high-RTT HTTP */
 
+static esp_err_t sdr_http_rx_reply(httpd_req_t *req, char *pcm, size_t bytes, uint32_t sid)
+{
+    if (!sid) {
+        httpd_resp_set_type(req, "application/octet-stream");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_send(req, pcm, bytes);
+    }
+    char header[SDR_RX_HEADER_ROOM];
+    const int len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %zu\r\n"
+        "Cache-Control: no-store\r\nX-ORL-RX-Session: %" PRIu32 "\r\n\r\n", bytes, sid);
+    if (len < 0 || (size_t)len >= sizeof(header)) { return ESP_FAIL; }
+    if (!bytes) { return sdr_http_send_all(req, header, len); }
+    /* Coalesce the header and PCM into one write via the existing TLS transport. */
+    memcpy(pcm - len, header, len);
+    return sdr_http_send_all(req, pcm - len, (size_t)len + bytes);
+}
+
 static esp_err_t h_sdr_rx(httpd_req_t *req)
 {
-    if (!sdr_session_valid(sdr_query_id(req, "sid"))) { return ESP_FAIL; }
+    const uint32_t sid = sdr_query_id(req, "sid");
+    const bool compact = query_int(req, "compact", 0, NULL) == 1;
+    if (!sdr_session_valid(sid)) {
+        if (compact) {
+            httpd_resp_set_status(req, "410 Gone");
+            return httpd_resp_send(req, NULL, 0);
+        }
+        return ESP_FAIL;
+    }
+    sdr_tcp_low_latency(httpd_req_to_sockfd(req));
+    const uint32_t reply_sid = compact ? sid : 0;
     /* A WebSocket listener owns the stream: the audio comes from one ring, so a
      * second consumer would split every sentence.  Answer empty instead of
      * letting a panel that fell back to HTTP silently steal the audio. */
     if (sdr_ws_client_attached()) {
-        httpd_resp_set_type(req, "application/octet-stream");
-        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-        return httpd_resp_send(req, NULL, 0);
+        return sdr_http_rx_reply(req, NULL, 0, reply_sid);
     }
-    /* Shared with the WebSocket handler -- the httpd task stack is 10 kB and a
-     * 3.7 KB + 7.4 KB pair would not fit on it anyway.  The poller's 8 packets
-     * are what the shared buffer is sized for. */
+    /* Share the PSRAM payload buffer with the WebSocket handler. */
     _Static_assert(SDR_HTTP_RX_PKTS <= SDR_BUF_PKTS * 2, "SDR buffer too small");
     const int lock = sdr_buf_lock();
     if (lock == SDR_LOCK_FAIL) {
         /* Someone else holds the buffer; answer empty so the poller retries. */
-        httpd_resp_set_type(req, "application/octet-stream");
-        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-        return httpd_resp_send(req, NULL, 0);
+        return sdr_http_rx_reply(req, NULL, 0, reply_sid);
     }
-    int16_t *pcm = s_sdr_pcm;
-    uint8_t *out = (uint8_t *)s_sdr_pcm;
+    uint8_t *out = (uint8_t *)s_sdr_pcm + SDR_RX_HEADER_ROOM;
+    int16_t *pcm = (int16_t *)out;
     size_t want = SDR_WS_PKT * SDR_HTTP_RX_PKTS;
     const size_t n = sdr_rx_take(pcm, want);
     for (size_t i = 0; i < n; ++i) {
         out[2 * i]     = (uint8_t)(pcm[i] & 0xFF);
         out[2 * i + 1] = (uint8_t)((uint16_t)pcm[i] >> 8);
     }
-    if (n > 0) {
-        sdr_note_rx_sent(n);
-    }
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     /* The response is sent FROM `out`, so the buffer must stay locked across it. */
-    const esp_err_t err = httpd_resp_send(req, (const char *)out, n * 2);
+    const esp_err_t err = sdr_http_rx_reply(req, (char *)out, n * 2, reply_sid);
     sdr_buf_unlock(lock);
+    if (err == ESP_OK && n) { sdr_note_rx_sent(n); }
     return err;
 }
 
